@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The control for every guarantee this monitor makes.
+"""The control for every guarantee this module makes -- monitor and capture.
 
 A test that has never been observed failing is not evidence of anything. This
 runs the suite once intact, where it must pass, and once for each break below,
@@ -95,6 +95,65 @@ when nobody is looking.
   doc_values             the document publishes what the code contradicts:
                          `contract_version: 99` and a state outside the enum. The
                          shape check passes both, because it discards every leaf.
+
+THE CAPTURE PROCESS. Same rule, same direction: every break below fails in the
+reassuring one -- a store that keeps less than it says, a camera that is dead
+and quiet about it, an identity reaching a disk that must not hold one.
+
+  a_post_in_the_camera   the camera client grows a POST. The capture process is
+                         a READER of a camera and of a lane's read contract, and
+                         a new route to a barrier is the boundary every outside
+                         reviewer of this project has named.
+  capture_imports_the_lane
+                         it imports `lane_controller` instead of speaking the
+                         contract. The quickest way to learn that a lane vended
+                         is to import the lane, which is why this one is here.
+  an_opener_of_its_own   the camera builds its own opener instead of taking one
+                         from `redirects`. That opener follows a `Location`, and
+                         the request it would follow one on is the RETRY -- the
+                         one carrying the camera credential.
+  credential_in_a_snapshot_url
+                         a camera URL carrying `user:password@` is accepted, and
+                         then published on `GET /v1/capture`.
+  event_detail_is_copied the lane event's `detail` is carried onto the record. It
+                         is where a lane puts what it knows, and `entry_pending`
+                         really does put `plate_region` there.
+  entry_pending_triggers a second trigger that photographs the same vehicle again
+                         and reads the detail that carries an attribute of it.
+  no_atomic_rename       the image is written straight to its final name. A crash
+                         then leaves a record with a name and a truncated image,
+                         which looks complete.
+  index_from_memory      the index is kept across a restart instead of rebuilt by
+                         reading the directory. A memory, not a check.
+  orphans_are_kept       half a record is left on the disk and not reported. It is
+                         a photograph no retention rule can reach, because the
+                         rule reads the sidecar.
+  purge_ignores_age      the retention window is not applied. The store keeps
+                         personal data for as long as the disk allows.
+  purge_ignores_size     the size cap is not applied. The store eats its disk and
+                         `store_over_budget` never fires.
+  over_budget_is_silent  a write that will not fit is dropped rather than refused
+                         and named. A recording missing exactly the busiest hour.
+  retention_default_typed
+                         the document's retention default stops being the
+                         constant's. Two copies, and the hand-written one lies.
+  a_size_in_the_document a disk figure appears in a payload example. This round
+                         publishes none: nothing here has measured one, and a
+                         number in a document looks measured.
+  frozen_on_any_change   `camera_feed_frozen` fires on snapshots that differ. A
+                         warning that cries wolf is ignored, and then the real
+                         one is ignored too.
+  a_dead_camera_is_ok    a camera that did not answer reads `ok`. Gokhan's
+                         "camera disconnected is a malfunction", deleted.
+  images_need_no_token   the image route is served without the credential the
+                         other routes require. The whole store, readable by
+                         anyone who can enumerate a record id.
+  an_id_becomes_a_path   the image route joins the requested id onto the
+                         directory instead of looking it up in the index.
+  capture_subject_is_dropped
+                         the monitor files a capture's codes under the target's
+                         name instead of the camera's. "A camera is dead" without
+                         "which camera", at a site with four of them.
 """
 
 from __future__ import annotations
@@ -313,10 +372,163 @@ BREAKS = [
         # `MonitorCode` itself also empties `MONITOR_SOURCES` for it, and a
         # control that goes red for two reasons has measured neither.
         "file": "tests/test_monitor_contract.py",
-        "from": 'PUBLISHED_SETS = {"monitor_codes": lambda: [code.value for code in MonitorCode]}',
-        "to": 'PUBLISHED_SETS = {\n'
-        '    "monitor_codes": lambda: [code.value for code in MonitorCode] + ["hatch_left_open"]\n'
-        "}",
+        "from": '    "monitor_codes": lambda: [code.value for code in MonitorCode],',
+        "to": '    "monitor_codes": lambda: [code.value for code in MonitorCode] '
+        '+ ["hatch_left_open"],',
+    },
+    # -- the capture process ------------------------------------------------
+    {
+        "name": "a_post_in_the_camera",
+        "why": "the camera client grows a POST",
+        "file": "src/gate_agent/camera.py",
+        "from": '        request = urllib.request.Request(self.snapshot_url, method="GET")',
+        "to": '        request = urllib.request.Request(self.snapshot_url, data=b"{}", '
+        'method="POST")',
+    },
+    {
+        "name": "capture_imports_the_lane",
+        "why": "the capture process imports the lane instead of speaking its contract",
+        "file": "src/gate_agent/capture.py",
+        "from": "from .camera import CameraRefusedUs, CameraUnreachable, SnapshotCamera",
+        "to": "from lane_controller.contract import MalfunctionCode as _Unused  # noqa: F401\n"
+        "from .camera import CameraRefusedUs, CameraUnreachable, SnapshotCamera",
+    },
+    {
+        "name": "an_opener_of_its_own",
+        "why": "the camera builds an opener that follows a redirect",
+        "file": "src/gate_agent/camera.py",
+        "from": "        self._opener = build_opener(*handlers)",
+        "to": "        self._opener = urllib.request.build_opener(*handlers)",
+    },
+    {
+        "name": "credential_in_a_snapshot_url",
+        "why": "a camera URL carrying a credential is accepted and published",
+        "file": "src/gate_agent/config.py",
+        "from": '        _refuse_userinfo(url, f"[cameras.{camera_id}].snapshot_url")',
+        "to": "        pass",
+    },
+    {
+        "name": "event_detail_is_copied",
+        "why": "a lane event's detail is carried onto the record",
+        "file": "src/gate_agent/store.py",
+        "from": '    "trigger_to_capture_ms",\n    "bytes",\n)',
+        "to": '    "trigger_to_capture_ms",\n    "bytes",\n    "plate",\n)',
+    },
+    {
+        "name": "entry_pending_triggers",
+        "why": "`entry_pending` becomes a trigger",
+        "file": "src/gate_agent/capture.py",
+        "from": '    "vended": CaptureReason.LANE_VEND,\n}',
+        "to": '    "vended": CaptureReason.LANE_VEND,\n'
+        '    "entry_pending": CaptureReason.LANE_VEND,\n}',
+    },
+    {
+        "name": "no_atomic_rename",
+        "why": "the image is written straight to its final name",
+        "file": "src/gate_agent/store.py",
+        "from": "            _write_atomic_body(image_temp, image)",
+        "to": "            _write_atomic_body(record.image_path, image)\n"
+        "            _write_atomic_body(image_temp, image)",
+    },
+    {
+        "name": "index_from_memory",
+        "why": "the index is a memory rather than a read of the directory",
+        "file": "src/gate_agent/store.py",
+        "from": "        self.probe()\n        self.rebuild()",
+        "to": "        self.probe()",
+    },
+    {
+        "name": "orphans_are_kept",
+        "why": "half a record is kept and not reported",
+        "file": "src/gate_agent/store.py",
+        "from": "                incomplete.append(record_id)",
+        "to": "                pass",
+    },
+    {
+        "name": "purge_ignores_age",
+        "why": "the retention window is not applied",
+        "file": "src/gate_agent/store.py",
+        "from": "            if _at(record.captured_at) < cutoff:",
+        "to": "            if False:",
+    },
+    {
+        "name": "purge_ignores_size",
+        "why": "the size cap is not applied",
+        "file": "src/gate_agent/store.py",
+        "from": "        while self._records and self.bytes_used() + headroom > self.max_bytes:",
+        "to": "        while False:",
+    },
+    {
+        "name": "over_budget_is_silent",
+        "why": "a write that will not fit is dropped rather than refused and named",
+        "file": "src/gate_agent/capture.py",
+        "from": "        except StoreOverBudget as exc:\n"
+        '            log.error("%s", exc)\n'
+        "            self._code(CaptureCode.STORE_OVER_BUDGET, STORE, HealthState.ACTIVE)",
+        "to": "        except StoreOverBudget:\n"
+        "            self._code(CaptureCode.STORE_OVER_BUDGET, STORE, HealthState.OK)",
+    },
+    {
+        "name": "retention_default_typed",
+        "why": "the document's retention default stops being the constant's",
+        "file": "src/gate_agent/config.py",
+        "from": "DEFAULT_RETENTION_DAYS = 30",
+        "to": "DEFAULT_RETENTION_DAYS = 14",
+    },
+    {
+        "name": "a_size_in_the_document",
+        "why": "a disk figure appears in a payload example",
+        "file": "tests/test_capture_contract.py",
+        "from": "    doc = doc_payloads()\n    checked = []",
+        "to": "    doc = doc_payloads()\n"
+        "    doc['capture_health']['store']['bytes_used'] = 21474836480\n"
+        "    checked = []",
+    },
+    {
+        "name": "frozen_on_any_change",
+        "why": "`camera_feed_frozen` fires on snapshots that differ",
+        "file": "src/gate_agent/capture.py",
+        "from": "            else (HealthState.ACTIVE if previous == digest else HealthState.OK),",
+        "to": "            else HealthState.ACTIVE,",
+    },
+    {
+        "name": "a_dead_camera_is_ok",
+        "why": "a camera that did not answer reads `ok`",
+        "file": "src/gate_agent/capture.py",
+        "from": "            self._code(CaptureCode.CAMERA_UNREACHABLE, camera_id, "
+        "HealthState.ACTIVE)",
+        "to": "            self._code(CaptureCode.CAMERA_UNREACHABLE, camera_id, HealthState.OK)",
+    },
+    {
+        "name": "images_need_no_token",
+        "why": "the image route is served without the credential the others need",
+        "file": "src/gate_agent/capture_service.py",
+        "from": "        url = urlparse(self.path)\n"
+        "        if not self._authorised():\n"
+        "            return self._unauthorised()",
+        "to": "        url = urlparse(self.path)\n"
+        "        if not self._authorised() and not url.path.startswith(IMAGES_PREFIX):\n"
+        "            return self._unauthorised()",
+    },
+    {
+        "name": "an_id_becomes_a_path",
+        "why": "the image route joins a requested id onto the directory",
+        "file": "src/gate_agent/capture.py",
+        "from": "        record = self.store.get(record_id)\n        if record is None:\n"
+        "            return None",
+        "to": "        record = self.store.get(record_id)\n        if record is None:\n"
+        "            try:\n"
+        "                return (self.store.directory / (record_id + '.jpg')).read_bytes()\n"
+        "            except OSError:\n"
+        "                return None",
+    },
+    {
+        "name": "capture_subject_is_dropped",
+        "why": "the monitor files a capture's codes under the target's name",
+        "file": "src/gate_agent/monitor.py",
+        "from": "            subject=str(subject) if isinstance(subject, str) and subject "
+        "else target,",
+        "to": "            subject=target,",
     },
     {
         "name": "doc_values",
@@ -406,8 +618,8 @@ for brk in BREAKS:
 
 if failures:
     print(
-        f"\n{failures} control(s) failed. Do not trust this monitor's guarantees.",
+        f"\n{failures} control(s) failed. Do not trust this module's guarantees.",
         file=sys.stderr,
     )
     sys.exit(1)
-print("\nall controls OK — the suite fails on every property this monitor exists to have.")
+print("\nall controls OK — the suite fails on every property these processes exist to have.")

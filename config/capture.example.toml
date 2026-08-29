@@ -1,0 +1,98 @@
+# The standard installation: one lane, one camera on it, and a disk to keep the
+# pictures on. Copy it and answer the two questions nothing here can answer for
+# you — where the store goes, and how big it may get.
+#
+# **AS SHIPPED, THIS FILE IS REFUSED AT STARTUP**, and that is deliberate:
+# `[capture] max_bytes` is commented out below. It has no default and there is
+# no measurement in this package to draw one from, so the process says so and
+# stops rather than inventing a disk budget for your site.
+
+[capture]
+id = "capture-1"
+site_id = "site-1"
+
+# DECLARED, no default. This is where this site's photographs of cars are kept,
+# and a default would put personal data somewhere nobody named. Relative paths
+# are resolved against THIS file.
+#
+# It is NOT created for you. A path that is not there is a typo or a disk that
+# did not mount, and creating it would put your captures on the root filesystem
+# of the box the lane is running on. It is also checked by writing a byte and
+# deleting it, because the permission bits answer for the wrong thing on a
+# read-only mount and on a full disk.
+directory = "captures"
+
+# DECLARED, no default, and the process refuses to start without it. Nothing in
+# this package has ever seen a capture from any of the cameras it is written
+# for, so a number here would be invented and would look measured. Write what
+# this store's disk can spare, then watch `projected_bytes_per_day` on
+# `GET /v1/capture/health` — that figure is a read of YOUR disk, and it is the
+# only honest source for this number.
+#
+# When it is too small you are told: `store_over_budget` on the health route,
+# and `purged_by_size` climbing.
+# max_bytes = 0
+
+# How often each camera is photographed when nothing has happened. A SETTING AND
+# AN ASSUMPTION, with a published default of 60 seconds — Gokhan's spec, "every
+# minute". Omit it and the default applies.
+interval_seconds = 60
+
+# How long a capture is kept before it is DELETED. A SETTING with a published
+# default of 30 days and bounds of 1 to 3650, which are the same window and the
+# same bounds as this estate's identity retention: a stored photograph of a car
+# at a barrier is personal data in most places this installs, so it gets the
+# same answer rather than a second one.
+#
+# The purge deletes. There is no redaction here and nothing to redact: there is
+# no foreign key and no money record, and the image IS the datum.
+retention_days = 30
+
+# --- the cameras ------------------------------------------------------------
+#
+# At least one is required. There is no default camera anywhere in this module.
+#
+# ONE kind of camera is supported this version: an HTTP JPEG snapshot — a GET of
+# a URL that answers image/jpeg, authenticated with standard HTTP auth (Basic or
+# Digest, whichever the camera asks for). No RTSP: reading a stream needs a
+# decoder and this package has no dependencies at all.
+#
+# A CAMERA WHOSE ONLY DOCUMENTED SNAPSHOT ROUTE TAKES THE PASSWORD AS A QUERY
+# PARAMETER IS NOT SUPPORTED. `docs/CONTRACT.md` names which of the reference
+# cameras that is, and why. A URL carrying `user:password@` is refused here at
+# startup, by name.
+
+[cameras.front]
+# The camera id becomes part of the name of every file this camera's captures
+# are stored under, so it may hold letters, digits, `_` and `-` only.
+snapshot_url = "http://192.0.2.10/axis-cgi/jpg/image.cgi"
+# A FILE holding `user:password` on its first line. There is no key here that
+# takes a credential as a value: one in this file is one in every backup of it
+# and in everything anyone ever pastes it into.
+auth_file = "/etc/openparking/front-camera.auth"
+# How long this camera has to answer one snapshot. A SETTING AND AN ASSUMPTION,
+# published default 10 seconds.
+timeout_seconds = 10
+
+# --- the lane, if there is one ----------------------------------------------
+#
+# OPTIONAL. With no lane declared this process takes interval captures only and
+# says so on the line it prints when it starts. That is STANDALONE, and it is a
+# mode rather than a smaller product: a garage with a camera and no gate is a
+# customer of this process.
+#
+# With a lane declared, this process holds a cursor on GET /v1/lane/events and
+# takes one snapshot per camera on every `frames_captured` and every `vended`.
+# It reads that lane and writes nothing to it — the lane does not know this
+# process exists, and it does not have to.
+
+[targets.lane]
+url = "http://127.0.0.1:8090"
+# How often the lane's events are read. A SETTING AND AN ASSUMPTION, published
+# default 30 seconds — and the delay it costs is not a number in a document: it
+# is `trigger_to_capture_ms`, published on every record this lane triggers.
+poll_seconds = 30
+timeout_seconds = 10
+# Only when that lane is bound off loopback and therefore demands a credential.
+# A FILE.
+# token_file = "/etc/openparking/lane-read.token"

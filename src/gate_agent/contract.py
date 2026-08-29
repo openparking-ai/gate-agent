@@ -67,6 +67,11 @@ class TargetKind(StrEnum):
     IDENTITY_SERVICE = "identity_service"
     #: An Open Parking AI platform, read through its operator surface.
     PLATFORM = "platform"
+    #: A capture process implementing the capture half of THIS contract. It is
+    #: the same shape as a lane's health surface on purpose -- one reader, one
+    #: passthrough rule -- and it is how `camera_unreachable` gets from a camera
+    #: nobody can reach to a human who can go and look at it.
+    CAPTURE = "capture"
 
 
 class SinkKind(StrEnum):
@@ -103,6 +108,7 @@ class MonitorCode(StrEnum):
     LANE_UNREACHABLE = "lane_unreachable"
     IDENTITY_SERVICE_UNREACHABLE = "identity_service_unreachable"
     PLATFORM_UNREACHABLE = "platform_unreachable"
+    CAPTURE_UNREACHABLE = "capture_unreachable"
     #: The target ANSWERED, and what it answered was no -- a 3xx or a 4xx. It
     #: is not down: it is up, it received the request, and it declined it, and
     #: the `status` on the entry says which decline. A dead credential (401), a
@@ -114,6 +120,7 @@ class MonitorCode(StrEnum):
     LANE_REFUSED_US = "lane_refused_us"
     IDENTITY_SERVICE_REFUSED_US = "identity_service_refused_us"
     PLATFORM_REFUSED_US = "platform_refused_us"
+    CAPTURE_REFUSED_US = "capture_refused_us"
     #: A target answered with a contract version this build does not know. Its
     #: codes STOP being passed through while this holds: half-understanding a
     #: payload is worse than admitting you cannot read it.
@@ -186,9 +193,11 @@ MONITOR_SOURCES: dict[MonitorCode, Source] = {
     MonitorCode.LANE_UNREACHABLE: Source.MEASURED,
     MonitorCode.IDENTITY_SERVICE_UNREACHABLE: Source.MEASURED,
     MonitorCode.PLATFORM_UNREACHABLE: Source.MEASURED,
+    MonitorCode.CAPTURE_UNREACHABLE: Source.MEASURED,
     MonitorCode.LANE_REFUSED_US: Source.MEASURED,
     MonitorCode.IDENTITY_SERVICE_REFUSED_US: Source.MEASURED,
     MonitorCode.PLATFORM_REFUSED_US: Source.MEASURED,
+    MonitorCode.CAPTURE_REFUSED_US: Source.MEASURED,
     MonitorCode.TARGET_CONTRACT_UNSUPPORTED: Source.MEASURED,
     MonitorCode.SINK_DELIVERY_FAILED: Source.MEASURED,
     MonitorCode.LANE_GONE_QUIET: Source.MEASURED,
@@ -201,6 +210,7 @@ UNREACHABLE_CODE: dict[TargetKind, MonitorCode] = {
     TargetKind.LANE: MonitorCode.LANE_UNREACHABLE,
     TargetKind.IDENTITY_SERVICE: MonitorCode.IDENTITY_SERVICE_UNREACHABLE,
     TargetKind.PLATFORM: MonitorCode.PLATFORM_UNREACHABLE,
+    TargetKind.CAPTURE: MonitorCode.CAPTURE_UNREACHABLE,
 }
 
 #: The same pairing for the OTHER half of a failed poll: the target answered,
@@ -211,6 +221,7 @@ REFUSED_CODE: dict[TargetKind, MonitorCode] = {
     TargetKind.LANE: MonitorCode.LANE_REFUSED_US,
     TargetKind.IDENTITY_SERVICE: MonitorCode.IDENTITY_SERVICE_REFUSED_US,
     TargetKind.PLATFORM: MonitorCode.PLATFORM_REFUSED_US,
+    TargetKind.CAPTURE: MonitorCode.CAPTURE_REFUSED_US,
 }
 
 
@@ -348,11 +359,25 @@ class MonitorDescription:
     site_id: str
     targets: tuple[TargetDescription, ...]
     sinks: tuple[SinkDescription, ...]
+    #: How many notifications `GET /v1/monitor/events` can still serve behind
+    #: the current cursor. A per-site SETTING with a published default, and it
+    #: is PUBLISHED rather than described because a consumer's own catch-up
+    #: policy depends on it: fall further behind than this and you are told
+    #: `reset` rather than served a short page. The lane contract publishes its
+    #: own on `GET /v1/lane` for the same reason and in the same field name.
+    event_window_depth: int = 0
     contract_version: int = CONTRACT_VERSION
 
     def __post_init__(self) -> None:
         _text(self.monitor_id, "monitor_id")
         _text(self.site_id, "site_id")
+        if isinstance(self.event_window_depth, bool) or not isinstance(
+            self.event_window_depth, int
+        ) or self.event_window_depth <= 0:
+            raise ValueError(
+                "event_window_depth must be a positive number of notifications, got "
+                f"{self.event_window_depth!r}"
+            )
         if not self.targets:
             # The same refusal the configuration makes, held one layer lower so
             # it cannot be routed around by building the payload some other way.
@@ -369,6 +394,7 @@ class MonitorDescription:
             "monitor_id": self.monitor_id,
             "site_id": self.site_id,
             "contract_version": self.contract_version,
+            "event_window_depth": self.event_window_depth,
             "targets": [target.to_dict() for target in self.targets],
             "sinks": [sink.to_dict() for sink in self.sinks],
         }
@@ -619,4 +645,433 @@ class EventPage:
             "reset": self.reset,
             "dropped": self.dropped,
             "events": list(self.events),
+        }
+
+
+# ===========================================================================
+# THE CAPTURE PROCESS
+#
+# The second process in this package, and it is the first thing here that keeps
+# anything on a disk. SETTLED 3g: when the barrier is broken the camera's job
+# changes from DECIDING to RECORDING -- capture every entry, timestamp and image
+# so the entries can be reconstructed. Gokhan's words: "camera captures an image
+# every minute and every time the gate opens", "we need to save the picture of
+# the cars".
+#
+# **It has no opening authority either, and it holds no identity.** It reads a
+# camera and it reads a lane's read contract, both `GET`, and it writes to its
+# own directory. The store carries the JPEG the camera sent and seven fields
+# about WHEN and WHY it was taken. No plate, no plate region, no vehicle
+# attribute and no event detail -- the join to who the car was is the lane event
+# reference held here and the platform's durable record, one place each.
+# ===========================================================================
+
+
+class CaptureReason(StrEnum):
+    """Why a capture was taken. CLOSED, and published.
+
+    A consumer branches on all three: one of them is a clock and two of them are
+    a lane saying something happened, and the difference decides whether the
+    record has a lane event behind it to join to.
+    """
+
+    #: The clock. `[capture] interval_seconds` elapsed and nothing had happened.
+    INTERVAL = "interval"
+    #: A lane recorded that it grabbed frames for an arriving vehicle.
+    LANE_ARRIVAL = "lane_arrival"
+    #: A lane recorded that it vended. Gokhan's "every time the gate opens", in
+    #: the phrasing that is actually measurable: nothing anywhere knows whether
+    #: the boom moved, and the lane's own vend output has no feedback by design.
+    LANE_VEND = "lane_vend"
+
+
+class CaptureCode(StrEnum):
+    """The malfunctions the CAPTURE PROCESS measures. CLOSED, all `measured`.
+
+    Deliberately the same shape as the lane contract's malfunction table, so a
+    monitor reads this surface with the same code that reads a lane: one entry
+    per member on every response, each with a `state`, a `source`, a boolean
+    `never_alarm` and a `caveat`.
+
+    **None of them is `never_alarm`.** Every one is a physical thing that needs
+    somebody -- a camera that has stopped answering, a disk that will not take a
+    write, a store eating itself under a cap that is too small. `camera_feed_frozen`
+    is the one that comes closest to a false alarm, and what it measures is
+    stated in its caveat rather than being softened into silence.
+    """
+
+    #: Nothing came back from the camera. A network failure, a timeout, or a
+    #: 5xx: the camera's own process answered that it could not do the thing.
+    #: This is Gokhan's "camera disconnected is a malfunction".
+    CAMERA_UNREACHABLE = "camera_unreachable"
+    #: The camera ANSWERED, and the answer was no -- a 3xx or a 4xx, with its
+    #: status on the entry. 401 is the credential in the file beside this
+    #: process, 404 is a snapshot route this camera does not have, and 3xx is a
+    #: camera steering this process at another host. Three repairs, and folded
+    #: into "unreachable" a human cannot tell them apart.
+    CAMERA_REFUSED_US = "camera_refused_us"
+    #: Two consecutive snapshots from this camera were BYTE-IDENTICAL.
+    CAMERA_FEED_FROZEN = "camera_feed_frozen"
+    #: The store's directory would not take a write.
+    STORE_UNWRITABLE = "store_unwritable"
+    #: A write was refused because one purge could not get the store under
+    #: `[capture] max_bytes`. The store is not eating itself silently.
+    STORE_OVER_BUDGET = "store_over_budget"
+    #: An image with no sidecar, or a sidecar with no image, was found when the
+    #: index was rebuilt. Reported and then purged, never silently kept.
+    STORE_RECORD_INCOMPLETE = "store_record_incomplete"
+    #: The lane that triggers captures did not answer. `unknown` where no lane
+    #: is declared: standalone is a MODE, and nobody measured.
+    LANE_UNREACHABLE = "lane_unreachable"
+    #: The lane ANSWERED, and the answer was no, with its status on the entry.
+    LANE_REFUSED_US = "lane_refused_us"
+
+
+#: WHERE each capture code gets its answer in this build. One copy, and the
+#: payload is built from it. Every one is `measured` -- this process derives all
+#: of its own codes, and a code it could not derive would not be one of its own.
+CAPTURE_SOURCES: dict[CaptureCode, Source] = {
+    CaptureCode.CAMERA_UNREACHABLE: Source.MEASURED,
+    CaptureCode.CAMERA_REFUSED_US: Source.MEASURED,
+    CaptureCode.CAMERA_FEED_FROZEN: Source.MEASURED,
+    CaptureCode.STORE_UNWRITABLE: Source.MEASURED,
+    CaptureCode.STORE_OVER_BUDGET: Source.MEASURED,
+    CaptureCode.STORE_RECORD_INCOMPLETE: Source.MEASURED,
+    CaptureCode.LANE_UNREACHABLE: Source.MEASURED,
+    CaptureCode.LANE_REFUSED_US: Source.MEASURED,
+}
+
+#: Whether a code may wake a human. Travels on the wire with the code, which is
+#: what a monitor reads -- this package does not hold a second list for its own
+#: consumption anywhere. Nothing here is `never_alarm`: every member is a
+#: physical thing that needs a person.
+CAPTURE_NEVER_ALARM: dict[CaptureCode, bool] = dict.fromkeys(CaptureCode, False)
+
+#: The caveat published beside a code, when there is something a human acting on
+#: it has to know. One copy, on the wire, so the caveat reaches the message
+#: rather than staying behind in a document nobody opens at 3am.
+CAPTURE_CAVEATS: dict[CaptureCode, str] = {
+    CaptureCode.CAMERA_FEED_FROZEN: (
+        "IDENTICAL means identical: this compares the bytes of two consecutive snapshots and "
+        "nothing else. A camera that burns a clock, a date or a frame counter into the image "
+        "is therefore NEVER frozen by this measure, however dead its sensor -- the overlay "
+        "changes the bytes. A camera with no overlay pointed at an empty lane at night can be "
+        "byte-identical while working perfectly. This measure is a cheap true negative, not a "
+        "test of whether a camera is seeing."
+    ),
+}
+
+
+def _capture_never_alarm(code: CaptureCode) -> bool:
+    return CAPTURE_NEVER_ALARM[code]
+
+
+@dataclass(frozen=True, slots=True)
+class CameraDescription:
+    """One declared camera, as a consumer may see it.
+
+    `snapshot_url` is REBUILT from scheme, host, port and path -- the same rule
+    and the same function `GET /v1/monitor` uses. A credential in a snapshot URL
+    is refused at startup; this is the second half of that rule, so a credential
+    cannot ride out on this route because something found a way past the first
+    check. `authenticated` says a credential is configured. It is not the
+    credential.
+    """
+
+    camera_id: str
+    snapshot_url: str
+    authenticated: bool
+
+    def __post_init__(self) -> None:
+        _text(self.camera_id, "camera.camera_id")
+        _text(self.snapshot_url, "camera.snapshot_url")
+        parsed = urlsplit(self.snapshot_url)
+        if parsed.username or parsed.password:
+            raise ValueError(
+                "camera.snapshot_url has userinfo in URL: credentials come from files, and "
+                "this route publishes an address rather than a way in"
+            )
+        if not isinstance(self.authenticated, bool):
+            raise ValueError("camera.authenticated must be a bool")
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureDescription:
+    """`GET /v1/capture` -- who this process is, and what it is set to do.
+
+    The settings AS LOADED, so a site can see what the file it wrote actually
+    produced rather than what it meant. `directory` is here because where the
+    personal data is kept is the first question anybody asks of this process,
+    and the answer is a path on a box, not a credential.
+    """
+
+    capture_id: str
+    site_id: str
+    directory: str
+    interval_seconds: float
+    retention_days: int
+    max_bytes: int
+    cameras: tuple[CameraDescription, ...]
+    #: Whether a lane is declared. `false` is STANDALONE, and standalone is a
+    #: mode: a garage with a camera and no gate is a customer of this process,
+    #: not a degraded installation. It decides whether any record can ever carry
+    #: a lane event reference.
+    lane_declared: bool
+    #: The lane's address, rebuilt, or `null` when none is declared.
+    lane_url: str | None
+    contract_version: int = CONTRACT_VERSION
+
+    def __post_init__(self) -> None:
+        _text(self.capture_id, "capture_id")
+        _text(self.site_id, "site_id")
+        _text(self.directory, "directory")
+        if not self.cameras:
+            # The same refusal the configuration makes, held one layer lower so
+            # it cannot be routed around by building the payload some other way.
+            # A capture process with no camera photographs nothing and would
+            # describe itself as running.
+            raise ValueError("a capture process with no camera records nothing")
+        if not isinstance(self.lane_declared, bool):
+            raise ValueError("lane_declared must be a bool")
+        if self.lane_declared != (self.lane_url is not None):
+            raise ValueError("lane_declared and lane_url disagree about whether a lane exists")
+
+    def to_dict(self) -> dict:
+        return {
+            "capture_id": self.capture_id,
+            "site_id": self.site_id,
+            "contract_version": self.contract_version,
+            "directory": self.directory,
+            "interval_seconds": self.interval_seconds,
+            "retention_days": self.retention_days,
+            "max_bytes": self.max_bytes,
+            "lane_declared": self.lane_declared,
+            "lane_url": self.lane_url,
+            "cameras": [camera.to_dict() for camera in self.cameras],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureEntry:
+    """One capture code, its subject, its state, its source and its caveat.
+
+    The same entry shape a lane's health route publishes, field for field, so a
+    monitor reads this surface with the code that already reads a lane. `state`
+    is one of the three; `never_alarm` is a JSON boolean on every entry, never
+    absent, because absent and `false` point in opposite directions at whoever
+    reads it.
+    """
+
+    code: str
+    subject: str
+    state: str
+    #: The HTTP status the camera or the lane answered with, when the code is
+    #: about an ANSWER. `null` everywhere else.
+    status: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.code not in tuple(code.value for code in CaptureCode):
+            raise ValueError(f"{self.code!r} is not a capture code in this contract")
+        _text(self.subject, "subject")
+        if self.state not in tuple(state.value for state in HealthState):
+            raise ValueError(f"state must be one of {tuple(HealthState)}, got {self.state!r}")
+        if self.status is not None and (
+            isinstance(self.status, bool) or not isinstance(self.status, int)
+            or not 100 <= self.status <= 599
+        ):
+            raise ValueError(f"status must be an HTTP status code or null, got {self.status!r}")
+        if self.status is not None and self.code not in (
+            CaptureCode.CAMERA_REFUSED_US.value,
+            CaptureCode.LANE_REFUSED_US.value,
+        ):
+            raise ValueError(f"{self.code} does not carry an HTTP status; got {self.status!r}")
+        # The invariant, copied from the lane contract and from `MonitorEntry`,
+        # because it is the same invariant. `ok` and `active` are claims about a
+        # measurement, and a code this build does not derive may make neither.
+        if self.state != HealthState.UNKNOWN and self.source != Source.MEASURED:
+            raise ValueError(
+                f"{self.code} is {self.source.value} but claims state {self.state!r}. "
+                "Only a code this build derives may answer anything but 'unknown'."
+            )
+
+    @property
+    def source(self) -> Source:
+        return CAPTURE_SOURCES[CaptureCode(self.code)]
+
+    def to_dict(self) -> dict:
+        code = CaptureCode(self.code)
+        return {
+            "code": self.code,
+            "subject": self.subject,
+            "state": self.state,
+            "source": self.source.value,
+            "never_alarm": _capture_never_alarm(code),
+            "caveat": CAPTURE_CAVEATS.get(code),
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class StoreReads:
+    """What is on the disk, MEASURED from the directory when this is asked.
+
+    Every field here is a read. Nothing in this package has ever seen a capture
+    from any of the cameras it is written for, so this module states no size, no
+    rate and no capacity anywhere: what a site's disk does is answered by
+    pointing this route at that site's disk.
+
+    `projected_bytes_per_day` is derived from the last 24 hours and is `null`
+    under an hour of data -- a projection from four minutes is not a projection,
+    and publishing one would be a number that looks measured.
+    """
+
+    bytes_used: int
+    record_count: int
+    oldest_at: str | None
+    newest_at: str | None
+    mean_bytes_per_record: int | None
+    records_last_24h: int
+    bytes_last_24h: int
+    projected_bytes_per_day: int | None
+    #: How many records the purge has removed since this process started, and
+    #: why. Published because a store that is silently eating itself under a cap
+    #: that is too small looks exactly like a store nothing is happening at.
+    purged_by_age: int = 0
+    purged_by_size: int = 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureHealth:
+    """`GET /v1/capture/health` -- every capture code, and what is on the disk.
+
+    Refused at construction if one of the codes is missing or duplicated for a
+    subject, exactly as `MonitorHealth` is. An absent code is indistinguishable
+    from a healthy one to whoever reads this.
+    """
+
+    codes: tuple[CaptureEntry, ...] = field(default_factory=tuple)
+    store: StoreReads | None = None
+
+    def __post_init__(self) -> None:
+        seen = [(entry.code, entry.subject) for entry in self.codes]
+        if len(seen) != len(set(seen)):
+            raise ValueError("a capture code appears twice for one subject in one payload")
+        missing = {code.value for code in CaptureCode} - {code for code, _ in seen}
+        if missing:
+            raise ValueError(
+                f"health payload is missing {sorted(missing)}. Every code ships every time: "
+                "one that is absent reads exactly like one that is fine. A code with no "
+                "subject yet ships once, `unknown`, under this process's own id."
+            )
+        if self.store is None:
+            raise ValueError("a capture health payload without the store's reads is half of one")
+
+    def to_dict(self) -> dict:
+        return {
+            "contract_version": CONTRACT_VERSION,
+            "codes": [entry.to_dict() for entry in self.codes],
+            "store": self.store.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RecordRef:
+    """One stored capture, as the records route publishes it. SIDECAR ONLY.
+
+    The seven fields are the sidecar's, and there is nothing else in the sidecar
+    to publish. **No plate, no plate region, no vehicle attribute and no event
+    detail** -- not withheld here, absent from the store, which is why this
+    dataclass has nowhere to put one.
+
+    `image_url` is the route that serves the bytes. The bytes are never inline:
+    a records page a consumer polls is a page it polls often, and a JPEG on it
+    would make the cheapest read the most expensive one.
+    """
+
+    id: str
+    captured_at: str
+    camera_id: str
+    reason: str
+    #: The lane event this capture answers, by CURSOR and by the time the LANE
+    #: recorded, and nothing else from that event. This is the whole join: who
+    #: the car was lives at the lane's platform, under this cursor.
+    lane_event_cursor: int | None
+    lane_event_at: str | None
+    #: `captured_at` minus `lane_event_at`, in milliseconds. THE COST OF THE
+    #: SEAT, measured on every record rather than described once: this process
+    #: learns that a car arrived by POLLING the lane's read contract, so the
+    #: picture is taken when the event was SEEN and not when the frames were
+    #: grabbed. `null` on an interval capture, which has no trigger to be late
+    #: for.
+    trigger_to_capture_ms: int | None
+    bytes: int
+    image_url: str
+
+    def __post_init__(self) -> None:
+        _text(self.id, "record.id")
+        _iso_utc(self.captured_at, "captured_at")
+        _text(self.camera_id, "camera_id")
+        if self.reason not in tuple(reason.value for reason in CaptureReason):
+            raise ValueError(f"reason must be one of {tuple(CaptureReason)}, got {self.reason!r}")
+        if self.lane_event_at is not None:
+            _iso_utc(self.lane_event_at, "lane_event_at")
+        if (self.lane_event_cursor is None) != (self.lane_event_at is None):
+            raise ValueError(
+                "a lane event reference is a cursor AND the time the lane recorded, or neither"
+            )
+        if (self.reason == CaptureReason.INTERVAL.value) != (self.lane_event_cursor is None):
+            raise ValueError(
+                f"reason={self.reason!r} and the lane event reference disagree about whether a "
+                "lane triggered this capture"
+            )
+        if (self.trigger_to_capture_ms is None) != (self.lane_event_at is None):
+            raise ValueError(
+                "trigger_to_capture_ms is present exactly when a lane event triggered the "
+                "capture: it is that event's delay, and there is no delay without a trigger"
+            )
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordPage:
+    """`GET /v1/capture/records?since=N` -- what has been stored.
+
+    Deliberately the same shape and the same semantics as the lane contract's
+    `GET /v1/lane/events`, field for field, so one consumer holds one cursor
+    policy for every surface in this estate.
+
+      * the cursor is **monotonic within one run** and is **NOT durable across a
+        restart**. The store is durable; the cursor over it is not. On start the
+        index is rebuilt by reading the directory and numbered from one in
+        capture order, so a saved position no longer refers to the same record
+        once anything has been purged;
+      * `since` ahead of this process's own cursor sets `reset`;
+      * `since` behind the oldest record still held also sets `reset`. Here the
+        window is the STORE, and what evicts from it is the retention rule and
+        the size cap -- so this flag is how a consumer learns that what it was
+        going to fetch has been deleted rather than simply not served;
+      * `dropped` is how many records the purge has removed since this process
+        started. A gap nobody knows about is worse than one that is counted.
+    """
+
+    cursor: int
+    reset: bool
+    dropped: int
+    records: tuple[dict, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict:
+        return {
+            "contract_version": CONTRACT_VERSION,
+            "cursor": self.cursor,
+            "reset": self.reset,
+            "dropped": self.dropped,
+            "records": list(self.records),
         }

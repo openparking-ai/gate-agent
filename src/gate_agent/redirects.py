@@ -53,12 +53,30 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirects)
+def build_opener(*handlers):
+    """An opener that follows nothing, plus whatever handlers a caller needs.
+
+    **Every opener in this package is built here.** A camera answers `401` with
+    a `WWW-Authenticate` header and expects the credential on the retry, which
+    is an authentication handler and therefore a second opener -- and a second
+    opener built anywhere else would be a second opener with urllib's default
+    redirect handler in it. That is precisely how the credential leaves: the
+    retry that carries `Authorization` is the request a `Location` would take
+    somewhere else.
+
+    So the refusal is not a property of one opener. It is a property of the only
+    function that makes them, and `tests/test_no_opening_authority.py` sweeps
+    the source for a `build_opener` or an `urlopen` anywhere else.
+    """
+    return urllib.request.build_opener(_NoRedirects, *handlers)
+
+
+_OPENER = build_opener()
 
 
 def open_url(request, timeout: float):
-    """Open `request`, following nothing. The only opener this package uses."""
+    """Open `request`, following nothing. The unauthenticated opener."""
     return _OPENER.open(request, timeout=timeout)
 
 
-__all__ = ["open_url"]
+__all__ = ["build_opener", "open_url"]
