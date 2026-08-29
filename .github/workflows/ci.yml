@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+
+      - name: The lane-controller pin names a commit on lane-controller main
+        # A pin to a feature-branch commit resolves until that branch is
+        # deleted and then breaks `pip install` for everyone. It is a TEST
+        # dependency here, so the failure would be "the suite cannot run",
+        # which is the quietest way for a guarantee to stop being one.
+        run: bash .github/scripts/check-lane-controller-pin.sh
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: No real personal data in the repository
+        run: |
+          node .github/scripts/check-no-real-data.js --self-test
+          node .github/scripts/check-no-real-data.js
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The lowest version supported and a current one. This runs on whatever
+        # the lane's box ships; the tests must not quietly depend on a newer
+        # interpreter than that.
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e '.[dev]'
+
+      - name: Tests
+        # No hardware, no camera, no barrier, no SMTP server and no database.
+        # Every target is a real HTTP server on an ephemeral socket, including a
+        # REAL lane built from the installed lane-controller: a fake shaped like
+        # our lane would make "the same code reads ours and a third party's" a
+        # claim about two fakes.
+        run: pytest -q
+
+      - name: Monitor fail-control
+        # Breaks each property this monitor exists to have -- its lack of any
+        # opening authority, its distance from the lane it reads, `unknown` not
+        # being `ok`, transitions rather than states, `never_alarm` read from the
+        # wire, the refusal to start watching nothing, credentials from files,
+        # the site's threshold rather than a constant, and a sink failure being
+        # reported -- and requires the suite to go red on every one. Each break
+        # fails in the REASSURING direction, because that is the direction a
+        # monitor fails in when nobody is looking.
+        run: python scripts/monitor_fail_control.py
