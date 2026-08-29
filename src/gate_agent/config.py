@@ -24,7 +24,9 @@ from __future__ import annotations
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
+from .client import DEFAULT_TIMEOUT
 from .contract import SinkKind, TargetKind
 
 #: The published default for how often a target is polled.
@@ -52,6 +54,12 @@ DEFAULT_LANE_QUIET_SECONDS = 900.0
 #: messages say which of a site's lanes are broken and when, which is a map for
 #: whoever wants to arrive while nobody is watching.
 DEFAULT_EMAIL_TLS = True
+
+#: The published default for how long a target has to answer, per target.
+#: The constant lives in `client.py`, beside the code that waits, and is bound
+#: here because this is where a site overrides it -- one copy, and the reason it
+#: is the number it is travels with it.
+DEFAULT_TIMEOUT_SECONDS = DEFAULT_TIMEOUT
 
 #: Keys that would carry a credential BY VALUE. Refused by name, each with the
 #: file key that replaces it. A key nobody documented but which happens to work
@@ -97,6 +105,10 @@ class Target:
     #: PLATFORM ONLY: how long a device may go unheard-from. Setting, default
     #: published above, and an assumption.
     lane_quiet_seconds: float = DEFAULT_LANE_QUIET_SECONDS
+    #: How long this target has to answer. Setting, default published above,
+    #: and an assumption -- see `client.DEFAULT_TIMEOUT` for what it is drawn
+    #: against, which is the lane's own bound on the machine BEHIND it.
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 
     @property
     def authenticated(self) -> bool:
@@ -227,6 +239,15 @@ def _refuse_credential_values(raw: dict, path: str) -> None:
         if isinstance(value, dict):
             _refuse_credential_values(value, here)
             continue
+        if isinstance(value, list):
+            # A TOML array of tables is a list of dicts, and the walk used to
+            # step over it. Nothing in today's schema is one, which is exactly
+            # why this is worth closing now: the day a site declares two
+            # webhooks, the sweep would not have been looking.
+            for index, item in enumerate(value):
+                if isinstance(item, dict):
+                    _refuse_credential_values(item, f"{here}[{index}]")
+            continue
         if key in CREDENTIAL_VALUE_KEYS:
             raise ConfigError(
                 f"`{here}` would hold a credential as a value. Write "
@@ -234,6 +255,28 @@ def _refuse_credential_values(raw: dict, path: str) -> None:
                 "value here is a credential in this file, in every backup of it, and in "
                 "everything anyone ever pastes it into."
             )
+
+
+def _refuse_userinfo(url: str, where: str) -> None:
+    """A URL may not carry a credential either, and one carries very well.
+
+    `https://ops:S3CRET@example.com` is a working, documented way to put a
+    password in this file -- the same thing the six key names above are refused
+    for, in a key that is required rather than optional. It was accepted, and
+    then republished verbatim on `GET /v1/monitor` beside `authenticated:
+    false`, so the one field a consumer would use to notice read the wrong way.
+
+    Refused by SHAPE, not by pattern: anything urllib parses as userinfo is
+    userinfo, whatever it looks like.
+    """
+    parsed = urlsplit(url)
+    if parsed.username or parsed.password:
+        raise ConfigError(
+            f"{where} has userinfo in URL: credentials come from files. Write the host on its "
+            "own and give the credential's path in `token_file` -- a credential in a URL is a "
+            "credential in this file, in every backup of it, and on the read surface that "
+            "republishes what this monitor watches."
+        )
 
 
 def _read_token(value, where: str, relative_to: Path | None) -> str:
@@ -285,6 +328,7 @@ def _targets(raw: dict, relative_to: Path | None) -> tuple[Target, ...]:
         url = table.get("url")
         if not isinstance(url, str) or not url.strip():
             raise ConfigError(f"[targets.{kind.value}] does not declare a url")
+        _refuse_userinfo(url, f"[targets.{kind.value}].url")
         token = None
         if "token_file" in table:
             token = _read_token(
@@ -330,6 +374,11 @@ def _targets(raw: dict, relative_to: Path | None) -> tuple[Target, ...]:
                 token=token,
                 garage_id=garage_id,
                 lane_quiet_seconds=quiet,
+                timeout_seconds=_positive(
+                    table.get("timeout_seconds"),
+                    f"[targets.{kind.value}].timeout_seconds",
+                    DEFAULT_TIMEOUT_SECONDS,
+                ),
             )
         )
     return tuple(targets)
@@ -391,6 +440,7 @@ def _sinks(raw: dict, relative_to: Path | None) -> tuple[object, ...]:
         url = webhook.get("url")
         if not isinstance(url, str) or not url.strip():
             raise ConfigError("[sinks.webhook] does not declare a url")
+        _refuse_userinfo(url, "[sinks.webhook].url")
         if "token_file" not in webhook:
             raise ConfigError(
                 "[sinks.webhook] does not declare token_file. This sink POSTs a site's "
@@ -422,6 +472,7 @@ def _renotify(raw: dict) -> float | None:
 __all__ = [
     "CREDENTIAL_VALUE_KEYS",
     "DEFAULT_EMAIL_TLS",
+    "DEFAULT_TIMEOUT_SECONDS",
     "DEFAULT_LANE_QUIET_SECONDS",
     "DEFAULT_POLL_SECONDS",
     "ConfigError",

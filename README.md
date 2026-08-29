@@ -47,6 +47,13 @@ foreign one written from the document, through the same code, parametrised so
 neither can be special-cased. If our own software had a private path, we would
 stop feeling the contract's gaps — and nobody else would fix them.
 
+**The foreign lane imports nothing of ours either**, which is newer than the
+sentence above and is the half that was not true: it used to take the malfunction
+codes and the never-alarm set from our Python package, because those were the two
+things the lane contract withheld. That contract publishes them now, in full, and
+the stub carries a literal copied from it with a test holding the copy to the
+enum.
+
 `openparking-lane-controller` is a **test** dependency, pinned to a commit, and
 appears nowhere in `src/`.
 

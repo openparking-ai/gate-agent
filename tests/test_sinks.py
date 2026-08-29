@@ -316,9 +316,12 @@ def test_the_startup_message_says_what_is_not_being_measured():
     assert "site-1" in subject
     unmeasured = payload["unmeasured"]
     assert unmeasured, "the foreign lane measures nothing, so this must not be empty"
-    # Every one of them carries the SOURCE the target gave, which is what
-    # separates "waiting to be read" from "nothing produces this at all".
-    assert {one["source"] for one in unmeasured} == {"no_source"}
+    # Every one of them carries a SOURCE, which is what separates "waiting to be
+    # read" from "nothing produces this at all". The lane's are `no_source`; the
+    # monitor's OWN unmeasured codes are `measured` -- they are codes it derives,
+    # for targets it has not been given.
+    assert all(one["source"] for one in unmeasured)
+    assert {one["source"] for one in unmeasured if one["target"] == "lane"} == {"no_source"}
     assert payload["targets"] == ["lane"]
     assert payload["sinks"] == ["recording"]
 

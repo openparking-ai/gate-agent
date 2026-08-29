@@ -18,6 +18,7 @@ import pytest
 from gate_agent.config import (
     DEFAULT_LANE_QUIET_SECONDS,
     DEFAULT_POLL_SECONDS,
+    DEFAULT_TIMEOUT_SECONDS,
     ConfigError,
     EmailSinkConfig,
     MonitorConfig,
@@ -329,3 +330,79 @@ def test_the_example_configuration_parses():
     parsed = MonitorConfig.from_dict(raw)
     assert {target.name for target in parsed.targets} == {"lane", "identity_service"}
     assert {type(sink).__name__ for sink in parsed.sinks} == {"LogSinkConfig", "EmailSinkConfig"}
+
+
+# ---------------------------------------------------------------------------
+# A CREDENTIAL IN A URL
+#
+# Six key names are refused because each would hold a credential as a VALUE.
+# `url` is a key that works, is documented, and carries one very well:
+# `https://ops:S3CRET@example.com` was accepted, and then republished
+# verbatim on `GET /v1/monitor` beside `authenticated: false` -- so the one
+# field a consumer would use to notice read the wrong way.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://ops:S3CRET-PASSWORD@example.com",
+        "http://ops@example.com:8090",
+        "http://:S3CRET-PASSWORD@127.0.0.1:8090",
+    ],
+)
+def test_a_target_url_carrying_userinfo_is_refused_by_name(url):
+    with pytest.raises(ConfigError, match="userinfo in URL: credentials come from files"):
+        config(targets=a_lane(url=url))
+    # The opposite, beside it: the same host with no credential in it is fine.
+    assert config(targets=a_lane(url="https://lane.example.com")).targets
+
+
+def test_a_webhook_url_carrying_userinfo_is_refused_too(tmp_path):
+    """The other direction leaves this process, and it leaves with a token.
+
+    A webhook is the seat a third party's paging system takes, so its URL comes
+    from whoever runs that system -- which is exactly where a convenient
+    `user:password@` arrives from.
+    """
+    token = tmp_path / "webhook.token"
+    token.write_text("page-me\n")
+    sinks = {"webhook": {"url": "https://ops:S3CRET@example.com", "token_file": str(token)}}
+    with pytest.raises(ConfigError, match="userinfo in URL"):
+        config(targets=a_lane(), sinks=sinks)
+
+    sinks["webhook"]["url"] = "https://pager.example.com/hook"
+    assert config(targets=a_lane(), sinks=sinks).sinks
+
+
+def test_the_credential_sweep_descends_into_a_list_of_tables():
+    """An array of tables is a list of dicts, and the walk stepped over it.
+
+    Nothing in today's schema is one, which is why this is worth closing now:
+    the day a site declares two webhooks, the sweep would not have been looking.
+    """
+    with pytest.raises(ConfigError, match="would hold a credential as a value"):
+        config(targets=a_lane(), pagers=[{"url": "https://pager.example.com", "token": "s3cret"}])
+    # The control: the same shape without a credential key in it is accepted by
+    # the sweep -- it refuses a credential, not a list.
+    assert config(targets=a_lane(), pagers=[{"url": "https://pager.example.com"}]).targets
+
+
+# ---------------------------------------------------------------------------
+# The client timeout is a per-site setting with a published default
+# ---------------------------------------------------------------------------
+
+
+def test_the_timeout_is_a_setting_with_a_published_default():
+    assert config(targets=a_lane()).targets[0].timeout_seconds == DEFAULT_TIMEOUT_SECONDS
+    assert config(targets=a_lane(timeout_seconds=2.5)).targets[0].timeout_seconds == 2.5
+    for bad in (0, -1, "quickly", True):
+        with pytest.raises(ConfigError, match="timeout_seconds"):
+            config(targets=a_lane(timeout_seconds=bad))
+
+
+def test_the_timeout_default_is_the_one_the_client_waits():
+    """One copy. The constant lives beside the code that waits on the socket."""
+    from gate_agent.client import DEFAULT_TIMEOUT
+
+    assert DEFAULT_TIMEOUT_SECONDS == DEFAULT_TIMEOUT

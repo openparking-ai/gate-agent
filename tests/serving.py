@@ -17,7 +17,11 @@ import threading
 @contextlib.contextmanager
 def serving(server):
     """Yield the base URL of `server`, running in a thread, then shut it down."""
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # A short poll interval, because `shutdown()` waits for the loop to notice
+    # and the default is half a second -- which every server in this suite pays,
+    # sixteen times over in the fail-control.
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.02),
+                              daemon=True)
     thread.start()
     host, port = server.server_address[:2]
     try:

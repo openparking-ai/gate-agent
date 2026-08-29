@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -377,3 +378,86 @@ def test_a_cursor_behind_the_window_says_reset():
     # And a cursor inside the window is served without a reset.
     inside = monitor.events(page["cursor"] - 1).to_dict()
     assert inside["reset"] is False
+
+
+# ---------------------------------------------------------------------------
+# GUARANTEE 5 — THIS ROUTE PUBLISHES AN ADDRESS, NEVER A WAY IN
+# ---------------------------------------------------------------------------
+
+
+def test_a_planted_credential_in_a_target_url_reaches_no_route():
+    """The sweep, with the plant, over everything this monitor serves.
+
+    `config.py` refuses userinfo at startup, so this plants it BELOW that --
+    straight onto a `Target`, the way a caller building one by hand would -- and
+    then sweeps all three routes for it. A refusal at one layer is a refusal at
+    one layer; what this route publishes is a property of this route.
+
+    Scheme, host, port and path, and nothing else: the URL is REBUILT from those
+    four rather than echoed, so a query string or a fragment cannot carry
+    anything out either.
+    """
+    from gate_agent.config import Target
+    from gate_agent.contract import TargetKind
+
+    planted = "S3CRET-PASSWORD"
+    config = config_for(lane="http://127.0.0.1:8090")
+    config = replace(
+        config,
+        targets=(
+            Target(
+                name="lane",
+                kind=TargetKind.LANE,
+                url=f"https://ops:{planted}@lane.example.com:8443/v1?token={planted}#{planted}",
+                poll_seconds=30.0,
+            ),
+        ),
+    )
+    monitor = monitor_for(config, [RecordingSink()])
+
+    served = json.dumps(
+        {
+            "monitor": monitor.describe().to_dict(),
+            "health": monitor.health().to_dict(),
+            "events": monitor.events(0).to_dict(),
+        }
+    )
+    assert planted not in served, f"a planted credential is on this monitor's own routes: {served}"
+    assert "ops" not in served
+
+    published = monitor.describe().to_dict()["targets"][0]["url"]
+    assert published == "https://lane.example.com:8443/v1"
+
+    # THE CONTROL: the sweep can find that string in this payload when it is
+    # there. Without it, `planted not in served` is a claim about the search.
+    control = json.dumps({"monitor": {"targets": [{"url": f"https://x:{planted}@y/"}]}})
+    assert planted in control
+
+
+def test_the_payload_layer_refuses_a_credential_bearing_url_outright():
+    """The refusal one layer lower, so it cannot be routed around.
+
+    The configuration refuses userinfo and the description rebuilds the address.
+    This is the third: a `TargetDescription` built by hand with a credential in
+    it does not exist.
+    """
+    from gate_agent.contract import TargetDescription
+
+    with pytest.raises(ValueError, match="userinfo in URL"):
+        TargetDescription(
+            name="lane",
+            kind="lane",
+            url="https://ops:S3CRET-PASSWORD@example.com",
+            poll_seconds=30.0,
+            authenticated=False,
+            timeout_seconds=10.0,
+        )
+    # The opposite beside it: the same target without one builds.
+    assert TargetDescription(
+        name="lane",
+        kind="lane",
+        url="https://lane.example.com",
+        poll_seconds=30.0,
+        authenticated=False,
+        timeout_seconds=10.0,
+    )

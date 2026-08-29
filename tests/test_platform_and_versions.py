@@ -162,10 +162,22 @@ def test_the_monitor_presents_its_operator_credential():
     assert set(platform.authorizations) == {"Bearer operator-token"}
 
     # The control: with the wrong credential the platform refuses, and the
-    # monitor reports the target as unreachable rather than as having no devices.
+    # monitor says so rather than reporting a garage with no devices.
+    #
+    # It says REFUSED, not unreachable. A 401 is an answer, and it names a
+    # different machine: the platform is running perfectly and the credential in
+    # a file beside this process is wrong. The status travels with it so the
+    # human reading the message can tell that from a platform that is down.
     refused, sink, _p = watch([device()], token="not-the-token")
-    assert states(refused)[(MonitorCode.PLATFORM_UNREACHABLE.value, "platform")] == "active"
-    assert (MonitorCode.PLATFORM_UNREACHABLE.value, "raised") in sink.codes
+    assert states(refused)[(MonitorCode.PLATFORM_REFUSED_US.value, "platform")] == "active"
+    assert states(refused)[(MonitorCode.PLATFORM_UNREACHABLE.value, "platform")] == "ok"
+    assert (MonitorCode.PLATFORM_REFUSED_US.value, "raised") in sink.codes
+    assert (MonitorCode.PLATFORM_UNREACHABLE.value, "raised") not in sink.codes
+    status = {
+        entry["code"]: entry["status"] for entry in refused.health().to_dict()["codes"]
+    }
+    assert status[MonitorCode.PLATFORM_REFUSED_US.value] == 401
+    assert [one["status"] for one in sink.payloads if one["code"].endswith("refused_us")] == [401]
 
 
 def test_the_platform_publishes_no_version_so_that_code_stays_unknown():
