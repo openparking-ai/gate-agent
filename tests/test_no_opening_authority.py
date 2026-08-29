@@ -48,16 +48,25 @@ SOURCES = sorted(PACKAGE.glob("*.py"))
 MAY_POST = {"sinks.py"}
 
 
+def _is_request(node) -> bool:
+    """Whether a call builds a `Request`, spelt either of the two ways.
+
+    `urllib.request.Request(...)` is an `ast.Attribute`; `from urllib.request
+    import Request` then `Request(...)` is an `ast.Name`, and the sweep used to
+    see only the first -- so the second would have been invisible to it, and its
+    own control could not tell "no non-GET" from "no match".
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr == "Request"
+    return isinstance(node.func, ast.Name) and node.func.id == "Request"
+
+
 def _requests_in(path: Path) -> list[ast.Call]:
-    """Every `urllib.request.Request(...)` construction in one module."""
+    """Every `Request(...)` construction in one module, however it is spelt."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    return [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "Request"
-    ]
+    return [node for node in ast.walk(tree) if _is_request(node)]
 
 
 def _method_of(call: ast.Call) -> str | None:
@@ -96,17 +105,16 @@ def test_the_sweep_sees_a_planted_non_get():
     same two helpers the sweep uses are the ones exercised, rather than a second
     copy of the logic that happens to agree.
     """
-    planted = ast.parse('urllib.request.Request(u, data=b"{}", method="POST")')
-    calls = [
-        node
-        for node in ast.walk(planted)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "Request"
-    ]
-    assert len(calls) == 1
-    assert _method_of(calls[0]) == "POST"
-    assert _has_body(calls[0]) is True
+    planted = ast.parse(
+        'urllib.request.Request(u, data=b"{}", method="POST")\n'
+        # The other spelling, which the sweep could not see: a module that did
+        # `from urllib.request import Request` would have passed it silently.
+        'Request(u, data=b"{}", method="PUT")\n'
+    )
+    calls = [node for node in ast.walk(planted) if _is_request(node)]
+    assert len(calls) == 2
+    assert {_method_of(call) for call in calls} == {"POST", "PUT"}
+    assert all(_has_body(call) for call in calls)
 
 
 def test_nothing_in_the_package_imports_the_lane_controller():

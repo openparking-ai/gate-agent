@@ -4,19 +4,33 @@ Written as an implementer would write it: from `lane-controller/docs/CONTRACT.md
 with its own vocabulary, on the standard library. No loops, no confirmation, no
 identity service, no platform, and a fallback reason from its own vendor's words.
 
-**It imports exactly two things from `lane_controller`**, and they are the sets
-that contract PUBLISHES as closed: the malfunction codes, and which of them may
-never be alarmed on. Everything else about this lane is its own. A stub built on
-our machinery would prove nothing about a foreign lane, so
-`tests/test_targets.py` reads the imports out of this package's source and
-requires them to be those two and no others.
+**It imports NOTHING from `lane_controller`.** It used to import two things --
+the malfunction codes and the never-alarm set -- because those were the two the
+document withheld, which made "written from the document" false for exactly the
+part that mattered. The document publishes them now, under **The closed sets**,
+and `lane.py` carries a literal copy with its source named beside it.
 
-That mirrors the same rule in `lane-controller/tests/test_third_party_seat.py`.
-It is a second stub rather than that one because `tests/` is not part of the
-installed package -- and a second implementer writing from the document is
-closer to the thing being measured than a copy would be.
+`tests/test_targets.py` reads the imports out of this package's source and
+requires there to be none of ours, and requires the literal to equal
+`MalfunctionCode`'s values in the suite that has our lane installed. A stub built
+on our machinery would prove nothing about a foreign lane; a stub whose copy of a
+published set has quietly drifted would prove something false.
 """
 
-from .lane import VENDOR_REASON, ForeignLane, make_server
+from .lane import (
+    MALFUNCTION_CODES,
+    NEVER_ALARM_CODES,
+    VENDOR_CAVEAT,
+    VENDOR_REASON,
+    ForeignLane,
+    make_server,
+)
 
-__all__ = ["VENDOR_REASON", "ForeignLane", "make_server"]
+__all__ = [
+    "MALFUNCTION_CODES",
+    "NEVER_ALARM_CODES",
+    "VENDOR_CAVEAT",
+    "VENDOR_REASON",
+    "ForeignLane",
+    "make_server",
+]

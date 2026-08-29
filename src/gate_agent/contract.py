@@ -43,6 +43,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from urllib.parse import urlsplit
 
 #: Bumped whenever a payload's shape changes in a way a consumer could notice.
 #: Additive changes do not bump it and a consumer ignores fields it does not
@@ -102,6 +103,17 @@ class MonitorCode(StrEnum):
     LANE_UNREACHABLE = "lane_unreachable"
     IDENTITY_SERVICE_UNREACHABLE = "identity_service_unreachable"
     PLATFORM_UNREACHABLE = "platform_unreachable"
+    #: The target ANSWERED, and what it answered was no -- a 3xx or a 4xx. It
+    #: is not down: it is up, it received the request, and it declined it, and
+    #: the `status` on the entry says which decline. A dead credential (401), a
+    #: platform older than this build (404) and a target steering this monitor
+    #: at another host (3xx) are three different repairs on three different
+    #: machines, and every one of them used to be published as "that target is
+    #: unreachable" -- which names the wrong machine and carries no status for a
+    #: human to tell them apart with.
+    LANE_REFUSED_US = "lane_refused_us"
+    IDENTITY_SERVICE_REFUSED_US = "identity_service_refused_us"
+    PLATFORM_REFUSED_US = "platform_refused_us"
     #: A target answered with a contract version this build does not know. Its
     #: codes STOP being passed through while this holds: half-understanding a
     #: payload is worse than admitting you cannot read it.
@@ -174,6 +186,9 @@ MONITOR_SOURCES: dict[MonitorCode, Source] = {
     MonitorCode.LANE_UNREACHABLE: Source.MEASURED,
     MonitorCode.IDENTITY_SERVICE_UNREACHABLE: Source.MEASURED,
     MonitorCode.PLATFORM_UNREACHABLE: Source.MEASURED,
+    MonitorCode.LANE_REFUSED_US: Source.MEASURED,
+    MonitorCode.IDENTITY_SERVICE_REFUSED_US: Source.MEASURED,
+    MonitorCode.PLATFORM_REFUSED_US: Source.MEASURED,
     MonitorCode.TARGET_CONTRACT_UNSUPPORTED: Source.MEASURED,
     MonitorCode.SINK_DELIVERY_FAILED: Source.MEASURED,
     MonitorCode.LANE_GONE_QUIET: Source.MEASURED,
@@ -187,6 +202,34 @@ UNREACHABLE_CODE: dict[TargetKind, MonitorCode] = {
     TargetKind.IDENTITY_SERVICE: MonitorCode.IDENTITY_SERVICE_UNREACHABLE,
     TargetKind.PLATFORM: MonitorCode.PLATFORM_UNREACHABLE,
 }
+
+#: The same pairing for the OTHER half of a failed poll: the target answered,
+#: and said no. Written beside the map above so a target kind cannot gain one
+#: without the other -- a kind with an `unreachable` code and no `refused_us`
+#: code would publish every refusal from it as silence again.
+REFUSED_CODE: dict[TargetKind, MonitorCode] = {
+    TargetKind.LANE: MonitorCode.LANE_REFUSED_US,
+    TargetKind.IDENTITY_SERVICE: MonitorCode.IDENTITY_SERVICE_REFUSED_US,
+    TargetKind.PLATFORM: MonitorCode.PLATFORM_REFUSED_US,
+}
+
+
+def published_url(url: str) -> str:
+    """A target's URL as this monitor publishes it: scheme, host, port, path.
+
+    NOTHING ELSE. `GET /v1/monitor` exists so a consumer can see WHAT is being
+    watched, and those four are what answers that. Userinfo is refused at
+    startup, and this is the second half of the same rule: what is published is
+    REBUILT from the parts that are an address, so a credential -- or a query
+    string, or a fragment -- cannot ride out on this route because somebody
+    found a way past the first check.
+    """
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    port = f":{parts.port}" if parts.port is not None else ""
+    return f"{parts.scheme}://{host}{port}{parts.path}"
 
 
 def _text(value, field_name: str) -> str:
@@ -239,18 +282,38 @@ class TargetDescription:
     poll_seconds: float
     #: Whether a credential is configured for this target. Not the credential.
     authenticated: bool
+    #: How long this monitor waits for this target's answer. A per-site SETTING
+    #: and an ASSUMPTION, published for the same reason `poll_seconds` is: it is
+    #: a property of THIS monitor's configuration, and a document could only
+    #: describe one. What it is drawn against is in `client.DEFAULT_TIMEOUT`.
+    timeout_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         _text(self.name, "target.name")
         if self.kind not in tuple(kind.value for kind in TargetKind):
             raise ValueError(f"target kind must be one of {tuple(TargetKind)}, got {self.kind!r}")
         _text(self.url, "target.url")
+        parsed = urlsplit(self.url)
+        if parsed.username or parsed.password:
+            # The same refusal the configuration makes, held one layer lower so
+            # it cannot be routed around by building the payload some other way.
+            # This route publishes what a site watches; it may not publish how
+            # to authenticate to it.
+            raise ValueError(
+                "target.url has userinfo in URL: credentials come from files, and this route "
+                "publishes an address rather than a way in"
+            )
         if not isinstance(self.poll_seconds, float) or self.poll_seconds <= 0:
             raise ValueError(
                 f"poll_seconds must be a positive number of seconds, got {self.poll_seconds!r}"
             )
         if not isinstance(self.authenticated, bool):
             raise ValueError("target.authenticated must be a bool")
+        if not isinstance(self.timeout_seconds, float) or self.timeout_seconds <= 0:
+            raise ValueError(
+                f"timeout_seconds must be a positive number of seconds, "
+                f"got {self.timeout_seconds!r}"
+            )
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -329,6 +392,12 @@ class MonitorEntry:
     code: str
     subject: str
     state: str
+    #: The HTTP status the target answered with, when the code is about an
+    #: ANSWER. `null` everywhere else. It is on the entry rather than only in
+    #: the message because a human arriving at this route after the message has
+    #: scrolled away needs the same fact: 401 is a credential, 404 is an older
+    #: target, and neither is a target that is down.
+    status: int | None = None
 
     def __post_init__(self) -> None:
         if self.code not in tuple(code.value for code in MonitorCode):
@@ -336,6 +405,18 @@ class MonitorEntry:
         _text(self.subject, "subject")
         if self.state not in tuple(state.value for state in HealthState):
             raise ValueError(f"state must be one of {tuple(HealthState)}, got {self.state!r}")
+        if self.status is not None and (
+            isinstance(self.status, bool) or not isinstance(self.status, int)
+            or not 100 <= self.status <= 599
+        ):
+            raise ValueError(f"status must be an HTTP status code or null, got {self.status!r}")
+        if self.status is not None and self.code not in tuple(
+            code.value for code in REFUSED_CODE.values()
+        ):
+            # A status on any other code would be a number with no answer behind
+            # it. The codes that carry one are the ones that exist because a
+            # target answered.
+            raise ValueError(f"{self.code} does not carry an HTTP status; got {self.status!r}")
         # The invariant, copied from the lane contract because it is the same
         # invariant. `ok` and `active` are claims about a measurement, and a
         # code this build does not derive has no standing to make either.
@@ -355,6 +436,7 @@ class MonitorEntry:
             "subject": self.subject,
             "state": self.state,
             "source": self.source.value,
+            "status": self.status,
         }
 
 
@@ -458,8 +540,11 @@ class Notification:
     """
 
     site_id: str
-    #: The lane this is about, when the target named one. `null` for a target
-    #: that is not a lane, and for a lane that has not yet identified itself.
+    #: The lane this is about, when the target that is about it IS a lane.
+    #: `null` for the platform's codes, the identity service's, and this
+    #: monitor's own -- stamping a lane's id on those reads as "that lane cannot
+    #: reach the platform", which is a different machine, a different fault and
+    #: a different repair from the true one.
     lane_id: str | None
     target: str
     code: str
@@ -475,6 +560,12 @@ class Notification:
     #: reading the message does not get.
     caveat: str | None
     at: str
+    #: The HTTP status a target answered with, for the codes that exist because
+    #: it answered. `null` everywhere else. It is in the MESSAGE, not only on the
+    #: health route, because the message is what wakes somebody: without it,
+    #: "the platform is refusing us" sends them to the platform when the fault
+    #: is a token in a file beside this process.
+    status: int | None = None
 
     def __post_init__(self) -> None:
         _text(self.site_id, "site_id")

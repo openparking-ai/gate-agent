@@ -41,9 +41,10 @@ from collections import deque
 from datetime import UTC, datetime
 from time import monotonic
 
-from .client import ReadOnlyClient, TargetUnreachable
+from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable
 from .config import MonitorConfig, Target
 from .contract import (
+    REFUSED_CODE,
     UNREACHABLE_CODE,
     EventPage,
     HealthState,
@@ -58,6 +59,7 @@ from .contract import (
     TargetHealth,
     TargetKind,
     Transition,
+    published_url,
 )
 from .sinks import DeliveryFailed
 
@@ -100,6 +102,35 @@ class UnsupportedContract(Exception):
     """
 
 
+class ContractViolation(Exception):
+    """A target answered a payload this build cannot read, and it said why.
+
+    NOT a version problem and not a connection problem: the target is up, it is
+    on a version this monitor knows, and the payload it sent breaks the contract
+    that version describes. `state` outside the three the contract defines,
+    `never_alarm` absent or not a boolean.
+
+    Both used to be read anyway, and both failed silently in the reassuring
+    direction. `never_alarm` was `bool(...)` of whatever arrived: absent, it read
+    as `false` and paged a technician because a car arrived; the string
+    `"false"` is truthy, so a lane whose serialiser quoted it silenced that code
+    for ever with nothing anywhere reporting it. A `state` this build does not
+    know was passed through untouched AND poisoned the next transition -- one
+    malformed poll and an `active` fault afterwards was published as active and
+    told to nobody, because the state before it was neither `ok` nor `unknown`.
+
+    So the payload is refused WHOLE and the target becomes
+    `target_contract_unsupported`: named, active, paged once, and its codes stop
+    being passed through. That is the same answer this monitor already gives a
+    version it cannot read, for the same reason -- half-understanding a payload
+    about a lane is worse than admitting it cannot be read.
+    """
+
+    def __init__(self, message: str, version: int | None = None) -> None:
+        super().__init__(message)
+        self.version = version
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -120,7 +151,15 @@ class Monitor:
         self._clock = clock
         self._now = now
         self._clients = {
-            target.name: client_factory(target.url, target.token) for target in config.targets
+            target.name: client_factory(target.url, target.token, target.timeout_seconds)
+            for target in config.targets
+        }
+        #: What KIND each declared target is. `lane_id` is stamped on a
+        #: notification only when the target it is about is a lane, and this is
+        #: how that question is answered without a second copy of the target
+        #: list.
+        self._kinds: dict[str, TargetKind] = {
+            target.name: target.kind for target in config.targets
         }
         #: The last state observed for every (scope, target, code, subject).
         #:
@@ -177,13 +216,21 @@ class Monitor:
 
         A target that does not answer is not refused: it is down, which is a
         malfunction and not a misconfiguration, and the first poll reports it.
-        A target that ANSWERS with a version this build does not know is refused,
-        loudly, here.
+        Nor is one that answers NO -- a lane behind an expired credential is a
+        credential to fix, reported by the first poll with its status, and a
+        monitor that refused to start on it would be absent at exactly the
+        moment it is wanted. A target that ANSWERS with a version this build
+        does not know IS refused, loudly, here.
         """
         if target.kind is not TargetKind.LANE:
             return
         try:
             body = self._clients[target.name].get("/v1/lane")
+        except TargetRefusedUs as exc:
+            log.warning(
+                "%s refused the identity route: HTTP %s", target.name, exc.status
+            )
+            return
         except TargetUnreachable as exc:
             log.warning("%s did not answer its identity route: %s", target.name, exc)
             return
@@ -214,26 +261,67 @@ class Monitor:
             self._poll_target(target)
 
     def _poll_target(self, target: Target) -> None:
+        """One poll, and it has exactly four endings, all of them said out loud.
+
+        The target did not answer; it answered NO; it answered something this
+        build cannot read; or it answered. The first two used to be one, and
+        folding them cost a human the difference between a dead platform, a dead
+        credential and a platform older than this build.
+        """
         unreachable = UNREACHABLE_CODE[target.kind]
+        refused = REFUSED_CODE[target.kind]
         try:
             version, entries = self._read(target)
+        except TargetRefusedUs as exc:
+            # IT ANSWERED. So it is not unreachable -- that is a measurement,
+            # and this poll made it -- and what it answered is its own code with
+            # the status on it, because 401, 404 and 302 send a human to three
+            # different machines.
+            log.warning("%s refused us: HTTP %s", target.name, exc.status)
+            self._monitor_code(unreachable, target.name, HealthState.OK, target.name)
+            self._monitor_code(
+                refused, target.name, HealthState.ACTIVE, target.name, status=exc.status
+            )
+            self._retire(target.name)
+            self._forget_target_payload(target)
+            return
         except TargetUnreachable as exc:
             # "No connection", in Gokhan's words, and it is the monitor's own
             # measurement: nothing else can make it, because a thing that is
             # down cannot report that it is down.
             log.warning("%s is unreachable: %s", target.name, exc)
             self._monitor_code(unreachable, target.name, HealthState.ACTIVE, target.name)
+            # Whether it would refuse us is not a question this poll answered:
+            # nothing came back to refuse anything. `unknown`, which is the
+            # value that means nobody measured, and never `ok`.
+            self._monitor_code(refused, target.name, HealthState.UNKNOWN, target.name)
+            self._retire(target.name)
+            self._forget_target_payload(target)
+            return
+        except ContractViolation as exc:
+            # Up, reachable, on a version this build knows, and publishing a
+            # payload that version does not describe. Named, active, paged once.
+            log.error("%s published a payload this build cannot read: %s", target.name, exc)
+            self._monitor_code(unreachable, target.name, HealthState.OK, target.name)
+            self._monitor_code(refused, target.name, HealthState.OK, target.name)
+            self._monitor_code(
+                MonitorCode.TARGET_CONTRACT_UNSUPPORTED,
+                target.name,
+                HealthState.ACTIVE,
+                target.name,
+            )
             self._retire(target.name)
             self._targets[target.name] = TargetHealth(
                 name=target.name,
                 kind=target.kind.value,
-                polled_at=self._targets[target.name].polled_at,
-                contract_version=self._targets[target.name].contract_version,
+                polled_at=self._now(),
+                contract_version=exc.version,
                 codes=(),
             )
             return
 
         self._monitor_code(unreachable, target.name, HealthState.OK, target.name)
+        self._monitor_code(refused, target.name, HealthState.OK, target.name)
 
         known = (
             KNOWN_LANE_VERSIONS if target.kind is TargetKind.LANE else KNOWN_IDENTITY_VERSIONS
@@ -282,6 +370,22 @@ class Monitor:
         for entry in entries:
             self._passed_through(target.name, entry)
 
+    def _forget_target_payload(self, target: Target) -> None:
+        """A target that did not give us a payload has no payload published.
+
+        `polled_at` and `contract_version` keep what they had -- they say when
+        this target was last read and as what -- and `codes` empties, because a
+        lane's health as of whenever it was last reachable is indistinguishable
+        from now.
+        """
+        self._targets[target.name] = TargetHealth(
+            name=target.name,
+            kind=target.kind.value,
+            polled_at=self._targets[target.name].polled_at,
+            contract_version=self._targets[target.name].contract_version,
+            codes=(),
+        )
+
     def _read(self, target: Target) -> tuple[int | None, tuple[dict, ...]]:
         """One target's poll. Every branch is a GET and nothing else."""
         client = self._clients[target.name]
@@ -290,9 +394,12 @@ class Monitor:
             codes = body.get("codes")
             if not isinstance(codes, list):
                 raise TargetUnreachable(f"{target.name}: health payload carries no `codes` list")
-            return _version(body.get("contract_version")), tuple(
+            version = _version(body.get("contract_version"))
+            entries = tuple(
                 entry for entry in codes if isinstance(entry, dict) and entry.get("code")
             )
+            _refuse_unreadable(target.name, entries, version)
+            return version, entries
         if target.kind is TargetKind.IDENTITY_SERVICE:
             # That contract publishes no malfunction table, so this target
             # contributes reachability and its version and nothing else. Its
@@ -370,7 +477,12 @@ class Monitor:
     # -- the transition rule ------------------------------------------------
 
     def _monitor_code(
-        self, code: MonitorCode, subject: str, state: HealthState, target: str
+        self,
+        code: MonitorCode,
+        subject: str,
+        state: HealthState,
+        target: str,
+        status: int | None = None,
     ) -> None:
         """One of the monitor's OWN codes. Always `measured`, never `never_alarm`."""
         self._observe(
@@ -382,6 +494,7 @@ class Monitor:
             source=Source.MEASURED.value,
             caveat=None,
             never_alarm=False,
+            status=status,
         )
 
     def _passed_through(self, target: str, entry: dict) -> None:
@@ -405,7 +518,12 @@ class Monitor:
             state=str(entry.get("state")),
             source=str(entry.get("source")),
             caveat=entry.get("caveat"),
-            never_alarm=bool(entry.get("never_alarm")),
+            # Already known to be a boolean and already known to be one of the
+            # three states: `_refuse_unreadable` refused the whole payload
+            # otherwise, before anything here was observed. `bool(...)` used to
+            # stand here and it is what made an ABSENT field page and the string
+            # `"false"` silence.
+            never_alarm=entry["never_alarm"],
         )
 
     def _observe(
@@ -419,11 +537,17 @@ class Monitor:
         source: str,
         caveat,
         never_alarm: bool,
+        status: int | None = None,
     ) -> None:
         key = (scope, target, code, subject)
         previous = self._states.get(key, HealthState.UNKNOWN.value)
         self._states[key] = state
-        self._facts[key] = {"source": source, "caveat": caveat, "never_alarm": never_alarm}
+        self._facts[key] = {
+            "source": source,
+            "caveat": caveat,
+            "never_alarm": never_alarm,
+            "status": status,
+        }
 
         transition = self._transition(key, previous, state)
         if transition is None:
@@ -439,7 +563,7 @@ class Monitor:
         self._send(
             Notification(
                 site_id=self.config.site_id,
-                lane_id=self._lane_id,
+                lane_id=self._lane_id_of(target),
                 target=target,
                 code=code,
                 subject=subject if subject != target else None,
@@ -447,8 +571,22 @@ class Monitor:
                 source=source,
                 caveat=caveat if isinstance(caveat, str) and caveat else None,
                 at=self._now(),
+                status=status,
             )
         )
+
+    def _lane_id_of(self, target: str) -> str | None:
+        """The lane a notification is about, or `null`, as the contract says.
+
+        `null` for the platform's codes, for the identity service's, and for
+        this monitor's own -- the sink that could not deliver and the target it
+        could not reach are not facts about a lane. Stamped unconditionally, a
+        lane's id turned `platform_unreachable` into "lane fl-lane-a cannot
+        reach the platform": a different machine, a different fault, and a
+        different repair from the true one. And it put a FALSE discriminator
+        beside the only true one on the two codes that collide by name.
+        """
+        return self._lane_id if self._kinds.get(target) is TargetKind.LANE else None
 
     def _transition(self, key, previous: str, state: str) -> Transition | None:
         """The whole rule, in one place, so there is one copy of it.
@@ -570,17 +708,35 @@ class Monitor:
         is why it is not on the events route: that route serves transitions, and
         this is not one.
         """
+        # ONE ENUMERATION, and it is `health()` -- the same answer the route
+        # serves. A second walk over `self._states` stood here, and the two did
+        # not agree: `health()` synthesises an `unknown` entry for every
+        # `MonitorCode` that has no subject yet, and those never appeared in
+        # this message. The omitted ones were exactly this monitor's own blind
+        # spots -- with no platform declared, NOBODY is measuring whether a lane
+        # has gone quiet, and the one message whose stated purpose is "what does
+        # this monitor NOT know?" did not say so. A claim lives in one place.
+        health = self.health()
         unmeasured = [
             {
-                "target": target,
-                "code": code,
-                "subject": subject if subject != target else None,
-                "source": str(
-                    self._facts.get((scope, target, code, subject), {}).get("source", "")
-                ),
+                "target": self.config.monitor_id,
+                "code": entry.code,
+                "subject": entry.subject,
+                "source": entry.source.value,
             }
-            for (scope, target, code, subject), state in sorted(self._states.items())
-            if state == HealthState.UNKNOWN.value
+            for entry in health.codes
+            if entry.state == HealthState.UNKNOWN.value
+        ]
+        unmeasured += [
+            {
+                "target": target.name,
+                "code": str(entry.get("code")),
+                "subject": None,
+                "source": str(entry.get("source", "")),
+            }
+            for target in health.targets
+            for entry in target.codes
+            if isinstance(entry, dict) and entry.get("state") == HealthState.UNKNOWN.value
         ]
         payload = {
             "site_id": self.config.site_id,
@@ -610,9 +766,14 @@ class Monitor:
                 TargetDescription(
                     name=target.name,
                     kind=target.kind.value,
-                    url=target.url,
+                    # Scheme, host, port and path, REBUILT -- never the string as
+                    # configured. `https://ops:S3CRET@example.com` was
+                    # accepted and republished verbatim here, beside
+                    # `authenticated: false`.
+                    url=published_url(target.url),
                     poll_seconds=target.poll_seconds,
                     authenticated=target.authenticated,
+                    timeout_seconds=target.timeout_seconds,
                 )
                 for target in self.config.targets
             ),
@@ -632,15 +793,16 @@ class Monitor:
         own: list[MonitorEntry] = []
         for code in MonitorCode:
             subjects = {
-                subject: state
-                for (scope, _target, seen_code, subject), state in self._states.items()
+                subject: (state, self._facts.get(key, {}).get("status"))
+                for key, state in self._states.items()
+                for (scope, _target, seen_code, subject) in [key]
                 if scope == OWN and seen_code == code.value
             }
             if not subjects:
-                subjects = {self.config.monitor_id: HealthState.UNKNOWN.value}
+                subjects = {self.config.monitor_id: (HealthState.UNKNOWN.value, None)}
             own.extend(
-                MonitorEntry(code=code.value, subject=subject, state=state)
-                for subject, state in sorted(subjects.items())
+                MonitorEntry(code=code.value, subject=subject, state=state, status=status)
+                for subject, (state, status) in sorted(subjects.items())
             )
         return MonitorHealth(
             codes=tuple(own),
@@ -663,6 +825,45 @@ class Monitor:
                 if seq > since
             ),
         )
+
+
+def _refuse_unreadable(target: str, entries: tuple[dict, ...], version: int | None) -> None:
+    """Every entry, or none of them. The two fields a reader may not guess at.
+
+    `state` and `never_alarm` are what this monitor DOES something with: one
+    decides whether a fault is raised, the other whether a human is woken. A
+    value outside what the contract defines for either is not a value to be
+    interpreted generously -- it is a payload this build cannot read, and the
+    contract's own answer to that is to refuse it whole rather than half-read
+    it.
+
+    Refusing WHOLE, and not entry by entry, on purpose: a lane publishing one
+    unreadable entry is a lane whose serialiser this build does not understand,
+    and passing through the rest of its payload would publish a partial view of
+    a lane's health as though it were the whole. The same rule the version
+    refusal follows.
+    """
+    states = tuple(state.value for state in HealthState)
+    for entry in entries:
+        code = entry.get("code")
+        never_alarm = entry.get("never_alarm")
+        if not isinstance(never_alarm, bool):
+            raise ContractViolation(
+                f"{target}: `{code}` publishes never_alarm={never_alarm!r}. The contract requires "
+                "a JSON boolean on every entry. Absent could be a lane with nothing to say or a "
+                "lane whose serialiser dropped it, and the two point opposite ways -- one pages a "
+                "technician because a car arrived, the other silences a real fault for ever.",
+                version,
+            )
+        state = entry.get("state")
+        if state not in states:
+            raise ContractViolation(
+                f"{target}: `{code}` publishes state={state!r}, which is not one of {states}. "
+                "Passed through, a state outside the set can never produce a transition -- and it "
+                "poisons the next one, so an ACTIVE fault after it is held, published as active, "
+                "and told to nobody.",
+                version,
+            )
 
 
 def _version(value):
@@ -691,6 +892,7 @@ def _age_seconds(stamp, now: str) -> float | None:
 __all__ = [
     "KNOWN_IDENTITY_VERSIONS",
     "KNOWN_LANE_VERSIONS",
+    "ContractViolation",
     "Monitor",
     "UnsupportedContract",
     "utc_now",

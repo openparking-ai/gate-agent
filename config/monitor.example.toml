@@ -19,6 +19,17 @@ url = "http://127.0.0.1:8090"
 # How often to ask. A SETTING AND AN ASSUMPTION — nothing measures how often a
 # lane's health changes. Omit it and the published default applies.
 poll_seconds = 30
+# How long to wait for this target's answer. A SETTING AND AN ASSUMPTION, with a
+# published default of 10 seconds. What it is drawn against is the other side of
+# the seam: a lane's own health route may read the identification service on the
+# request, and bounds THAT read at its `[lane] identity_health_timeout_s` (1
+# second by default). This number must comfortably exceed that one, or a lane
+# that is up and correctly answering `unknown` about a hung identification
+# service is published here as a dead lane.
+#
+# A URL may not carry a credential. `https://user:password@host` is refused at
+# startup, by name: credentials come from files.
+timeout_seconds = 10
 # Only when that lane is bound off loopback and therefore demands a credential.
 # A FILE. There is no key that takes the token as a value; one is refused by
 # name, because a value here is a credential in this file and in every backup

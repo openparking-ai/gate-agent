@@ -26,7 +26,13 @@ from pathlib import Path
 
 from .config import ConfigError, MonitorConfig
 from .monitor import Monitor, UnsupportedContract
-from .service import InsecureBind, MonitorService, assert_bind_allowed, make_server
+from .service import (
+    InsecureBind,
+    MonitorService,
+    assert_bind_allowed,
+    is_loopback,
+    make_server,
+)
 from .sinks import build as build_sink
 
 
@@ -96,7 +102,7 @@ def cmd_monitor(args) -> int:
     sinks = [build_sink(sink) for sink in config.sinks]
     monitor = Monitor(config, sinks)
 
-    reach = "local only by design" if is_local(args.host) else "EXPOSED"
+    reach = "local only by design" if is_loopback(args.host) else "EXPOSED"
     print(f"gate-agent monitor on http://{args.host}:{args.port}  ({reach})")
     print(f"  site {config.site_id}, monitor {config.monitor_id}")
     print(f"  watching: {', '.join(target.name for target in config.targets)}")
@@ -126,10 +132,6 @@ def cmd_monitor(args) -> int:
         stop.set()
         server.server_close()
     return 0
-
-
-def is_local(host: str) -> bool:
-    return host in ("127.0.0.1", "::1", "localhost")
 
 
 def _poll_forever(monitor: Monitor, stop: threading.Event, tick: float = 1.0) -> None:

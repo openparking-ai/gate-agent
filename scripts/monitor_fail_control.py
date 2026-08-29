@@ -58,6 +58,34 @@ when nobody is looking.
   a_sink_failure_is_quiet
                          a sink that cannot deliver is not reported. The failure
                          that hides every other failure.
+  redirects_are_followed
+                         the opener follows a 3xx again. A target then takes
+                         this monitor's credential to a host of its choosing,
+                         serves another host's payload as its own health, and
+                         silences the webhook sink by redirecting it -- with
+                         `deliver()` reporting success.
+  never_alarm_is_coerced
+                         `never_alarm` is bool(...) of whatever arrived. Absent
+                         pages a technician because a car arrived; the string
+                         "false" silences a code for ever.
+  any_state_passes_through
+                         a `state` outside the contract's three is published and
+                         becomes the state the next one is compared against, so
+                         the ACTIVE fault after it is told to nobody.
+  refusal_is_silence     an HTTP refusal is published as `<kind>_unreachable`
+                         again. A dead credential and a dead platform become one
+                         message, on the wrong machine, with no status.
+  lane_id_on_everything  the lane's id is stamped on every notification, so the
+                         monitor's own sink failure reads as a lane's fault.
+  startup_from_a_second_walk
+                         the startup message is built from a second enumeration.
+                         It then omits exactly this monitor's own blind spots --
+                         the codes with no subject yet.
+  userinfo_is_published  a credential in a target URL is accepted and echoed on
+                         `GET /v1/monitor`, beside `authenticated: false`.
+  the_foreign_lane_imports_ours
+                         the stub that exists to prove a stranger can take this
+                         seat takes its code list from our package again.
   doc_values             the document publishes what the code contradicts:
                          `contract_version: 99` and a state outside the enum. The
                          shape check passes both, because it discards every leaf.
@@ -85,7 +113,7 @@ BREAKS = [
         "name": "import_the_lane",
         "why": "the monitor imports the lane instead of speaking its contract",
         "file": "src/gate_agent/monitor.py",
-        "from": "from .client import ReadOnlyClient, TargetUnreachable",
+        "from": "from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable",
         "to": "from lane_controller.contract import MalfunctionCode as _Unused  # noqa: F401\n"
         "from .client import ReadOnlyClient, TargetUnreachable",
     },
@@ -120,12 +148,8 @@ BREAKS = [
         "name": "never_alarm_from_a_list",
         "why": "the monitor holds its own never-alarm set instead of reading the wire",
         "file": "src/gate_agent/monitor.py",
-        "from": (
-            '            never_alarm=bool(entry.get("never_alarm")),\n'
-            "        )\n\n    def _observe("
-        ),
-        "to": '            never_alarm=str(entry.get("code")) == "reference_not_recognised",\n'
-        "        )\n\n    def _observe(",
+        "from": '            never_alarm=entry["never_alarm"],',
+        "to": '            never_alarm=str(entry.get("code")) == "reference_not_recognised",',
     },
     {
         "name": "no_longer_measured_is_silent",
@@ -142,13 +166,13 @@ BREAKS = [
         "why": "a lane that stopped answering keeps publishing its last known health",
         "file": "src/gate_agent/monitor.py",
         "from": (
-            "            self._monitor_code("
-            "unreachable, target.name, HealthState.ACTIVE, target.name)\n"
+            "            self._monitor_code(refused, target.name, "
+            "HealthState.UNKNOWN, target.name)\n"
             "            self._retire(target.name)"
         ),
         "to": (
-            "            self._monitor_code("
-            "unreachable, target.name, HealthState.ACTIVE, target.name)"
+            "            self._monitor_code(refused, target.name, "
+            "HealthState.UNKNOWN, target.name)"
         ),
     },
     {
@@ -192,6 +216,79 @@ BREAKS = [
         "file": "src/gate_agent/monitor.py",
         "from": "        self._sink_states(failures)",
         "to": "        return",
+    },
+    {
+        "name": "redirects_are_followed",
+        "why": "the opener follows a 3xx and hands over the credential",
+        "file": "src/gate_agent/redirects.py",
+        "from": "    def redirect_request(self, req, fp, code, msg, headers, newurl):\n"
+        "        return None",
+        "to": "    def _not_used(self, req, fp, code, msg, headers, newurl):\n"
+        "        return None",
+    },
+    {
+        "name": "never_alarm_is_coerced",
+        "why": "`never_alarm` is bool(...) of whatever arrived",
+        "file": "src/gate_agent/monitor.py",
+        # Exactly the behaviour that stood here: absent reads as `false` and
+        # pages a technician because a car arrived; `"false"` is truthy and
+        # silences that code for ever.
+        "from": "        if not isinstance(never_alarm, bool):\n"
+        "            raise ContractViolation(",
+        "to": '        entry["never_alarm"] = bool(never_alarm)\n'
+        "        if False:\n"
+        "            raise ContractViolation(",
+    },
+    {
+        "name": "any_state_passes_through",
+        "why": "a state outside the contract's three is published",
+        "file": "src/gate_agent/monitor.py",
+        "from": '        state = entry.get("state")\n        if state not in states:',
+        "to": '        state = entry.get("state")\n        if state is None:',
+    },
+    {
+        "name": "refusal_is_silence",
+        "why": "an HTTP refusal is published as unreachable",
+        "file": "src/gate_agent/client.py",
+        "from": '            if exc.code >= 500:\n'
+        '                raise TargetUnreachable(f"{url}: HTTP {exc.code}") from exc',
+        "to": '            if exc.code >= 300:\n'
+        '                raise TargetUnreachable(f"{url}: HTTP {exc.code}") from exc',
+    },
+    {
+        "name": "lane_id_on_everything",
+        "why": "the lane's id is stamped on every notification",
+        "file": "src/gate_agent/monitor.py",
+        "from": "        return self._lane_id if self._kinds.get(target) "
+        "is TargetKind.LANE else None",
+        "to": "        return self._lane_id",
+    },
+    {
+        "name": "startup_from_a_second_walk",
+        "why": "the startup message is built from a second enumeration",
+        "file": "src/gate_agent/monitor.py",
+        "from": "            for entry in health.codes\n"
+        "            if entry.state == HealthState.UNKNOWN.value\n"
+        "        ]",
+        "to": "            for entry in health.codes\n"
+        "            if entry.state == HealthState.UNKNOWN.value\n"
+        "            and entry.subject != self.config.monitor_id\n"
+        "        ]",
+    },
+    {
+        "name": "userinfo_is_published",
+        "why": "a credential in a target URL is accepted and echoed",
+        "file": "src/gate_agent/config.py",
+        "from": '        _refuse_userinfo(url, f"[targets.{kind.value}].url")',
+        "to": "        pass",
+    },
+    {
+        "name": "the_foreign_lane_imports_ours",
+        "why": "the foreign lane takes its code list from our package",
+        "file": "tests/foreign_lane/lane.py",
+        "from": "MALFUNCTION_CODES = (",
+        "to": "from lane_controller.contract import MalfunctionCode as _Ours  # noqa: F401\n"
+        "MALFUNCTION_CODES = (",
     },
     {
         "name": "doc_values",

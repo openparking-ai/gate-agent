@@ -38,6 +38,7 @@ from email.message import EmailMessage
 
 from .config import EmailSinkConfig, LogSinkConfig, WebhookSinkConfig
 from .contract import Notification
+from .redirects import open_url
 
 log = logging.getLogger(__name__)
 
@@ -108,9 +109,23 @@ class EmailSink:
 
     def deliver(self, notification: Notification) -> None:
         payload = notification.to_dict()
-        self._send(
-            f"[{payload['site_id']}] {payload['code']} {payload['transition']}", payload
-        )
+        self._send(self.subject_for(payload), payload)
+
+    @staticmethod
+    def subject_for(payload: dict) -> str:
+        """What a person sees on a phone at 3am, and it names the MACHINE.
+
+        Two codes are spelt the same on two surfaces -- `platform_unreachable`
+        and `lane_gone_quiet` are both a lane's word for something and this
+        monitor's word for something else -- so a subject of site, code and
+        transition alone was byte-identical whether the fault was a lane's
+        uplink or this monitor's own. The `target` is what separates them, and
+        it belongs in the line somebody reads before they open anything.
+        """
+        where = payload["target"]
+        if payload.get("subject"):
+            where = f"{where}/{payload['subject']}"
+        return f"[{payload['site_id']}] {payload['code']} {payload['transition']} ({where})"
 
     def announce(self, subject: str, payload: dict) -> None:
         self._send(subject, payload)
@@ -157,7 +172,12 @@ class WebhookSink:
     def __init__(self, config: WebhookSinkConfig, opener=None) -> None:
         self.name = config.name
         self.config = config
-        self._open = opener or urllib.request.urlopen
+        # The opener that refuses a 3xx. A redirected POST used to report
+        # SUCCESS on a delivery that never happened, and carry this sink's
+        # bearer token to whichever host the receiver named -- so the one piece
+        # of machinery that exists to notice a sink failing was the piece it
+        # walked past. See `redirects.py`.
+        self._open = opener or open_url
 
     def deliver(self, notification: Notification) -> None:
         self._post({"kind": "transition", **notification.to_dict()})
@@ -178,6 +198,11 @@ class WebhookSink:
         try:
             with self._open(request, timeout=WEBHOOK_TIMEOUT) as response:
                 status = getattr(response, "status", 200)
+        except urllib.error.HTTPError as exc:
+            # A 3xx arrives here too, because nothing is followed. A paging
+            # endpoint that answers `Location` has not been paged, and reporting
+            # that as delivered is how a sink comes to tell nobody for a month.
+            raise DeliveryFailed(f"{self.name}: answered HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise DeliveryFailed(f"{self.name}: {exc}") from exc
         if not 200 <= status < 300:

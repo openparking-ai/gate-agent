@@ -64,9 +64,12 @@ jobs:
         # Breaks each property this monitor exists to have -- its lack of any
         # opening authority, its distance from the lane it reads, `unknown` not
         # being `ok`, transitions rather than states, `never_alarm` read from the
-        # wire, the refusal to start watching nothing, credentials from files,
-        # the site's threshold rather than a constant, and a sink failure being
-        # reported -- and requires the suite to go red on every one. Each break
-        # fails in the REASSURING direction, because that is the direction a
-        # monitor fails in when nobody is looking.
+        # wire as a BOOLEAN, a `state` outside the contract's three refused, an
+        # HTTP refusal reported as an answer rather than as silence, `lane_id`
+        # only on a lane's notifications, the startup message built from one
+        # enumeration, nothing following a redirect, credentials from files and
+        # never from a URL, the site's threshold rather than a constant, and a
+        # sink failure being reported -- and requires the suite to go red on
+        # every one. Each break fails in the REASSURING direction, because that
+        # is the direction a monitor fails in when nobody is looking.
         run: python scripts/monitor_fail_control.py

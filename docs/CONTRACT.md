@@ -24,6 +24,25 @@ that module may not import the target client, and the sweep enforces both.
 
 Three routes, all `GET`. Every other method is answered `405` with `Allow: GET`.
 
+## Nothing this monitor opens follows a redirect
+
+**Every URL this process opens is one a human wrote in its configuration file,
+and a `Location` header does not change that.** A `3xx` is refused by the
+opener, in both directions — the read-only client and the webhook sink.
+
+It is stated here because following one is what a stdlib client does by default,
+and because of what that costs. A redirect rebuilds the request from the old
+one's headers, so **the bearer token travels with it**, to whatever host the
+payload names: a target could take this monitor's operator credential, serve its
+own payload as somebody else's health, and — pointing the webhook sink at a host
+of its choosing — make a POST that was never delivered report SUCCESS, so
+`sink_delivery_failed` never fired. This monitor is pointed at a third party's
+lane **by design**, so "the target is trusted" is not available.
+
+A 3xx from a target is therefore an ANSWER this monitor does not accept: it is
+`<kind>_refused_us` with `302` (or whichever) as its status. A 3xx from a
+webhook is `sink_delivery_failed`.
+
 ## This monitor is a CONSUMER of the lane contract
 
 It reads a lane over
@@ -103,6 +122,30 @@ often to wake somebody, made for every site that never mentioned it. Only an
 `active` state repeats; a held `ok` is not news and a repeated recovery is not a
 fact about anything.
 
+### An HTTP answer is not silence
+
+A target that does not answer and a target that answers NO are two facts, and
+they name different machines:
+
+| | |
+|---|---|
+| `<kind>_unreachable` | Nothing came back. A network failure, a timeout, or a **5xx** — the target's process answered that it could not do the thing, and the repair is at that target either way. This is the "no connection" in the spec, and it is the monitor's own measurement because nothing else can make it: a thing that is down cannot report that it is down. |
+| `<kind>_refused_us` | It ANSWERED, and the answer was no — a **3xx** or a **4xx**. It is up, it received the request, and it declined it. |
+
+**Both carry the HTTP status**, on the health entry and in every sink's message,
+because the status is the difference between three repairs on three different
+machines: **401/403** is this monitor's own credential and the target is
+healthy; **404** is a route this build expects and that target does not have,
+which is what an OLDER target answers; **3xx** is a target trying to steer this
+monitor somewhere else. Folded into one code with no status, an expired token
+paged a human to a platform that was running perfectly, and they could not tell
+from the message either.
+
+Both are measured by this monitor, both follow the transition rule, and both are
+scoped per target. A poll that ends in silence leaves `<kind>_refused_us`
+**`unknown`** — nothing came back to refuse anything, and `ok` there would be a
+claim about a measurement nobody made.
+
 ### `unknown` is never `ok`
 
 The states this surface publishes for a target are **that target's own, passed
@@ -114,6 +157,13 @@ So `unknown` arrives as `unknown`. The monitor **never pages on it and never
 hides it**: every unmeasured code with its `source` is on
 `GET /v1/monitor/health` continuously, and in one message at startup.
 
+**Those two are one enumeration.** The startup message is built from the same
+answer the health route serves, so the two cannot disagree — and they did: the
+message walked a different structure, and the codes it missed were exactly this
+monitor's own blind spots. With no platform declared, nobody is measuring
+whether a lane has gone quiet, and the one message whose purpose is *what does
+this monitor NOT know?* did not say so.
+
 ### `never_alarm` is read from the payload
 
 Whether a code may wake a human travels on the wire with that code. This package
@@ -122,11 +172,44 @@ shows up as a technician dispatched because a car arrived on low-texture ground,
 which is the failure the lane's caveat exists to prevent, reintroduced by its
 reader.
 
+### A payload this build cannot read is refused WHOLE
+
+Two fields on a lane's health entry are what this monitor acts on, and neither
+is guessed at:
+
+- **`never_alarm` must be a JSON boolean, on every entry.** Absent is not
+  `false`. Absent could be a lane with nothing to say or a lane whose serialiser
+  dropped the field, and the two point in opposite directions — one dispatches a
+  technician because a car arrived, the other silences a real fault. And a
+  string is not a boolean: every non-empty string is truthy, so `"false"` would
+  silence that code for ever with nothing anywhere reporting it.
+- **`state` must be one of `ok`, `active`, `unknown`.** A value outside the set
+  can never produce a transition, and it becomes the state a later one is
+  compared against — so an `active` fault arriving after one is held, published
+  as active, and told to nobody.
+
+Either one makes the whole payload one this build cannot read, and the answer is
+the answer this monitor already gives a version it cannot read:
+`target_contract_unsupported`, **`active`**, named, **paged once**, and that
+target's codes stop being passed through. Refused whole and not entry by entry,
+because passing through the rest would publish a partial view of a lane's health
+as though it were the whole.
+
+Validating a value against the set the contract defines is not re-deriving it.
+
 ### The message
 
-It carries the site, the lane if the target named one, the code, the transition,
-the `source` the target gave, that target's own `caveat` if it published one,
-and the time.
+It carries the site, the code, the transition, the `source` the target gave,
+that target's own `caveat` if it published one, the HTTP status when the code is
+about an answer, and the time.
+
+**`lane_id` is on a lane's notifications and on nobody else's.** `null` for the
+platform's codes, the identity service's, and this monitor's own — the sink that
+could not deliver and the target that could not be reached are not facts about a
+lane. `code=platform_unreachable … lane_id=lane-1` reads as "lane-1 cannot reach
+the platform", which is a different machine, a different fault and a different
+repair from the true one; and on the two codes spelt the same on both surfaces
+it puts a false discriminator beside the only true one.
 
 **It carries no plate, no image reference and no event detail.** The monitor
 reads `/health` — never `/events` and never `/state` — so it does not hold one,
@@ -149,7 +232,8 @@ rendered output, with a planted plate as the control.
       "kind": "lane",
       "url": "http://127.0.0.1:8090",
       "poll_seconds": 30.0,
-      "authenticated": false
+      "authenticated": false,
+      "timeout_seconds": 10.0
     }
   ],
   "sinks": [
@@ -166,6 +250,29 @@ route, and a URL is not a credential. `authenticated` says whether one is
 configured; **the credential itself is on no route, and is not in this process's
 argument vector either** — every token is read from a file.
 
+**What is published is scheme, host, port and path, and nothing else** — rebuilt
+from those four parts rather than echoed as configured. A URL carries a
+credential very well (`https://ops:S3CRET@example.com`), and that one was
+accepted and republished here verbatim, beside `authenticated: false`, so the
+one field a consumer would use to notice read the wrong way. **Userinfo in a
+target or sink URL is now refused at startup, by name** — *credentials come from
+files* — and this route rebuilds the address anyway, because one check is a
+check and two is a boundary.
+
+`timeout_seconds` is how long this monitor waits for that target's answer. A
+per-site **setting** with a published default of **10 seconds**, and an
+**assumption** — nothing here measures how long a loaded Jetson takes to answer
+its own health route. What it is drawn against is the other side of the seam: a
+lane's health route may itself read a third machine (the identification service)
+and bounds that read at its own `[lane] identity_health_timeout_s`, published
+default 1 second. **This monitor's timeout must comfortably exceed that one.**
+If they cross, a lane that is up, serving, and correctly answering `unknown`
+about a hung identification service is published here as a DEAD LANE, and every
+real signal it publishes is retired at the same moment — a slow third machine,
+reported as a fault on the wrong one. The two numbers live in two repositories,
+so the relationship is stated in both contracts and measured in the test suite
+against a real lane that answers slowly.
+
 A sink is published as a name and a kind and **nothing else**. No host, no
 recipient, no URL. A consumer is entitled to know that somebody is being told;
 putting where they are on a read route would publish an address list.
@@ -181,7 +288,8 @@ putting where they are on a read route would publish an address list.
       "code": "lane_unreachable",
       "subject": "lane",
       "state": "ok",
-      "source": "measured"
+      "source": "measured",
+      "status": null
     }
   ],
   "targets": [
@@ -216,6 +324,11 @@ id.
 sink could not deliver, which device has gone quiet. It is part of the identity
 of the entry — "a sink failed" and "which sink failed" are different facts, and
 only one of them can be acted on.
+
+`status` is the HTTP status the target answered with, for the codes that exist
+because it answered — `<kind>_refused_us`. `null` on every other code. It is on
+the entry and not only in the message because a human arriving here after the
+message has scrolled away needs the same fact.
 
 This document does not list the codes, for the same reason the lane contract does
 not list its own: a hand-written copy of a set the code defines is the copy that
@@ -285,7 +398,8 @@ up, which is exactly what is worth knowing at an installation.
       "transition": "raised",
       "source": "measured",
       "caveat": null,
-      "at": "2026-08-30T14:00:00+00:00"
+      "at": "2026-08-30T14:00:00+00:00",
+      "status": null
     }
   ]
 }
@@ -382,7 +496,12 @@ There is no flag that turns any of that off.
   or at a target.
 - **No state store.** Everything this monitor knows is lost on a restart, and the
   startup message says what it does not yet know rather than reporting the last
-  thing it happened to remember.
+  thing it happened to remember. **A restart therefore re-sends `raised` for
+  every code that is still active**, because every code starts `unknown` and a
+  code seen for the first time as `active` is a transition into a fault. That is
+  deliberate — a monitor that started while a lane was already broken must say
+  so — and it is stated here rather than left to be worked out from the
+  transition table plus the absence of a store.
 - **No SMS**, no SIP, no audio, no DTMF. The agent that answers a driver at the
   barrier is a later round in this same repository.
 - **No SMTP credential.** See above.
