@@ -1,0 +1,102 @@
+# The standard installation: a lane, its identification service, and the
+# platform they report to. Copy it, keep what applies to the site, and delete
+# what does not — every target is optional and at least one is required.
+#
+# A monitor with NO target declared is refused at startup. A monitor watching
+# nothing reports "all fine", and that is the one lie this module exists to
+# prevent.
+
+[monitor]
+id = "monitor-1"
+site_id = "site-1"
+
+# --- what to watch ----------------------------------------------------------
+
+# A service implementing lane-controller/docs/CONTRACT.md. Ours or a third
+# party's: the monitor has no branch on which, and the same code reads both.
+[targets.lane]
+url = "http://127.0.0.1:8090"
+# How often to ask. A SETTING AND AN ASSUMPTION — nothing measures how often a
+# lane's health changes. Omit it and the published default applies.
+poll_seconds = 30
+# How long to wait for this target's answer. A SETTING AND AN ASSUMPTION, with a
+# published default of 10 seconds. What it is drawn against is the other side of
+# the seam: a lane's own health route may read the identification service on the
+# request, and bounds THAT read at its `[lane] identity_health_timeout_s` (1
+# second by default). This number must comfortably exceed that one, or a lane
+# that is up and correctly answering `unknown` about a hung identification
+# service is published here as a dead lane.
+#
+# A URL may not carry a credential. `https://user:password@host` is refused at
+# startup, by name: credentials come from files.
+timeout_seconds = 10
+# Only when that lane is bound off loopback and therefore demands a credential.
+# A FILE. There is no key that takes the token as a value; one is refused by
+# name, because a value here is a credential in this file and in every backup
+# and paste of it.
+# token_file = "/etc/openparking/lane-read.token"
+
+# A Vehicle ID service. Its GET /v1/health is unauthenticated by that contract's
+# own decision — it carries no plate and no image, and a monitor that had to
+# hold the read credential to ask whether a process is alive is that credential
+# in one more place.
+[targets.identity_service]
+url = "http://127.0.0.1:8088"
+poll_seconds = 30
+
+# The platform. Read with an OPERATOR token; the tenant comes from the token.
+[targets.platform]
+url = "https://platform.example.com/api/v1"
+# DECLARED, no default. A monitor pointed at a garage nobody chose lists no
+# devices, and no devices reads exactly like no faults.
+garage_id = "00000000-0000-0000-0000-000000000000"
+# DECLARED, no default, and a FILE.
+token_file = "/etc/openparking/platform-operator.token"
+poll_seconds = 60
+# How long a lane device may go unheard-from before `lane_gone_quiet` is active.
+# A SETTING AND AN ASSUMPTION, and the more consequential of the two: nothing
+# here measures how often a healthy lane talks to its platform. A busy entry
+# touches it on every vehicle; a quiet overnight exit may not for hours with
+# nothing wrong. Raise it for a genuinely idle lane rather than being paged.
+lane_quiet_seconds = 900
+
+# --- how a human is told ----------------------------------------------------
+#
+# The set is CLOSED this version: log, email, webhook. SMS is a later round's
+# provider. `log` is always on whether it is declared or not.
+#
+# A site with only `log` means NOBODY IS PAGED. That is a real configuration
+# where the logs are already collected, and the process says so on the line it
+# prints when it starts.
+
+[sinks.log]
+
+# Every field is declared. There is no default recipient anywhere in this
+# module: a default pages somebody who never asked, or — far more likely — a
+# placeholder nobody reads, while the site believes it is covered.
+# There is no SMTP credential in this version, deliberately: a site needing an
+# authenticated relay finds out at startup rather than after a fortnight of
+# rejected alerts.
+[sinks.email]
+host = "smtp.example.com"
+port = 587
+from = "monitor@example.com"
+to = ["oncall@example.com"]
+# TLS is on unless a site turns it off. This traffic says which of a site's
+# lanes are broken and when, which is a map for whoever wants to arrive while
+# nobody is watching.
+tls = true
+
+# How a third party's paging system takes the seat: it receives the same
+# notification object the log sink prints and GET /v1/monitor/events serves.
+[sinks.webhook]
+url = "https://paging.example.com/hooks/openparking"
+token_file = "/etc/openparking/webhook.token"
+
+# --- how often to repeat itself ---------------------------------------------
+
+# Absent by default, and absent means NEVER: a fault is announced once and its
+# recovery is announced once. Uncomment to be reminded while a code is still
+# active — one message per interval per code.
+# [notify]
+# renotify_seconds = 3600
