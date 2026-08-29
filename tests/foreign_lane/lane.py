@@ -106,6 +106,36 @@ class ForeignLane:
         #: field as optional writes. The contract requires it on every entry;
         #: this is how a test asks what happens when it is not there.
         self.drop_never_alarm = False
+        #: How many events this lane can still serve behind its cursor, and what
+        #: `GET /v1/lane` publishes as `event_window_depth`. Published from the
+        #: same attribute the eviction uses, so a test that widens the window
+        #: cannot leave the lane describing a narrower one.
+        self.window = 2
+        self.dropped = 0
+        self._seq = 0
+        #: This lane's event log. A CONSUMER of `GET /v1/lane/events` decides
+        #: what to do from `kind`, `cursor` and `occurred_at`, and a stub whose
+        #: log never moved could not exercise one.
+        self.log: list[dict] = []
+        self.record("attendant_called", "2026-08-30T14:03:10.000000+00:00")
+
+    def record(self, kind: str, occurred_at: str, detail: dict | None = None) -> int:
+        """One event onto this lane's log, evicting past the window it publishes."""
+        self._seq += 1
+        self.log.append(
+            {
+                "cursor": self._seq,
+                "event_id": f"fl-{self._seq:04d}",
+                "kind": kind,
+                "lane_id": self.lane_id,
+                "occurred_at": occurred_at,
+                "detail": dict(detail or {}),
+            }
+        )
+        while len(self.log) > self.window:
+            self.log.pop(0)
+            self.dropped += 1
+        return self._seq
 
     def describe(self) -> dict:
         payload = {
@@ -115,7 +145,7 @@ class ForeignLane:
             "contract_version": 1,
             # No loops, so nothing to publish. Not `null` and not our five keys.
             "geometry": {},
-            "event_window_depth": 2,
+            "event_window_depth": self.window,
             "capabilities": {
                 "confirms_entry": False,
                 "has_identity_service": False,
@@ -169,22 +199,20 @@ class ForeignLane:
         return payload
 
     def events(self, since: int) -> dict:
-        log = [
-            {
-                "cursor": 1,
-                "event_id": "fl-0001",
-                "kind": "attendant_called",
-                "lane_id": self.lane_id,
-                "occurred_at": "2026-08-30T14:03:10.000000+00:00",
-                "detail": {},
-            },
-        ]
+        """The cursor semantics as the document states them, both halves.
+
+        `since` ahead of this lane's own cursor is a `reset`, and so is `since`
+        behind the oldest event still held -- the second is the one a bounded
+        window makes possible, and a consumer served a short page without the
+        flag cannot tell it from a complete one.
+        """
+        oldest = self.log[0]["cursor"] if self.log else None
         return {
             "contract_version": 1,
-            "cursor": 1,
-            "reset": since > 1,
-            "dropped": 0,
-            "events": [item for item in log if item["cursor"] > since],
+            "cursor": self._seq,
+            "reset": since > self._seq or (oldest is not None and since + 1 < oldest),
+            "dropped": self.dropped,
+            "events": [item for item in self.log if item["cursor"] > since],
         }
 
 

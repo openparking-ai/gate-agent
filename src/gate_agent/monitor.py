@@ -44,6 +44,7 @@ from time import monotonic
 from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable
 from .config import MonitorConfig, Target
 from .contract import (
+    CONTRACT_VERSION,
     REFUSED_CODE,
     UNREACHABLE_CODE,
     EventPage,
@@ -74,6 +75,21 @@ KNOWN_LANE_VERSIONS: tuple[int, ...] = (1,)
 #: Vehicle ID record schema versions this monitor can read, from that contract's
 #: `schema_version`. Same rule, same reason.
 KNOWN_IDENTITY_VERSIONS: tuple[int, ...] = (1,)
+
+#: The versions this monitor can read, PER KIND OF TARGET. One mapping, so a
+#: target kind cannot be added without an answer to "which versions of it" --
+#: `KNOWN_LANE_VERSIONS if ... else KNOWN_IDENTITY_VERSIONS` stood here, and a
+#: third kind would silently have been read as an identity service.
+#:
+#: The platform's entry is EMPTY, and that is the honest value: its operator
+#: surface publishes no version at all, so nothing about it is ever checked and
+#: `target_contract_unsupported` for it stays `unknown` rather than `ok`.
+KNOWN_VERSIONS: dict[TargetKind, tuple[int, ...]] = {
+    TargetKind.LANE: KNOWN_LANE_VERSIONS,
+    TargetKind.IDENTITY_SERVICE: KNOWN_IDENTITY_VERSIONS,
+    TargetKind.CAPTURE: (CONTRACT_VERSION,),
+    TargetKind.PLATFORM: (),
+}
 
 #: The two scopes a state can belong to, and they are never mixed.
 #:
@@ -323,9 +339,7 @@ class Monitor:
         self._monitor_code(unreachable, target.name, HealthState.OK, target.name)
         self._monitor_code(refused, target.name, HealthState.OK, target.name)
 
-        known = (
-            KNOWN_LANE_VERSIONS if target.kind is TargetKind.LANE else KNOWN_IDENTITY_VERSIONS
-        )
+        known = KNOWN_VERSIONS[target.kind]
         if version is None:
             # This target's contract publishes no version at all -- the
             # platform's operator surface does not -- so nothing was checked and
@@ -411,6 +425,26 @@ class Monitor:
             # observer of one field.
             body = client.get("/v1/health")
             return _version(body.get("schema_version")), ()
+        if target.kind is TargetKind.CAPTURE:
+            # The capture process publishes a malfunction table in the LANE's
+            # entry shape, on purpose, so it is read by the code that already
+            # reads a lane: same states, same sources, same `never_alarm` on the
+            # wire, same refusal when one of them is unreadable. This is how
+            # `camera_unreachable` -- Gokhan's "camera disconnected is a
+            # malfunction" -- gets from a camera nobody can reach to a human who
+            # can go and look at it.
+            body = client.get("/v1/capture/health")
+            codes = body.get("codes")
+            if not isinstance(codes, list):
+                raise TargetUnreachable(
+                    f"{target.name}: health payload carries no `codes` list"
+                )
+            version = _version(body.get("contract_version"))
+            entries = tuple(
+                entry for entry in codes if isinstance(entry, dict) and entry.get("code")
+            )
+            _refuse_unreadable(target.name, entries, version)
+            return version, entries
         return None, self._devices(target)
 
     def _devices(self, target: Target) -> tuple[dict, ...]:
@@ -510,11 +544,18 @@ class Monitor:
         car arrived on low-texture ground -- the failure the lane's caveat exists
         to prevent, reintroduced by its reader.
         """
+        # `subject` PASSED THROUGH when the target published one, and the
+        # target's own name when it did not. A lane's entries have no subject:
+        # its codes are about the lane. A capture process's are about a NAMED
+        # CAMERA, and folding those under the target's name would send a message
+        # saying a camera is dead without saying which -- at a site with four
+        # cameras, that is a message somebody has to go and work out.
+        subject = entry.get("subject")
         self._observe(
             scope=PASSED_THROUGH,
             target=target,
             code=str(entry.get("code")),
-            subject=target,
+            subject=str(subject) if isinstance(subject, str) and subject else target,
             state=str(entry.get("state")),
             source=str(entry.get("source")),
             caveat=entry.get("caveat"),
@@ -780,6 +821,7 @@ class Monitor:
             sinks=tuple(
                 SinkDescription(name=sink.name, kind=sink.kind) for sink in self.sinks
             ),
+            event_window_depth=self.config.event_window_depth,
         )
 
     def health(self) -> MonitorHealth:
@@ -891,6 +933,7 @@ def _age_seconds(stamp, now: str) -> float | None:
 __all__ = [
     "KNOWN_IDENTITY_VERSIONS",
     "KNOWN_LANE_VERSIONS",
+    "KNOWN_VERSIONS",
     "ContractViolation",
     "Monitor",
     "UnsupportedContract",

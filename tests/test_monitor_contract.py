@@ -33,8 +33,11 @@ from fakes import (
 )
 from foreign_lane import ForeignLane
 from foreign_lane import make_server as foreign_server
+from gate_agent.config import RETENTION_DAYS_BOUNDS
 from gate_agent.contract import (
     CONTRACT_VERSION,
+    CaptureCode,
+    CaptureReason,
     HealthState,
     MonitorCode,
     MonitorEntry,
@@ -95,16 +98,24 @@ def watched():
         yield monitor
 
 
-#: The blocks in the document that are a ROUTE's payload. `sets` is in the same
-#: marked-block mechanism and is deliberately not one of them: it publishes the
-#: closed set a consumer branches on, and it is compared against the ENUM.
+#: The blocks in the document that are a MONITOR ROUTE's payload. `sets` is in
+#: the same marked-block mechanism and is deliberately not one of them: it
+#: publishes the closed sets a consumer branches on, and each is compared
+#: against the enum or the constant it comes from.
 ROUTE_PAYLOADS = {"monitor", "health", "events"}
+
+#: The capture process's route payloads, checked in
+#: `tests/test_capture_contract.py`. Named here so THIS file's "every block
+#: belongs to a route" assertion accounts for every block in the document rather
+#: than being loosened to ignore whatever it does not recognise -- a block
+#: nobody checks is exactly the copy that drifts.
+CAPTURE_PAYLOADS = {"capture", "capture_health", "capture_records"}
 
 
 def doc_payloads() -> dict[str, dict]:
     """Every `<!--payload:NAME-->` example in `docs/CONTRACT.md`, parsed."""
     text = CONTRACT_DOC.read_text(encoding="utf-8")
-    found = re.findall(r"<!--payload:([a-z]+)-->\s*```json\n(.*?)\n```", text, re.S)
+    found = re.findall(r"<!--payload:([a-z_]+)-->\s*```json\n(.*?)\n```", text, re.S)
     return {name: json.loads(body) for name, body in found}
 
 
@@ -143,7 +154,7 @@ def test_the_document_shows_exactly_the_payloads_the_code_builds(watched):
     a field added, renamed or dropped in either goes red.
     """
     doc = doc_payloads()
-    assert set(doc) == ROUTE_PAYLOADS | {"sets"}, (
+    assert set(doc) == ROUTE_PAYLOADS | CAPTURE_PAYLOADS | {"sets"}, (
         "every route has a payload example, every example belongs to a route, and "
         f"`sets` is the closed-set block that is not a route; found {sorted(doc)}"
     )
@@ -482,30 +493,42 @@ def test_the_payload_layer_refuses_a_credential_bearing_url_outright():
 
 
 #: The closed sets this document publishes, keyed to where each comes from.
-#: Derived from the enum, never typed -- a hand-written expectation here would be
-#: a third copy, and the third copy lies too.
-PUBLISHED_SETS = {"monitor_codes": lambda: [code.value for code in MonitorCode]}
+#: Derived from the enum or the constant, never typed -- a hand-written
+#: expectation here would be a third copy, and the third copy lies too.
+PUBLISHED_SETS = {
+    "monitor_codes": lambda: [code.value for code in MonitorCode],
+    "capture_codes": lambda: [code.value for code in CaptureCode],
+    "capture_reasons": lambda: [reason.value for reason in CaptureReason],
+    "retention_days_bounds": lambda: list(RETENTION_DAYS_BOUNDS),
+}
 
 
-def test_the_document_publishes_every_monitor_code(watched):
-    """Both directions, against the enum, and against a served payload.
+def test_the_document_publishes_every_closed_set_this_package_defines(watched):
+    """Both directions, against the enums, and the monitor's against the wire.
 
-    This document withheld the set on the reasoning that a hand-written copy of
+    This document withheld the sets on the reasoning that a hand-written copy of
     a set the code defines is the copy that goes wrong. The reasoning is right
     and the conclusion was not: a consumer cannot be written from a document
     that withholds what it must branch on, so the copy moves into the
-    implementer's guess instead. It is published, and this is what stops it
+    implementer's guess instead. They are published, and this is what stops them
     drifting.
-    """
-    published = doc_payloads()["sets"]["monitor_codes"]
-    from_the_code = PUBLISHED_SETS["monitor_codes"]()
 
-    assert published == from_the_code, (
-        f"docs/CONTRACT.md publishes {published}; the code holds {from_the_code}"
+    Keyed one-to-one by name in BOTH directions: a set dropped from the document
+    goes red, and so does a set added to the code without adding it here.
+    """
+    published = doc_payloads()["sets"]
+    assert set(published) == set(PUBLISHED_SETS), (
+        f"docs/CONTRACT.md publishes {sorted(published)}; this package defines "
+        f"{sorted(PUBLISHED_SETS)}"
     )
-    # Against the wire as well, so a document agreeing with an enum nothing
-    # ships would still go red.
+    for name, from_the_code in PUBLISHED_SETS.items():
+        assert published[name] == from_the_code(), (
+            f"docs/CONTRACT.md publishes {name}={published[name]}; the code holds "
+            f"{from_the_code()}"
+        )
+        # The control: no comparison here is two empty lists agreeing.
+        assert published[name], name
+    # And the monitor's against the wire, so a document agreeing with an enum
+    # nothing ships would still go red.
     served = [entry["code"] for entry in watched.health().to_dict()["codes"]]
-    assert sorted(set(served)) == sorted(published)
-    # The control: neither comparison is two empty lists agreeing.
-    assert published
+    assert sorted(set(served)) == sorted(published["monitor_codes"])

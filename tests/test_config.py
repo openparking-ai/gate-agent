@@ -16,8 +16,11 @@ from __future__ import annotations
 import pytest
 
 from gate_agent.config import (
+    DEFAULT_CAPTURE_INTERVAL_SECONDS,
+    DEFAULT_EVENT_WINDOW_DEPTH,
     DEFAULT_LANE_QUIET_SECONDS,
     DEFAULT_POLL_SECONDS,
+    DEFAULT_RETENTION_DAYS,
     DEFAULT_TIMEOUT_SECONDS,
     ConfigError,
     EmailSinkConfig,
@@ -328,8 +331,49 @@ def test_the_example_configuration_parses():
     raw["targets"].pop("platform")
     raw["sinks"].pop("webhook")
     parsed = MonitorConfig.from_dict(raw)
-    assert {target.name for target in parsed.targets} == {"lane", "identity_service"}
+    assert {target.name for target in parsed.targets} == {"lane", "identity_service", "capture"}
     assert {type(sink).__name__ for sink in parsed.sinks} == {"LogSinkConfig", "EmailSinkConfig"}
+    assert parsed.event_window_depth == DEFAULT_EVENT_WINDOW_DEPTH, (
+        "the example declares a window depth that is not the published default, so an installer "
+        "copying it gets something other than what the document says they get"
+    )
+
+
+def test_the_capture_example_configuration_is_refused_as_shipped_and_says_why():
+    """**The example is refused on purpose, and that is the lesson in it.**
+
+    `[capture] max_bytes` is commented out because it has no default and there
+    is no measurement in this package to draw one from. An example that shipped
+    a number would be this package inventing a disk budget for a site it has
+    never seen, in the one file an installer copies without reading.
+    """
+    import tomllib
+    from pathlib import Path
+
+    from gate_agent.config import CaptureConfig
+
+    example = Path(__file__).resolve().parent.parent / "config" / "capture.example.toml"
+    raw = tomllib.loads(example.read_text(encoding="utf-8"))
+    assert "max_bytes" not in raw["capture"], "the example now ships an invented disk budget"
+    with pytest.raises(ConfigError, match="does not declare max_bytes"):
+        CaptureConfig.from_dict(raw, relative_to=example.parent)
+
+    # And with that one question answered, the rest of the file parses -- so the
+    # refusal above is about `max_bytes` and not about a broken example.
+    raw["capture"]["max_bytes"] = 1 << 20
+    auth = Path(raw["cameras"]["front"]["auth_file"])
+    assert not auth.exists(), "this test would be reading a real credential file"
+    raw["cameras"]["front"]["auth_file"] = "front.auth"
+    import tempfile
+
+    directory = Path(tempfile.mkdtemp())
+    (directory / "front.auth").write_text("operator:s3cret\n", encoding="utf-8")
+    raw["capture"]["directory"] = str(directory)
+    parsed = CaptureConfig.from_dict(raw, relative_to=directory)
+    assert [camera.camera_id for camera in parsed.cameras] == ["front"]
+    assert parsed.lane is not None
+    assert parsed.retention_days == DEFAULT_RETENTION_DAYS
+    assert parsed.interval_seconds == DEFAULT_CAPTURE_INTERVAL_SECONDS
 
 
 # ---------------------------------------------------------------------------

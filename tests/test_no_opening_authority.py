@@ -287,3 +287,168 @@ def test_our_lane_sees_nothing_but_gets_either():
     assert seen, "our lane was not touched at all"
     assert {method for method, _ in seen} == {"GET"}
     assert {path for _, path in seen} == {"/v1/lane", "/v1/lane/health"}
+
+
+# ---------------------------------------------------------------------------
+# THE CAPTURE PROCESS, ASKED THE SAME THREE QUESTIONS
+# ---------------------------------------------------------------------------
+
+
+#: The one module allowed to BUILD an opener, and it is the one that refuses to
+#: follow anything. Named here, once, so a second is a change to this list.
+#:
+#: This exists because the camera made a second opener necessary: a camera
+#: answers `401` with a challenge and expects the credential on the retry, which
+#: needs authentication handlers. An opener built anywhere else would be an
+#: opener with urllib's DEFAULT redirect handler in it -- and the retry is
+#: exactly the request that carries `Authorization`, so a `Location` on it hands
+#: a site's camera password to whichever host the camera names.
+MAY_BUILD_AN_OPENER = {"redirects.py"}
+
+
+def test_nothing_outside_the_redirect_module_opens_a_url_its_own_way():
+    """Every opener in this package comes from `redirects.build_opener`.
+
+    "Nothing is followed" is not a property of one opener. It is a property of
+    the only function that makes them, and this is what keeps that true.
+    """
+    offenders = []
+    swept = 0
+    for path in SOURCES:
+        if path.name in MAY_BUILD_AN_OPENER:
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        ours = _names_from_redirects(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            attribute = isinstance(node.func, ast.Attribute)
+            name = node.func.attr if attribute else getattr(node.func, "id", None)
+            if name not in ("urlopen", "build_opener"):
+                continue
+            swept += 1
+            # A bare name is sanctioned only when THIS module imported it from
+            # `.redirects`. An attribute spelling -- `urllib.request.urlopen` --
+            # is never sanctioned, whichever module it is in.
+            if attribute or name not in ours:
+                offenders.append(f"{path.name}: {name}(...)")
+    assert not offenders, (
+        f"an opener is built outside redirects.py: {offenders}. That opener follows redirects, "
+        "and the request it would follow one on is the one carrying a credential."
+    )
+    assert swept, "the sweep found no opener calls at all, so it is not looking at the right thing"
+
+
+def _names_from_redirects(tree) -> set:
+    """What this module imported from `redirects`, so a bare name can be placed."""
+    return {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("redirects")
+        for alias in node.names
+    }
+
+
+def test_that_sweep_sees_a_planted_opener():
+    """The control, run against source known to contain both spellings.
+
+    Parsed rather than written to disk, and through the same placement helper
+    the sweep uses -- a second copy of the logic that happened to agree would
+    prove nothing.
+    """
+    planted = ast.parse(
+        "from .redirects import build_opener\n"
+        "urllib.request.urlopen(u)\n"
+        "urllib.request.build_opener(handler)\n"
+        "build_opener(handler)\n"
+    )
+    ours = _names_from_redirects(planted)
+    assert ours == {"build_opener"}
+    caught, allowed = [], []
+    for node in ast.walk(planted):
+        if not isinstance(node, ast.Call):
+            continue
+        attribute = isinstance(node.func, ast.Attribute)
+        name = node.func.attr if attribute else getattr(node.func, "id", None)
+        if name not in ("urlopen", "build_opener"):
+            continue
+        (caught if attribute or name not in ours else allowed).append(name)
+    assert caught == ["urlopen", "build_opener"], caught
+    assert allowed == ["build_opener"], allowed
+
+
+def test_a_whole_capture_run_touches_the_camera_and_the_lane_with_nothing_but_gets(tmp_path):
+    """What the CAMERA and the LANE saw, asked from their side.
+
+    The source sweep above cannot see a client it does not recognise. This can:
+    a real capture process is run against two servers that record every request,
+    including the ones they would refuse, and the set of methods must be exactly
+    one. The lane in particular -- this process is a consumer of that contract
+    and the lane's vend path is the boundary every outside reviewer named.
+    """
+    from cameras import FakeCamera, camera_server, jpeg
+    from conftest import camera_config, capture_config_for, capture_for
+
+    directory = tmp_path / "store"
+    directory.mkdir()
+    lane = ForeignLane()
+    lane.window = 64
+    camera = FakeCamera(body=jpeg(b"one"))
+    with serving(camera_server(camera)) as camera_url, serving(foreign_server(lane)) as lane_url:
+        config = capture_config_for(
+            directory=directory,
+            cameras=[camera_config("front", f"{camera_url}/snapshot", tmp_path)],
+            lane=lane_url,
+        )
+        process = capture_for(config)
+        process.start()
+        lane.record("vended", "2026-08-30T14:00:00+00:00")
+        process.poll(force=True)
+
+    assert camera.requests and lane.requests, "nothing was touched, so this asserts nothing"
+    assert {method for method, _ in camera.requests} == {"GET"}
+    assert {method for method, _ in lane.requests} == {"GET"}
+    assert {path for _, path in lane.requests} == {"/v1/lane", "/v1/lane/events"}, (
+        "the capture process read a lane route it has no business on"
+    )
+
+
+def test_the_recorders_in_that_run_would_see_a_non_get(tmp_path):
+    """The control for the test above, and it is not optional."""
+    import urllib.error
+    import urllib.request
+
+    from cameras import FakeCamera, camera_server
+
+    camera = FakeCamera(username=None)
+    lane = ForeignLane()
+    with serving(camera_server(camera)) as camera_url, serving(foreign_server(lane)) as lane_url:
+        both = ((camera_url, camera, "/snapshot"), (lane_url, lane, "/v1/lane"))
+        for url, recorder, path in both:
+            try:
+                urllib.request.urlopen(
+                    urllib.request.Request(f"{url}{path}", data=b"{}", method="POST"), timeout=5
+                )
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 405
+            assert ("POST", path) in recorder.requests
+
+
+def test_nothing_in_the_capture_process_imports_the_lane_controller():
+    """The seat again, from the second process in this package.
+
+    Already covered by the package-wide sweep above, and asserted separately
+    because it is the property this round could most easily have broken: the
+    quickest way to learn that a lane vended is to import the lane.
+    """
+    import gate_agent.capture as capture_module
+    import gate_agent.store as store_module
+
+    for module in (capture_module, store_module):
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        assert not [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("lane_")
+        ], f"{module.__name__} imports the lane it is a client of"

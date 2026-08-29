@@ -259,15 +259,13 @@ def _a_lane_that_takes(delay: float):
 
 
 #: What the INSTALLED lane-controller bounds its identification-service health
-#: read at. `0.0` when that package has no such bound -- which is the honest
-#: value for a build whose health route makes no third-machine read at all, not
-#: a fudge: the pin in `pyproject.toml` names a commit on that repository's main
-#: from before the read existed, so there is no seam to cross yet. The day the
-#: pin moves to a build that has one, this reads its real number and the
-#: assertion below becomes the by-value check of the relationship.
-LANE_IDENTITY_HEALTH_BOUND = getattr(
-    _lane_config, "DEFAULT_IDENTITY_HEALTH_TIMEOUT_S", 0.0
-)
+#: read at. Read as an ATTRIBUTE, with no fallback: a `getattr(..., 0.0)` stood
+#: here while the pin named a commit from before that bound existed, and `0.0`
+#: is a number every timeout in this package exceeds -- so the assertion below
+#: passed on a constant that was not there, which is a check that cannot fail.
+#: The pin now names a build that has it. An `AttributeError` here is the
+#: correct outcome for a pin that goes backwards, and it is the loud one.
+LANE_IDENTITY_HEALTH_BOUND = _lane_config.DEFAULT_IDENTITY_HEALTH_TIMEOUT_S
 
 
 def test_the_monitors_timeout_exceeds_the_lanes_own_bound_on_a_third_machine():

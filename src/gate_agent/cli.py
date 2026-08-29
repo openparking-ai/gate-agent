@@ -1,6 +1,15 @@
 """The command line, and the module's STANDALONE face.
 
     gate-agent monitor --config monitor.toml
+    gate-agent capture --config capture.toml
+
+**Two processes, beside each other, and neither can open a barrier.** The
+monitor watches whatever a site declares and tells a human what changed. The
+capture process photographs a lane on a timer and on that lane's events, and
+writes to its own disk. They are separate processes for the reason every module
+in this project is separate: a partial failure must stay partial, and the one
+that has to still be alive when a lane is not should not share an interpreter
+with the one that is writing to a disk.
 
 **Standalone is a MODE, not a smaller product.** A monitor with no lane declared
 watches whatever IS declared -- a Vehicle ID service on its own, a platform on
@@ -24,7 +33,10 @@ import sys
 import threading
 from pathlib import Path
 
-from .config import ConfigError, MonitorConfig
+from .capture import CaptureProcess, UnsupportedLaneContract
+from .capture_service import CaptureService
+from .capture_service import make_server as make_capture_server
+from .config import CaptureConfig, ConfigError, MonitorConfig
 from .monitor import Monitor, UnsupportedContract
 from .service import (
     InsecureBind,
@@ -34,6 +46,7 @@ from .service import (
     make_server,
 )
 from .sinks import build as build_sink
+from .store import CaptureStore, StoreUnwritable
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +71,28 @@ def build_parser() -> argparse.ArgumentParser:
              "carry. Required for any --host that is not loopback. A FILE and not a value, "
              "because a value on the command line is readable by every user on the box for as "
              "long as the process runs -- spelt the way vehicle-id and lane-controller spell it",
+    )
+
+    capture = sub.add_parser(
+        "capture", help="photograph the declared cameras, and keep what the rule allows"
+    )
+    capture.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="the capture process's TOML configuration. The directory and the size cap are "
+             "DECLARED, never defaulted -- one is where a site's photographs of cars are kept "
+             "and the other is that site's disk, and nothing in this package has measured "
+             "either",
+    )
+    capture.add_argument("--host", default="127.0.0.1")
+    capture.add_argument("--port", type=int, default=8093)
+    capture.add_argument(
+        "--auth-token-file",
+        type=Path,
+        help="a file holding the shared token every route of this process's own surface must "
+             "carry, INCLUDING the images. Required for any --host that is not loopback: off "
+             "loopback this surface serves photographs of cars and when they were taken",
     )
     return parser
 
@@ -153,10 +188,91 @@ def _poll_forever(monitor: Monitor, stop: threading.Event, tick: float = 1.0) ->
             logging.getLogger(__name__).exception("a poll raised; continuing")
 
 
+def cmd_capture(args) -> int:
+    # The bind refusal BEFORE anything is built or read, so a configuration no
+    # file would fix is reported in the moment.
+    token = _token(args)
+    try:
+        assert_bind_allowed(args.host, args.port, token)
+    except InsecureBind as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+
+    try:
+        config = CaptureConfig.from_file(args.config)
+    except ConfigError as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+
+    store = CaptureStore(config.directory, config.retention_days, config.max_bytes)
+    process = CaptureProcess(config, store)
+
+    reach = "local only by design" if is_loopback(args.host) else "EXPOSED"
+    print(f"gate-agent capture on http://{args.host}:{args.port}  ({reach})")
+    print(f"  site {config.site_id}, capture {config.capture_id}")
+    print(f"  cameras:  {', '.join(camera.camera_id for camera in config.cameras)}")
+    print(f"  store:    {config.directory}")
+    print(f"  keeping:  {config.retention_days} day(s), then deleted")
+    if config.lane is None:
+        # Said at the moment somebody starts it, because "it is capturing" and
+        # "it captures when a car arrives" are different facts and this is the
+        # configuration where they come apart. It is NOT a degraded mode: a
+        # garage with a camera and no gate is a customer of this process.
+        print(
+            "  STANDALONE: no lane is declared, so captures are on the interval only. "
+            "Nothing here is triggered by a vehicle."
+        )
+    else:
+        print(f"  following: {config.lane.url} for arrivals and vends")
+    print("  READ ONLY: this process has no route to a vend, here or at the lane")
+
+    try:
+        process.start()
+    except StoreUnwritable as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+    except UnsupportedLaneContract as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+
+    server = make_capture_server(
+        CaptureService(process), host=args.host, port=args.port, token=token
+    )
+    stop = threading.Event()
+    poller = threading.Thread(target=_capture_forever, args=(process, stop), daemon=True)
+    poller.start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        stop.set()
+        server.server_close()
+    return 0
+
+
+def _capture_forever(process: CaptureProcess, stop: threading.Event, tick: float = 1.0) -> None:
+    """Ask the process to do whatever is due, once a second.
+
+    The intervals that matter are in the configuration -- how often each camera
+    is photographed, and how often the lane's events are read. This is only how
+    often the process wakes up to check whether one has elapsed.
+    """
+    while not stop.wait(tick):
+        try:
+            process.poll()
+        except Exception:  # noqa: BLE001
+            # A capture process that dies is a process that records nothing,
+            # which is the failure SETTLED 3g gives it the job of preventing.
+            # Anything a poll raises is logged and the loop continues; what it
+            # could not measure is already `unknown` on the health route.
+            logging.getLogger(__name__).exception("a capture poll raised; continuing")
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args(argv)
-    return {"monitor": cmd_monitor}[args.command](args)
+    return {"monitor": cmd_monitor, "capture": cmd_capture}[args.command](args)
 
 
 if __name__ == "__main__":
