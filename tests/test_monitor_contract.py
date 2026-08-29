@@ -95,6 +95,12 @@ def watched():
         yield monitor
 
 
+#: The blocks in the document that are a ROUTE's payload. `sets` is in the same
+#: marked-block mechanism and is deliberately not one of them: it publishes the
+#: closed set a consumer branches on, and it is compared against the ENUM.
+ROUTE_PAYLOADS = {"monitor", "health", "events"}
+
+
 def doc_payloads() -> dict[str, dict]:
     """Every `<!--payload:NAME-->` example in `docs/CONTRACT.md`, parsed."""
     text = CONTRACT_DOC.read_text(encoding="utf-8")
@@ -137,12 +143,13 @@ def test_the_document_shows_exactly_the_payloads_the_code_builds(watched):
     a field added, renamed or dropped in either goes red.
     """
     doc = doc_payloads()
-    assert set(doc) == {"monitor", "health", "events"}, (
-        "every route has a payload example and every example belongs to a route; "
-        f"found {sorted(doc)}"
+    assert set(doc) == ROUTE_PAYLOADS | {"sets"}, (
+        "every route has a payload example, every example belongs to a route, and "
+        f"`sets` is the closed-set block that is not a route; found {sorted(doc)}"
     )
     served = live(watched)
-    for name, example in doc.items():
+    for name in sorted(ROUTE_PAYLOADS):
+        example = doc[name]
         assert shape(example) == shape(served[name]), (
             f"docs/CONTRACT.md's `{name}` example does not have the shape the code builds.\n"
             f"  doc:  {shape(example)}\n  code: {shape(served[name])}"
@@ -154,15 +161,21 @@ def test_the_document_shows_exactly_the_payloads_the_code_builds(watched):
 
 
 def test_the_documents_contract_version_is_the_codes(watched):
-    """`shape()` discards leaves, so the doc could publish any version at all."""
+    """`shape()` discards leaves, so the doc could publish any version at all.
+
+    The closed-set block is not a route's payload and carries no version: it
+    publishes the set the routes are made of, and stamping one on it would be a
+    second copy of a version number.
+    """
     doc = doc_payloads()
     served = live(watched)
     checked = 0
-    for name, example in doc.items():
+    for name in sorted(ROUTE_PAYLOADS):
+        example = doc[name]
         assert example["contract_version"] == CONTRACT_VERSION
         assert example["contract_version"] == served[name]["contract_version"]
         checked += 1
-    assert checked == len(doc), "a payload example carries no contract_version"
+    assert checked == len(ROUTE_PAYLOADS), "a payload example carries no contract_version"
     assert checked, "no payloads were checked"
 
 
@@ -461,3 +474,38 @@ def test_the_payload_layer_refuses_a_credential_bearing_url_outright():
         authenticated=False,
         timeout_seconds=10.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# GUARANTEE 6 — THE CLOSED SET IS PUBLISHED, AND THE COPY IS HELD TO THE ENUM
+# ---------------------------------------------------------------------------
+
+
+#: The closed sets this document publishes, keyed to where each comes from.
+#: Derived from the enum, never typed -- a hand-written expectation here would be
+#: a third copy, and the third copy lies too.
+PUBLISHED_SETS = {"monitor_codes": lambda: [code.value for code in MonitorCode]}
+
+
+def test_the_document_publishes_every_monitor_code(watched):
+    """Both directions, against the enum, and against a served payload.
+
+    This document withheld the set on the reasoning that a hand-written copy of
+    a set the code defines is the copy that goes wrong. The reasoning is right
+    and the conclusion was not: a consumer cannot be written from a document
+    that withholds what it must branch on, so the copy moves into the
+    implementer's guess instead. It is published, and this is what stops it
+    drifting.
+    """
+    published = doc_payloads()["sets"]["monitor_codes"]
+    from_the_code = PUBLISHED_SETS["monitor_codes"]()
+
+    assert published == from_the_code, (
+        f"docs/CONTRACT.md publishes {published}; the code holds {from_the_code}"
+    )
+    # Against the wire as well, so a document agreeing with an enum nothing
+    # ships would still go red.
+    served = [entry["code"] for entry in watched.health().to_dict()["codes"]]
+    assert sorted(set(served)) == sorted(published)
+    # The control: neither comparison is two empty lists agreeing.
+    assert published

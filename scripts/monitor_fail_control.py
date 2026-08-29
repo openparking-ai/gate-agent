@@ -86,6 +86,12 @@ when nobody is looking.
   the_foreign_lane_imports_ours
                          the stub that exists to prove a stranger can take this
                          seat takes its code list from our package again.
+  doc_set_missing_a_member
+                         the document publishes one fewer monitor code than the
+                         enum holds -- a consumer that cannot be written from it.
+  enum_gained_a_member   the code gains a monitor code the document does not
+                         publish, which is what a future round does the day it
+                         adds one.
   doc_values             the document publishes what the code contradicts:
                          `contract_version: 99` and a state outside the enum. The
                          shape check passes both, because it discards every leaf.
@@ -289,6 +295,28 @@ BREAKS = [
         "from": "MALFUNCTION_CODES = (",
         "to": "from lane_controller.contract import MalfunctionCode as _Ours  # noqa: F401\n"
         "MALFUNCTION_CODES = (",
+    },
+    {
+        "name": "doc_set_missing_a_member",
+        "why": "the document publishes fewer codes than the enum holds",
+        "file": "tests/test_monitor_contract.py",
+        "from": "    return {name: json.loads(body) for name, body in found}",
+        "to": "    parsed = {name: json.loads(body) for name, body in found}\n"
+        "    parsed['sets']['monitor_codes'] = parsed['sets']['monitor_codes'][:-1]\n"
+        "    return parsed",
+    },
+    {
+        "name": "enum_gained_a_member",
+        "why": "the enum gains a code the document does not publish",
+        # Applied to the DERIVATION rather than to the enum, so the break lands
+        # on the doc-versus-code comparison alone: adding a member to
+        # `MonitorCode` itself also empties `MONITOR_SOURCES` for it, and a
+        # control that goes red for two reasons has measured neither.
+        "file": "tests/test_monitor_contract.py",
+        "from": 'PUBLISHED_SETS = {"monitor_codes": lambda: [code.value for code in MonitorCode]}',
+        "to": 'PUBLISHED_SETS = {\n'
+        '    "monitor_codes": lambda: [code.value for code in MonitorCode] + ["hatch_left_open"]\n'
+        "}",
     },
     {
         "name": "doc_values",

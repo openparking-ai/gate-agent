@@ -330,10 +330,35 @@ because it answered — `<kind>_refused_us`. `null` on every other code. It is o
 the entry and not only in the message because a human arriving here after the
 message has scrolled away needs the same fact.
 
-This document does not list the codes, for the same reason the lane contract does
-not list its own: a hand-written copy of a set the code defines is the copy that
-goes wrong. Two of them deserve saying out loud anyway, because they are spelt
-the same as codes the LANE publishes and they are different facts:
+**The set is published here, in full**, so that a paging system which is not ours
+can be written from this document alone. It used to say it did not list them, on
+the reasoning that a hand-written copy of a set the code defines is the copy that
+goes wrong — the same sentence the lane contract carried, and that reasoning is
+right. The conclusion was wrong: withholding the set does not remove the second
+copy, it moves it into every implementer's guess. So the copy is published and
+held to the enum by a test that compares every member in BOTH directions —
+dropping one here goes red, and so does adding one to `contract.MonitorCode`
+without adding it here.
+
+<!--payload:sets-->
+```json
+{
+  "monitor_codes": [
+    "lane_unreachable",
+    "identity_service_unreachable",
+    "platform_unreachable",
+    "lane_refused_us",
+    "identity_service_refused_us",
+    "platform_refused_us",
+    "target_contract_unsupported",
+    "sink_delivery_failed",
+    "lane_gone_quiet"
+  ]
+}
+```
+
+Two of them deserve saying out loud, because they are spelt the same as codes the
+LANE publishes and they are different facts:
 
 - `platform_unreachable` here is whether **this monitor** can reach the platform.
   On a lane's health surface it is what **that lane** thinks of its own uplink.
