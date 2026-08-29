@@ -792,12 +792,11 @@ class Monitor:
         """
         own: list[MonitorEntry] = []
         for code in MonitorCode:
-            subjects = {
-                subject: (state, self._facts.get(key, {}).get("status"))
-                for key, state in self._states.items()
-                for (scope, _target, seen_code, subject) in [key]
-                if scope == OWN and seen_code == code.value
-            }
+            subjects: dict[str, tuple[str, int | None]] = {}
+            for key, state in self._states.items():
+                scope, _target, seen_code, subject = key
+                if scope == OWN and seen_code == code.value:
+                    subjects[subject] = (state, self._facts.get(key, {}).get("status"))
             if not subjects:
                 subjects = {self.config.monitor_id: (HealthState.UNKNOWN.value, None)}
             own.extend(
