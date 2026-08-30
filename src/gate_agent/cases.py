@@ -20,11 +20,19 @@ guessing costs the most.
 `low_confidence` arrive as different reasons and leave as different cases,
 because the second one tells a driver to clean their number plate and the first
 one must never do that with the service switched off.
+
+*A decision has an AGE, and a stale one never ends a call.* The lane publishes
+`decision.at` and this function is given a clock, so a decision older than the
+site's `[cases] decision_max_age_seconds` becomes `stale_decision` -- a person --
+whatever it said. `nothing_to_do` is the only case in the set that reaches
+nobody, so it is the only one where being wrong costs the customer everything,
+and it is reachable ONLY from a FRESH `allow`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from .contract import AgentCase
 
@@ -75,6 +83,17 @@ FALLBACK_CASES: dict[str, AgentCase] = {
     "stale_rules": AgentCase.RULES_UNAVAILABLE,
 }
 
+#: The published default for `[cases] decision_max_age_seconds`, and it is a
+#: SETTING with a default rather than a constant because it is an ASSUMPTION:
+#: **nothing has measured how long a lane decision stays the same car's.** Two
+#: minutes is drawn from a person walking from a stopped car to a door station
+#: and pressing a button, which is a guess about people, not a measurement of
+#: them. A site whose lane is thirty metres from its intercom raises it; a busy
+#: one lowers it. What is NOT a guess is which way the error falls: past the
+#: bound the driver gets a person, which is the answer every other case in the
+#: set already gets.
+DEFAULT_DECISION_MAX_AGE_SECONDS = 120.0
+
 #: The transit states that mean the lane could not say whether the vehicle
 #: actually went through. `held` is neither a confirmation nor a refutation and
 #: `unconfirmable` is an ordinary lane with no closing loops -- a third party's
@@ -101,6 +120,11 @@ class LaneReading:
     outcome: str | None = None
     reason: str | None = None
     transit: str | None = None
+    #: `decision.at` off the wire, exactly as the lane published it. A STRING,
+    #: not a moment: parsing it is where it can turn out to be unreadable, and
+    #: that is a fact about the answer this build was given rather than
+    #: something to be lost in a conversion before anybody can branch on it.
+    decision_at: str | None = None
     #: The codes the lane published as `active` with `never_alarm` FALSE, as it
     #: published them. Filtered where the payload is read, not here, because
     #: `never_alarm` travels on the wire with the code and this package holds no
@@ -108,8 +132,54 @@ class LaneReading:
     malfunctions: tuple[str, ...] = ()
 
 
-def derive(reading: LaneReading) -> AgentCase:
-    """The case, from one lane reading. Pure, total, and ordered.
+#: The one copy of what the comparison in `derive()` spans, published from here
+#: into `docs/CONTRACT.md` so the two cannot come apart. Same shape and same
+#: reason as the capture process's `capture_minus_lane_event_ms` note.
+DECISION_AGE_NOTE = (
+    "This is a COMPARISON ACROSS TWO CLOCKS: `decision.at` is read from the "
+    "LANE's clock and `now` from this process's. It is not a measured age. A "
+    "NEGATIVE AGE IS REACHABLE -- a decision stamped after the moment this "
+    "process reads it -- and it is treated as FRESH, because the alternative is "
+    "sending a driver to a person on the strength of a clock offset nobody has "
+    "measured. Nothing here measures the offset between the two, so nothing "
+    "here can separate it from the age it is trying to read. Where the two "
+    "clocks are the same box, or are disciplined to the same source, this is "
+    "the cost of being a CONSUMER of the lane's contract rather than something "
+    "the lane calls."
+)
+
+
+def _age_seconds(stamp: str | None, now: datetime) -> float | None:
+    """How old the lane says its decision is, or `None` if it cannot be read.
+
+    `None` is not zero and it is not old: it is "this build cannot tell", which
+    is the catch-all case and a person. A stamp with no timezone is UNREADABLE
+    here rather than assumed to be UTC -- the round-4 rule, and the same reason:
+    a naive moment compared against an aware one is a guess about which machine
+    it came from.
+    """
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None
+    return (now - moment).total_seconds()
+
+
+def derive(
+    reading: LaneReading,
+    now: datetime,
+    max_age_seconds: float = DEFAULT_DECISION_MAX_AGE_SECONDS,
+) -> AgentCase:
+    """The case, from one lane reading AND A CLOCK. Pure, total, and ordered.
+
+    `now` is passed in rather than read here, and it has no default: a function
+    that reached for the clock itself would be one whose answer cannot be
+    reproduced from a payload, and a DEFAULT clock is a function that silently
+    calls every decision fresh on the day somebody forgets to pass one.
 
     The order is the table's and it is load-bearing:
 
@@ -118,6 +188,10 @@ def derive(reading: LaneReading) -> AgentCase:
         cannot have a decision interpreted out of it;
       * **then a malfunction** -- a broken lane's last decision is not a fact
         about the vehicle standing at it, whatever that decision was;
+      * **then the AGE of the decision** -- a decision the lane made for
+        somebody else is not a fact about this driver either, and this is the
+        only guard in front of `nothing_to_do`, the one case that reaches
+        nobody;
       * **then the outcome**, and only inside `allow` does the transit decide
         anything: under `deny` and `no_vehicle` there was no vend, so there is
         nothing for closing loops to have confirmed.
@@ -128,6 +202,17 @@ def derive(reading: LaneReading) -> AgentCase:
         return AgentCase.LANE_UNAVAILABLE
     if reading.malfunctions:
         return AgentCase.MALFUNCTION_ACTIVE
+    if reading.outcome is not None:
+        # There IS a decision, so it has an age, and this build either knows it
+        # or does not. Ahead of every outcome branch, because the age decides
+        # whether any of them is about the person standing at the barrier.
+        age = _age_seconds(reading.decision_at, now)
+        if age is None:
+            # A decision with no readable moment on it. The catch-all, for the
+            # same reason as every other answer this build will not interpret.
+            return AgentCase.UNRECOGNISED_REASON
+        if age > max_age_seconds:
+            return AgentCase.STALE_DECISION
     if reading.outcome == "fallback":
         case = FALLBACK_CASES.get(reading.reason or "")
         # A reason outside the required subset is NOT mapped onto the nearest
@@ -159,6 +244,8 @@ def derive(reading: LaneReading) -> AgentCase:
 
 
 __all__ = [
+    "DECISION_AGE_NOTE",
+    "DEFAULT_DECISION_MAX_AGE_SECONDS",
     "FALLBACK_CASES",
     "OUTCOMES",
     "REQUIRED_FALLBACK_REASONS",

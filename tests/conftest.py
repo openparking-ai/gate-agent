@@ -261,7 +261,7 @@ def agent_config_for(
     lane_url: str | None = None,
     intercom: str = "sip:door1@10.0.0.9",
     standalone: bool = False,
-    driver_languages=("en", "es"),
+    driver_languages=("en", "es-ES"),
     operator_language: str = "en",
     authorisations=("open_now", "open_and_flag", "do_not_open", "hold", "call_back"),
     human_sip_uri: str = "sip:duty@10.0.0.5",
@@ -271,6 +271,11 @@ def agent_config_for(
     hold_reprompt_seconds: float = 45.0,
     audio_directory=None,
     extra_intercoms=(),
+    name_audio_seconds: float = 0.5,
+    name_audio_rate: int = 8000,
+    name_audio_max_seconds: float = 10.0,
+    line_timeout_seconds: float = 10.0,
+    decision_max_age_seconds: float = 120.0,
 ):
     """An `AgentConfig` built the way `from_dict` would, without a TOML file.
 
@@ -283,7 +288,11 @@ def agent_config_for(
     from gate_agent.config import Target as _Target
     from gate_agent.contract import Authorisation, TargetKind
 
-    name_audio = wav(tmp_path / "site" / "door1.wav")
+    name_audio = wav(
+        tmp_path / "site" / "door1.wav",
+        seconds=name_audio_seconds,
+        rate=name_audio_rate,
+    )
     lanes = ()
     lane_name = None
     if lane_url is not None and not standalone:
@@ -320,6 +329,9 @@ def agent_config_for(
         no_answer_seconds=no_answer_seconds,
         nothing_usable_seconds=nothing_usable_seconds,
         hold_reprompt_seconds=hold_reprompt_seconds,
+        decision_max_age_seconds=decision_max_age_seconds,
+        line_timeout_seconds=line_timeout_seconds,
+        name_audio_max_seconds=name_audio_max_seconds,
     )
 
 

@@ -48,7 +48,12 @@ MODULES = (
     "g711.so", "l16.so", "auconv.so", "auresamp.so", "aufile.so",
     "ctrl_tcp.so", "mixausrc.so", "mixminus.so",
 )
-APP_MODULES = ("account.so", "menu.so")
+#: `debug_cmd` is here because the AGENT REQUIRES IT: `config` and `modules`,
+#: which are how this build reads the user agent's loaded configuration back at
+#: startup, are that module's commands. A baresip without it is refused by name,
+#: which `test_agent_contract.py` measures against a fake socket and this file's
+#: world would otherwise fail at `start()`.
+APP_MODULES = ("account.so", "menu.so", "debug_cmd.so")
 
 
 def baresip() -> str | None:

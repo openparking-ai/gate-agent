@@ -1292,6 +1292,13 @@ class AgentCase(StrEnum):
     #: barrier and the lane believes the lane is empty.
     VEHICLE_NOT_DETECTED = "vehicle_not_detected"
     ENTRY_NOT_CONFIRMED = "entry_not_confirmed"
+    #: The lane's decision is OLDER than `[cases] decision_max_age_seconds`. A
+    #: decision has an age, and a stale one is not a fact about the driver who
+    #: is standing at the barrier now -- it is a fact about whoever was there
+    #: when it was made. It is a person, and it is deliberately not
+    #: `nothing_to_do`: that is the one case that does not reach anybody, so it
+    #: is the one where being wrong costs the customer everything.
+    STALE_DECISION = "stale_decision"
     #: The lane named a reason outside the contract's required subset. A lane
     #: that is not ours has its own vocabulary and will. The contract's answer is
     #: to ESCALATE, never to map it onto the nearest thing we know.
@@ -1384,6 +1391,12 @@ class AgentCode(StrEnum):
     #: register at startup on this, so on a running agent it is how a file that
     #: has gone missing since is reported rather than played as silence.
     AUDIO_MISSING = "audio_missing"
+    #: The user agent kept refusing a line past `[speech] line_timeout_seconds`.
+    #: The subject is the LEG -- `driver` or `operator` -- because which one
+    #: cannot be spoken to decides what happens next: a driver who cannot be
+    #: told their case is escalated to a person, and a person who cannot be
+    #: briefed either ends the case rather than holding a call open in silence.
+    AUDIO_PLAYBACK_FAILED = "audio_playback_failed"
     #: A declared lane could not be read. Per lane, under that lane's name.
     LANE_UNAVAILABLE = "lane_unavailable"
 
@@ -1424,14 +1437,21 @@ class AgentEventKind(StrEnum):
     #: A call from a SIP identity this site does not declare. One fixed message,
     #: and the call ends.
     CALL_FROM_UNDECLARED_INTERCOM = "call_from_undeclared_intercom"
-    #: A call arrived while a case was already in progress, and was refused
-    #: WITHOUT being answered -- so the intercom's own call list moves on to the
-    #: human's number, which is the degradation the install requirement exists
-    #: for. One case at a time is a real limit of this version and it is
-    #: published on `GET /v1/agent` as `concurrent_cases`, because the user
-    #: agent's bridge is site-wide: a second case bridged while the first is
-    #: open would put two strangers and two operators in one conversation.
+    #: A call arrived while a case was already in progress and was refused
+    #: WITHOUT being answered, whoever it was from. One case at a time is a real
+    #: limit of this version and it is published on `GET /v1/agent` as
+    #: `concurrent_cases`, because the user agent's bridge is site-wide: a
+    #: second case bridged while the first is open would put two strangers and
+    #: two operators in one conversation. **Measured from the caller's side:**
+    #: the refusal is `486 Busy Here` after `180 Ringing`. The record carries
+    #: the identity the caller claimed.
     CALL_REFUSED_BUSY = "call_refused_busy"
+    #: The case could not be SPOKEN -- neither to the driver nor, after the
+    #: escalation, to the person. The call is RELEASED rather than held open in
+    #: silence. It is its own kind because `case_spoken` is written when the
+    #: last file of the case has FINISHED, so its absence had to mean something
+    #: a reader can act on rather than a gap in the log.
+    CASE_NOT_SPOKEN = "case_not_spoken"
     CALL_ENDED = "call_ended"
 
 
@@ -1473,6 +1493,11 @@ class UserAgentDescription:
     #: at startup -- the `schema_version` rule, applied to a process.
     tested_versions: tuple[str, ...]
     registered: bool | None
+    #: `[user_agent] reconnect_seconds`: the longest this build waits between
+    #: attempts to REOPEN the control socket after it is lost. Published because
+    #: a consumer reading `ua_unreachable` is entitled to know whether the agent
+    #: is trying to come back and how often.
+    reconnect_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         _text(self.kind, "user_agent.kind")
@@ -1487,6 +1512,7 @@ class UserAgentDescription:
         return {
             "kind": self.kind,
             "version": self.version,
+            "reconnect_seconds": self.reconnect_seconds,
             "tested_versions": list(self.tested_versions),
             "registered": self.registered,
         }
@@ -1516,6 +1542,13 @@ class AgentDescription:
     nothing_usable_seconds: float
     hold_reprompt_seconds: float
     transfer_declared: bool
+    #: `[cases] decision_max_age_seconds`. Published because it decides which
+    #: driver gets a person, and a consumer cannot read the case table without
+    #: it.
+    decision_max_age_seconds: float
+    #: `[speech] line_timeout_seconds` and `name_audio_max_seconds`.
+    line_timeout_seconds: float
+    name_audio_max_seconds: float
     contract_version: int = CONTRACT_VERSION
 
     def __post_init__(self) -> None:
@@ -1567,6 +1600,11 @@ class AgentDescription:
                 "nothing_usable_seconds": self.nothing_usable_seconds,
                 "hold_reprompt_seconds": self.hold_reprompt_seconds,
                 "transfer_declared": self.transfer_declared,
+            },
+            "cases": {"decision_max_age_seconds": self.decision_max_age_seconds},
+            "speech": {
+                "line_timeout_seconds": self.line_timeout_seconds,
+                "name_audio_max_seconds": self.name_audio_max_seconds,
             },
         }
 

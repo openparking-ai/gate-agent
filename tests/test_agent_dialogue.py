@@ -17,7 +17,7 @@ import pytest
 
 from conftest import FakeClock, agent_config_for, agent_for
 from fake_ua import FakeUa
-from foreign_lane import ForeignLane
+from foreign_lane import ForeignLane, decided_at
 from foreign_lane import make_server as foreign_server
 from gate_agent.agent import REPROMPTS
 from gate_agent.contract import AgentCase, AgentEventKind, Authorisation
@@ -37,7 +37,10 @@ def lane():
         "fallback": "engine_unreachable",
         "cause": "unreachable",
         "presence": None,
-        "at": "2026-08-30T14:03:11.482913+00:00",
+        # PRODUCED. The agent branches on the age of this moment, so a typed one
+        # would drift to the stale side of the threshold and every case in this
+        # file would become `stale_decision` on a date nobody chose.
+        "at": decided_at(),
         "read_ref": None,
     }
     served.transit = {"state": "none", "since": None}
@@ -100,13 +103,13 @@ def test_the_case_plays_in_every_declared_language_in_order(tmp_path, lane):
     nothing.
     """
     _served, url = lane
-    agent, ua, clock = running(tmp_path, url, driver_languages=("en", "es"))
+    agent, ua, clock = running(tmp_path, url, driver_languages=("en", "es-ES"))
     ua.incoming(INTERCOM)
     pump(agent, clock, lambda: len(files(ua, "driver")) >= 2)
     spoken = files(ua, "driver")
     assert spoken[:2] == [
         "en/case.identification_unavailable.wav",
-        "es/case.identification_unavailable.wav",
+        "es-ES/case.identification_unavailable.wav",
     ], spoken
 
 
@@ -117,11 +120,11 @@ def test_the_order_is_the_sites_and_not_this_packages(tmp_path, lane):
     English first, whatever a site declared.
     """
     _served, url = lane
-    agent, ua, clock = running(tmp_path, url, driver_languages=("es", "en"))
+    agent, ua, clock = running(tmp_path, url, driver_languages=("es-ES", "en"))
     ua.incoming(INTERCOM)
     pump(agent, clock, lambda: len(files(ua, "driver")) >= 2)
     assert files(ua, "driver")[:2] == [
-        "es/case.identification_unavailable.wav",
+        "es-ES/case.identification_unavailable.wav",
         "en/case.identification_unavailable.wav",
     ]
 
@@ -172,7 +175,7 @@ def test_a_call_from_an_undeclared_intercom_gets_one_message_and_ends(tmp_path, 
     pump(agent, clock, lambda: agent.session is None)
     assert files(ua, "driver") == [
         "en/driver.undeclared_intercom.wav",
-        "es/driver.undeclared_intercom.wav",
+        "es-ES/driver.undeclared_intercom.wav",
     ]
     assert "dial" not in [verb for verb, _ in ua.commands]
     assert kinds(agent)[0] == AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM.value
@@ -407,9 +410,8 @@ def test_no_usable_digit_tells_the_driver_and_opens_nothing(tmp_path, lane):
 def test_a_second_call_during_a_case_is_not_answered(tmp_path, lane):
     """One case at a time, and the second call is REFUSED WITHOUT BEING ANSWERED.
 
-    That is what makes the intercom's own call list move on to the human's
-    number, which is the degradation the install requirement exists for.
-    Answering it to say "busy" would take that fall-through away.
+    A DECLARED second caller. The undeclared one -- which is every caller the
+    site did not name, and therefore the default -- is the separate test below.
     """
     _served, url = lane
     agent, ua, clock = running(tmp_path, url)
@@ -438,12 +440,12 @@ def test_a_mid_call_switch_changes_the_next_sentence_and_every_one_after(tmp_pat
     every sentence is in that language and only that language.
     """
     _served, url = lane
-    agent, ua, clock = running(tmp_path, url, driver_languages=("en", "es"))
+    agent, ua, clock = running(tmp_path, url, driver_languages=("en", "es-ES"))
     ua.incoming(INTERCOM)
     pump(agent, clock, lambda: len(files(ua, "driver")) >= 2)
-    assert {name.split("/")[0] for name in files(ua, "driver")} == {"en", "es"}
+    assert {name.split("/")[0] for name in files(ua, "driver")} == {"en", "es-ES"}
 
-    agent.set_language("call-1", "es")
+    agent.set_language("call-1", "es-ES")
     before = len(files(ua, "driver"))
     pump(agent, clock, lambda: any(verb == "dial" for verb, _ in ua.commands))
     operator = [arg for verb, arg in ua.commands if verb == "dial"][0].split("-> ")[1]
@@ -454,7 +456,7 @@ def test_a_mid_call_switch_changes_the_next_sentence_and_every_one_after(tmp_pat
     pump(agent, clock, lambda: said(ua, "authorisation.open_now"))
     after = files(ua, "driver")[before:]
     assert after, "nothing more was said, so this asserts nothing"
-    assert {name.split("/")[0] for name in after} == {"es"}, after
+    assert {name.split("/")[0] for name in after} == {"es-ES"}, after
 
 
 def test_a_language_this_site_did_not_declare_is_refused(tmp_path, lane):
@@ -469,7 +471,7 @@ def test_a_language_this_site_did_not_declare_is_refused(tmp_path, lane):
     ua.incoming(INTERCOM)
     agent.poll()
     with pytest.raises(ValueError) as raised:
-        agent.set_language("call-1", "es")
+        agent.set_language("call-1", "es-ES")
     assert "not a language this site declared" in str(raised.value)
     with pytest.raises(ValueError):
         agent.set_language("call-1", "kl")
@@ -483,7 +485,7 @@ def test_a_language_this_site_did_not_declare_is_refused(tmp_path, lane):
 def test_without_a_switch_every_declared_language_keeps_playing(tmp_path, lane):
     """The other control: the switch is what narrows it, not the passage of time."""
     _served, url = lane
-    agent, ua, clock = running(tmp_path, url, driver_languages=("en", "es"))
+    agent, ua, clock = running(tmp_path, url, driver_languages=("en", "es-ES"))
     ua.incoming(INTERCOM)
     pump(agent, clock, lambda: any(verb == "dial" for verb, _ in ua.commands))
     operator = [arg for verb, arg in ua.commands if verb == "dial"][0].split("-> ")[1]
@@ -497,7 +499,7 @@ def test_without_a_switch_every_declared_language_keeps_playing(tmp_path, lane):
         lambda: len([1 for name in files(ua, "driver") if "do_not_open" in name]) >= 2,
     )
     spoken = [name for name in files(ua, "driver") if "authorisation.do_not_open" in name]
-    assert {name.split("/")[0] for name in spoken} == {"en", "es"}, spoken
+    assert {name.split("/")[0] for name in spoken} == {"en", "es-ES"}, spoken
 
 
 def test_a_driver_who_hangs_up_takes_the_operators_leg_with_them(tmp_path, lane):
@@ -521,3 +523,218 @@ def test_a_driver_who_hangs_up_takes_the_operators_leg_with_them(tmp_path, lane)
     ua.incoming(INTERCOM, call_id="call-9")
     agent.poll()
     assert ("answer", "call-9") in ua.commands
+
+
+# ---------------------------------------------------------------------------
+# The round-5 cut. One section per blocker.
+# ---------------------------------------------------------------------------
+
+
+def test_an_undeclared_caller_during_a_case_is_refused_unanswered(tmp_path, lane):
+    """X1. The LIVE CASE is checked before the identity, so the limit holds.
+
+    Being undeclared is the DEFAULT state of every caller on a network, not a
+    rare one. With the identity checked first, `concurrent_cases: 1` applied
+    only to callers the site had declared: a stranger dialling mid-case was
+    ANSWERED, given a session, and conferenced into a live bridge, and the one
+    fixed sentence it was told ended in `hangup_all`, which cut off the real
+    driver and the real operator mid-case.
+
+    Measured here on the record: what the agent asked its user agent to do, and
+    what survived. The waveform is in `test_agent_sip.py`.
+    """
+    _served, url = lane
+    agent, ua, clock, operator = brief_and_bridge(tmp_path, url)
+    assert agent.session.bridged
+    before = list(ua.commands)
+
+    ua.incoming("sip:stranger@10.9.9.9", call_id="stranger-1")
+    agent.poll()
+
+    after = [entry for entry in ua.commands if entry not in before or ua.commands.count(entry) > 1]
+    # NOT answered. NOT given a session. NOTHING played to it. NO conference.
+    assert ("answer", "stranger-1") not in ua.commands
+    assert ("hangup", "stranger-1") in ua.commands
+    assert agent.session is not None, "the stranger took the real case's session"
+    assert agent.session.driver_call == "call-1"
+    assert agent.session.operator_call == operator
+    assert ("hangup_all", "") not in ua.commands, "the stranger tore the real case down"
+    assert not any(
+        verb == "play" and "undeclared_intercom" in arg for verb, arg in after
+    ), "the stranger was played a sentence, which means it was answered"
+
+    # The refusal carries the identity it claimed, so a site can see who called.
+    refusals = [
+        event for event in agent.events(0).to_dict()["events"]
+        if event["kind"] == AgentEventKind.CALL_REFUSED_BUSY.value
+    ]
+    assert len(refusals) == 1
+    assert refusals[0]["intercom"] == "sip:stranger@10.9.9.9"
+    # And no code went active for it: it is not an undeclared-intercom fault,
+    # it is a busy agent.
+    assert not any(
+        event["kind"] == AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM.value
+        for event in agent.events(0).to_dict()["events"]
+    )
+
+    # THE REAL CASE SURVIVES TO ITS AUTHORISATION.
+    ua.dtmf(operator, "1")
+    agent.poll()
+    recorded = [
+        event for event in agent.events(0).to_dict()["events"]
+        if event["kind"] == AgentEventKind.AUTHORISATION_RECEIVED.value
+    ]
+    assert len(recorded) == 1
+    assert recorded[0]["intercom"] == INTERCOM
+    assert recorded[0]["authorisation"] == Authorisation.OPEN_NOW.value
+
+
+def test_an_undeclared_caller_with_no_case_is_still_answered_once_and_ended(tmp_path, lane):
+    """X1's other side, and the control on the test above.
+
+    Reordering the checks must NOT have taken the undeclared-caller behaviour
+    away: with no case in progress it is still one message, an end, an event and
+    a code. Without this, "the stranger was refused" would be satisfied by an
+    agent that refuses everybody.
+    """
+    _served, url = lane
+    agent, ua, clock = running(tmp_path, url)
+    ua.incoming("sip:stranger@10.9.9.9", call_id="stranger-1")
+    pump(agent, clock, lambda: agent.session is None)
+    assert ("answer", "stranger-1") in ua.commands
+    assert said(ua, "driver.undeclared_intercom")
+    assert AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM.value in kinds(agent)
+    assert [
+        entry["state"] for entry in agent.health().to_dict()["codes"]
+        if entry["code"] == "call_from_undeclared_intercom"
+        and entry["subject"] == "sip:stranger@10.9.9.9"
+    ] == ["active"]
+
+
+def test_a_line_the_user_agent_will_not_play_is_a_code_a_timer_and_a_person(tmp_path, lane):
+    """X4. A user agent that ANSWERS and refuses every file.
+
+    What a real one does for a file it cannot decode, an audio mode it will not
+    play into, or a mixer stuck in a mode it cannot leave. Retried for ever that
+    is a driver in an answered call hearing nothing, with no timer, no code, and
+    an event log saying the case was spoken -- measured at thirty-three hours on
+    this build.
+    """
+    _served, url = lane
+    agent, ua, clock = running(tmp_path, url)
+    ua.refuse_play = True
+    ua.incoming(INTERCOM)
+    agent.poll()
+    assert agent.session is not None
+
+    # Before the deadline: nothing has gone active, and nothing has been said.
+    clock.advance(agent.config.line_timeout_seconds - 1)
+    agent.poll()
+    assert not ua.played
+    assert _active(agent, "audio_playback_failed") == []
+
+    # Past it: the code names the LEG, and the case goes to a person.
+    clock.advance(3)
+    agent.poll()
+    assert _active(agent, "audio_playback_failed") == ["driver"]
+    assert AgentEventKind.HUMAN_CALLED.value in kinds(agent)
+    # And `case_spoken` is NOT in the log, because it was not spoken.
+    assert AgentEventKind.CASE_SPOKEN.value not in kinds(agent)
+
+
+def test_a_case_that_cannot_be_spoken_to_anybody_ends_and_releases_the_call(tmp_path, lane):
+    """X4. The person's leg cannot be spoken to either, so the case ENDS.
+
+    A call held open in silence is a call the driver cannot get out of and the
+    intercom cannot move past.
+    """
+    _served, url = lane
+    agent, ua, clock = running(tmp_path, url)
+    ua.refuse_play = True
+    ua.incoming(INTERCOM)
+    agent.poll()
+    pump(agent, clock, lambda: any(verb == "dial" for verb, _ in ua.commands), step=4.0)
+    operator = [arg for verb, arg in ua.commands if verb == "dial"][0].split("-> ")[1]
+    ua.established(operator)
+    pump(agent, clock, lambda: agent.session is None, step=4.0)
+
+    assert _active(agent, "audio_playback_failed") == ["driver", "operator"]
+    assert AgentEventKind.CASE_NOT_SPOKEN.value in kinds(agent)
+    assert ("hangup_all", "") in ua.commands, "the driver's call was left open in silence"
+    assert AgentEventKind.CASE_SPOKEN.value not in kinds(agent)
+    # AND IT WAS NEVER BRIDGED. `_advance` used to go on using a session
+    # `_speak` had just ended: from `BRIEFING`, with the queue cleared by the
+    # failure, the next branch sent `conference` on a call already hung up.
+    assert ua.bridged_at is None, "a case that was torn down was bridged anyway"
+    assert not agent.session, "the ended session is still the agent's"
+
+
+def test_case_spoken_is_written_when_the_last_file_has_finished(tmp_path, lane):
+    """X4. NOT when it is queued. That was a claim about a queue.
+
+    Written at queue time it stayed true in the log through thirty-three hours
+    of a user agent refusing every line of the case.
+    """
+    _served, url = lane
+    agent, ua, clock = running(tmp_path, url, driver_languages=("en", "es-ES"))
+    ua.incoming(INTERCOM)
+    agent.poll()   # answers; the media event arrives on the next poll
+    agent.poll()   # the first file starts
+    # The first file is playing. Both are queued. NOTHING has finished.
+    assert ua.played, "nothing was played at all, so this measures the wrong thing"
+    assert AgentEventKind.CASE_SPOKEN.value not in kinds(agent)
+    # The second language has not even started.
+    assert len(files(ua, "driver")) == 1
+    pump(agent, clock, lambda: AgentEventKind.CASE_SPOKEN.value in kinds(agent))
+    # By the time it IS written, every file of the case has been played.
+    assert len(files(ua, "driver")) == 2
+    assert kinds(agent).index(AgentEventKind.CASE_SPOKEN.value) < kinds(agent).index(
+        AgentEventKind.HUMAN_CALLED.value
+    )
+
+
+def test_nothing_to_do_also_writes_case_spoken_when_it_has_finished(tmp_path, lane):
+    """X4's other path: the one case that reaches nobody still has a record."""
+    served, url = lane
+    served.decision = {
+        "outcome": "allow", "reason": "allow", "fallback": None, "cause": None,
+        "presence": None, "at": decided_at(), "read_ref": None,
+    }
+    served.transit = {"state": "confirmed", "since": None}
+    agent, ua, clock = running(tmp_path, url)
+    ua.incoming(INTERCOM)
+    agent.poll()
+    assert AgentEventKind.CASE_SPOKEN.value not in kinds(agent)
+    pump(agent, clock, lambda: agent.session is None)
+    assert AgentEventKind.CASE_SPOKEN.value in kinds(agent)
+    assert AgentEventKind.HUMAN_CALLED.value not in kinds(agent)
+
+
+def test_the_operator_hanging_up_mid_menu_says_what_happened(tmp_path, lane):
+    """The driver used to be told "I could not take an instruction" for this.
+
+    That is not what happened, and a driver told it goes on standing there. Two
+    different facts, two lines. The control is the OTHER path -- a timeout with
+    no digit -- which still says the original sentence.
+    """
+    _served, url = lane
+    agent, ua, clock, operator = brief_and_bridge(tmp_path, url)
+    ua.closed(operator)
+    agent.poll()
+    pump(agent, clock, lambda: said(ua, "driver.operator_hung_up"))
+    assert not said(ua, "driver.nothing_usable")
+    assert AgentEventKind.NOTHING_USABLE.value in kinds(agent)
+
+    # THE CONTROL: nobody keys anything, and the original sentence is what plays.
+    agent2, ua2, clock2, _operator2 = brief_and_bridge(tmp_path, url)
+    clock2.advance(agent2.config.nothing_usable_seconds + 1)
+    pump(agent2, clock2, lambda: said(ua2, "driver.nothing_usable"))
+    assert not said(ua2, "driver.operator_hung_up")
+
+
+def _active(agent, code: str) -> list[str]:
+    return sorted(
+        entry["subject"]
+        for entry in agent.health().to_dict()["codes"]
+        if entry["code"] == code and entry["state"] == "active"
+    )

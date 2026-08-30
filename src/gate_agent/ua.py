@@ -11,9 +11,16 @@ This module is the seam, and it is deliberately six verbs wide:
 
     version / registered   who the UA is and whether it is registered
     answer / dial / hangup which calls exist
+    calls                  which calls the UA is holding RIGHT NOW
     play                   one audio file into ONE CALL, named by its id
     bridge                 both calls hear each other, from this moment
     poll                   what happened, as this package's own event set
+
+**`calls` is here because a control socket can be LOST.** Everything else on
+this seam is a report of something that happened while the agent was listening;
+`calls` is the one question that has to be asked after it was not. A call that
+arrived while the socket was down produced an event nobody received, and the
+only way to find out whether somebody is still ringing at the door is to ask.
 
 **`bridge` is a verb and not a mode.** The agent has to be able to speak to the
 operator PRIVATELY -- the case, and a menu of digits -- and only then put the two
@@ -56,6 +63,16 @@ class UaRefused(UaUnreachable):
     dial that was refused and a dial that could not be sent both mean the person
     was not called -- so every caller that does not care about the difference
     keeps working. The one that cares catches this first.
+    """
+
+
+class UaMisconfigured(Exception):
+    """The user agent is running on a configuration this agent cannot work on.
+
+    Read back out of the process at startup, not assumed from a file this
+    package does not own. A separate exception from `UaUnsupportedVersion`
+    because it is a separate fact -- the right program, set up wrongly -- and a
+    site reading the message needs to be told which setting, by name.
     """
 
 
@@ -107,6 +124,20 @@ class UaEventKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class UaCall:
+    """One call the user agent is holding, as `calls()` reports it.
+
+    `ringing` is the whole point of this type: a call that has ARRIVED and has
+    not been answered is the one an agent that has just got its socket back can
+    still do something about. Everything else it can only hang up.
+    """
+
+    call_id: str
+    peer_uri: str | None
+    ringing: bool
+
+
+@dataclass(frozen=True, slots=True)
 class UaEvent:
     kind: UaEventKind
     call_id: str | None = None
@@ -118,7 +149,9 @@ class UaEvent:
 
 
 __all__ = [
+    "UaCall",
     "UaEvent",
+    "UaMisconfigured",
     "UaRefused",
     "UaEventKind",
     "UaLeg",

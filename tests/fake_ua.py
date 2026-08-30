@@ -20,7 +20,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from gate_agent.ua import UaEvent, UaEventKind, UaLeg, UaUnreachable, UaUnsupportedVersion
+from gate_agent.ua import (
+    UaCall,
+    UaEvent,
+    UaEventKind,
+    UaLeg,
+    UaRefused,
+    UaUnreachable,
+    UaUnsupportedVersion,
+)
 
 
 @dataclass
@@ -40,10 +48,19 @@ class FakeUa:
     #: it checks the operator was briefed before anybody was put together.
     bridged_at: int | None = None
     events: list[UaEvent] = field(default_factory=list)
+    #: What `calls()` reports. A test that asks what a reopened socket found
+    #: puts `UaCall`s here.
+    held: list = field(default_factory=list)
     #: Call ids this fake PLACED, which are the operator's leg by construction.
     dialled: set = field(default_factory=set)
     #: A test sets this to make the next verb fail the way a dead UA does.
     unreachable: bool = False
+    #: A test sets this to make every `play` be REFUSED -- which is what a real
+    #: user agent does for a file it cannot decode, an audio mode it will not
+    #: play into, or a mixer stuck in a mode it cannot leave. It ANSWERS: the
+    #: call is up and the driver is on it, hearing nothing. That is a different
+    #: fact from `unreachable`, and the difference is whether anybody is paged.
+    refuse_play: bool = False
     next_call_id: int = 100
 
     def start(self) -> None:
@@ -83,6 +100,8 @@ class FakeUa:
 
     def play(self, call_id: str, path: str) -> None:
         self._check()
+        if self.refuse_play:
+            raise UaRefused(f"the user agent refused `mixausrc_enc_start`: {path!r}")
         leg = self.leg_of(call_id)
         self.commands.append(("play", f"{leg} {path}"))
         self.played.append((leg, path))
@@ -110,10 +129,25 @@ class FakeUa:
     def hangup_all(self) -> None:
         self.commands.append(("hangup_all", ""))
 
+    #: The calls this fake is holding, for a test that asks what a reopened
+    #: control socket found. Set by a test; empty otherwise.
+    def calls(self) -> tuple[UaCall, ...]:
+        self._check()
+        return tuple(self.held)
+
     def poll(self) -> tuple[UaEvent, ...]:
         self._check()
         events, self.events = tuple(self.events), []
         return events
+
+    def reconnect(self) -> tuple[UaCall, ...]:
+        """The seam's answer to a socket that was lost. Empty when nothing was.
+
+        The real adapter refuses to work at all until this succeeds, because its
+        socket is gone; `LosableUa` in `test_agent_contract.py` models that, and
+        this base fake never loses one.
+        """
+        return ()
 
     # -- what a test drives it with ---------------------------------------
 

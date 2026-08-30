@@ -409,6 +409,7 @@ without adding it here.
     "call_from_undeclared_intercom",
     "human_unreachable",
     "audio_missing",
+    "audio_playback_failed",
     "lane_unavailable"
   ],
   "agent_cases": [
@@ -421,6 +422,7 @@ without adding it here.
     "entry_refused",
     "vehicle_not_detected",
     "entry_not_confirmed",
+    "stale_decision",
     "unrecognised_reason",
     "lane_unavailable",
     "standalone",
@@ -451,11 +453,12 @@ without adding it here.
     "nothing_usable",
     "call_from_undeclared_intercom",
     "call_refused_busy",
+    "case_not_spoken",
     "call_ended"
   ],
   "shipped_languages": [
     "en",
-    "es"
+    "es-ES"
   ]
 }
 ```
@@ -1332,7 +1335,10 @@ with the leg it came in on.
 **It has never been run against an Axis, a 2N, or any other real intercom, and
 it cannot be here.** Call setup time, audio quality, echo, and DTMF detection
 through a door station's microphone and a real garage's network are **NOT
-MEASURED**. Nobody should read the CI result as a statement about any of them.
+MEASURED** — and neither is **whether a door station's call list advances on the
+`486 Busy Here` this agent sends when it is already on a case, or only on a
+no-answer timeout.** Nobody should read the CI result as a statement about any of
+them.
 
 **Install requirement, and this package cannot enforce it:** the intercom's own
 call list must name the AGENT FIRST and the human's number on no-answer. That is
@@ -1354,16 +1360,44 @@ Tested version: **baresip 4.11.0** (BSD-3-Clause). Debian and Ubuntu package
 older releases that do not carry the two modules this needs, so it is built from
 source at that tag on the target and on the CI runner.
 
-Four things on the baresip side are load-bearing, and all four are configuration
-rather than code:
+Five things on the baresip side are load-bearing, and all five are configuration
+rather than code. **Three of them are now CHECKED, at startup, by reading the
+configuration back out of the running process** — `ctrl_tcp` answers `config`
+with the loaded settings and `modules` with the loaded module list, both from
+baresip's `debug_cmd` module, which is why that module is in the required list.
+The agent refuses to start on any of them, naming the setting. Reproduce:
+`pytest -k baresip_configuration`.
 
-| | |
-|---|---|
-| `ctrl_tcp_listen 127.0.0.1:4444` | Loopback. That socket can place a call, bridge two of them, and play audio at whoever is on the line. baresip's own default is every interface. |
-| `call_hold_other_calls no` | baresip's default holds every other call when a new one is established, which would put the driver on hold the moment the agent calls the operator. |
-| an audio device that is **not** `aubridge` | That driver loops the player back into the source, which bridges every call to every other one whether the agent asked or not. **Measured:** with `aubridge`, the operator heard the driver before `conference` was ever sent. |
-| modules `ctrl_tcp`, `mixausrc`, `mixminus`, `aufile`, `account`, `menu` | `mixausrc` is what plays one file into ONE leg; `mixminus` is what the bridge is. Without them the agent can answer a call and do nothing else. |
-| **nothing else attached to that control socket** | baresip's `ctrl_tcp` accepts exactly ONE client. A second connection — a console, a script, a monitoring tool — takes the agent's away, and the agent then reports `ua_unreachable` while baresip is running perfectly. **Measured:** it happened in this suite, which is why it is written here. |
+| | checked at startup? | |
+|---|---|---|
+| `ctrl_tcp_listen 127.0.0.1:4444` | no — the agent reaches it, so it is on a socket by definition | Loopback. That socket can place a call, bridge two of them, and play audio at whoever is on the line. baresip's own default is every interface. |
+| `call_hold_other_calls no` | **yes**, read from `config` | baresip's default holds every other call when a new one is established, which would put the driver on hold the moment the agent calls the operator. |
+| an audio device that is **not** `aubridge` | **yes**, `audio_source` and `audio_player` read from `config` | baresip's own module documentation says what it is, verbatim: it "can be used to connect two audio devices together, so that all output to AUPLAY device is bridged as the input to a AUSRC device". That is every call bridged to every other one whether the agent asked or not. **What it then does to this agent is NOT MEASURED and no number here depends on it** — an earlier sentence claimed the operator heard the driver before `conference` was sent, and an independent session could not reproduce it. The refusal does not rest on that claim; it rests on what the module is. |
+| modules `ctrl_tcp`, `mixausrc`, `mixminus` (and `aufile`, `account`, `menu`, `debug_cmd`) | **yes** for the first three, read from `modules` | `mixausrc` is what plays one file into ONE leg; `mixminus` is what the bridge is; `debug_cmd` is what answers the two commands this check is made of. Without them the agent can answer a call and do nothing else. |
+| **nothing else attached to that control socket** | no — it is not a setting | baresip's `ctrl_tcp` accepts exactly ONE client. A second connection — a console, a script, a monitoring tool — takes the agent's away. **The agent now REOPENS it:** see below. |
+
+### The control socket is reopened, and how long that takes is a setting
+
+A lost `ctrl_tcp` used to be a permanent outage. The socket was raised on and
+never replaced, so an ordinary `systemctl restart baresip`, a package upgrade, an
+OOM kill, or the second client above left the agent alive, its user agent
+registered, and every call ringing at a process that would never answer one —
+`ua_unreachable` `active` for the life of the process, with the only repair a
+human restarting the agent.
+
+`[user_agent] reconnect_seconds` (published default **5.0**, on `GET /v1/agent`)
+is the LONGEST gap between attempts to reopen it. The first retry is a quarter of
+a second away and the gap doubles up to the setting, so a service restart is
+recovered from in about a second and a user agent that is gone for good is not
+hammered once per poll for ever. `ua_unreachable` **recovers** on the reconnect.
+
+**What happens to the calls that were up.** Whatever case was in progress is
+gone — its legs were torn down or are beyond reach, and nothing can say what was
+said while nobody was listening — so the session is dropped with
+`case_not_spoken`, and every call the user agent is still holding is dealt with
+by the same rule any new call gets: one still **ringing** is answered, and
+anything else is released rather than left live to be conferenced into the next
+case.
 
 **Two accounts, one per leg.** baresip identifies the audio stream to play into
 by the local account's address of record, so two calls on one account cannot be
@@ -1383,6 +1417,10 @@ fixed message** — "this intercom is not configured" — and ended. It is an ev
 (`call_from_undeclared_intercom`) and a code of the same name. **No lane is read
 and none is guessed.**
 
+**That is what happens when the agent is not already on a case.** The identity is
+looked at only then — see "One case at a time" below: a live case refuses every
+new call, whoever it is from, before anybody's identity is read.
+
 The identity is matched by SHAPE, not character for character: a door station
 sends `"Door 1" <sip:door1@10.0.0.9:5060>;tag=…` on one call and the bare URI on
 the next, and a site declares `sip:door1@10.0.0.9` once.
@@ -1399,10 +1437,19 @@ than a policy: the user agent's bridge is site-wide, so a second case bridged
 while the first is open would put two strangers and two operators into one
 conversation.
 
-A call arriving during a case is **refused without being answered**. That is
-deliberate: an unanswered call is what makes the intercom's own call list move on
-to the human's number, and answering it to say "busy" would take that
-fall-through away. It is recorded as `call_refused_busy`.
+A call arriving during a case is **refused without being answered**, whoever it
+is from — the identity is not looked at first, because being undeclared is the
+default state of every caller on a network and the limit has to hold against all
+of them.
+
+**What the refusal IS, measured from the caller's side:** the agent hangs the
+unanswered call up, and baresip sends **`486 Busy Here` after `180 Ringing`**.
+That is read out of a second caller's own user agent, not out of ours. It is
+recorded as `call_refused_busy`, with the caller's identity on the record.
+
+**Whether a door station's call list advances on a `486` — rather than only on a
+no-answer timeout — is NOT MEASURED.** It is a property of an Axis or a 2N unit,
+and this package has never been run against either.
 
 ## The case set, and how it is derived
 
@@ -1430,6 +1477,8 @@ confirmed.
 | `outcome: deny` | `entry_refused` | a person |
 | `outcome: no_vehicle` | `vehicle_not_detected` | a person |
 | `outcome: allow`, transit `held` or `unconfirmable` | `entry_not_confirmed` | a person |
+| a decision whose `decision.at` is older than `[cases] decision_max_age_seconds` | `stale_decision` | a person |
+| a decision whose `decision.at` is missing, unparseable, or carries no timezone | `unrecognised_reason` | a person |
 | a `reason` outside the required subset, a decision the lane has not made, or any other answer this build will not interpret | `unrecognised_reason` | a person |
 | the lane did not answer, refused us, or speaks a version this build cannot read | `lane_unavailable` | a person |
 | `lane = "none"` | `standalone` | a person |
@@ -1439,6 +1488,48 @@ confirmed.
 engine and a marginal read used to arrive as the same code; telling somebody to
 clean a number plate that nothing looked at is the standing acceptance of this
 project broken in the module's first sentence.
+
+### The decision has an AGE, and a stale one never ends a call
+
+`GET /v1/lane/state` publishes `decision.at`. The agent reads it, and the case
+function is given a clock, so the age of the decision is checked **before any
+outcome branch** — a decision the lane made for somebody else is not a fact about
+the driver standing at the barrier now, whatever it said.
+
+`[cases] decision_max_age_seconds`, per site, **published default 120**. It is a
+SETTING AND AN ASSUMPTION, and that is said rather than implied: **nothing has
+measured how long a lane decision stays the same car's.** Two minutes is drawn
+from a person walking from a stopped car to a door station and pressing a button,
+which is a guess about people and not a measurement of them. What is not a guess
+is which way the error falls — past the bound the driver gets a person, which is
+what every other case in the set already gets.
+
+**This is the only guard in front of `nothing_to_do`**, and `nothing_to_do` is
+the one case in the whole set that reaches nobody. Before it existed, a lane
+whose last decision was an hour-old `allow`/`confirmed` — which is exactly what a
+presence gate that does not arm leaves behind — told the next driver "this
+entrance has nothing outstanding for you" and hung up on them. `nothing_to_do` is
+now reachable only from a FRESH `allow` with transit `confirmed` or `pending`.
+
+> This is a COMPARISON ACROSS TWO CLOCKS: `decision.at` is read from the LANE's
+> clock and `now` from this process's. It is not a measured age. A NEGATIVE AGE
+> IS REACHABLE — a decision stamped after the moment this process reads it — and
+> it is treated as FRESH, because the alternative is sending a driver to a person
+> on the strength of a clock offset nobody has measured. Nothing here measures
+> the offset between the two, so nothing here can separate it from the age it is
+> trying to read. Where the two clocks are the same box, or are disciplined to
+> the same source, this is the cost of being a CONSUMER of the lane's contract
+> rather than something the lane calls.
+
+That sentence lives in `cases.DECISION_AGE_NOTE`, is published here from that one
+copy, and a value test holds the two together: editing either goes red. It is the
+capture process's `capture_minus_lane_event_ms` note applied to this field, and
+for the same reason.
+
+**A `decision.at` this build cannot read is `unrecognised_reason`, not fresh.** A
+missing stamp, one that does not parse, and one with no timezone all fall to the
+catch-all — the round-4 rule, and the same reason: a naive moment compared
+against an aware one is a guess about which machine it came from.
 
 **`vehicle_not_detected` is the case the intercom exists for.** The presence gate
 is unvalidated on real vehicles, and a real car it wrongly refuses has no other
@@ -1506,9 +1597,69 @@ intelligible at 8 kHz over a narrowband call, which is the property this job
 needs, and a site that wants a voice replaces the files — the manifest records
 what each one has to say.
 
+**Who wrote the WORDS, and from what**, is a row per language in the manifest —
+`text_provenance` — and every file names its row. The manifest recorded the
+voice, the tool and the tool's licence for the AUDIO and nothing at all about the
+TEXT, which is the thing the audio is only a rendering of. Both rows say what was
+NOT done as plainly as what was: the English and the Spanish were written by the
+software that wrote the rest of this package, and neither has been through a
+professional editor, a translation service, or a native speaker.
+
+**The Spanish ships as `es-ES`, not `es`.** It is Castilian — `matrícula`,
+`aparcamiento`, `almohadilla`, `Pulse` — and under a generic tag a garage in
+Texas or Bogotá would declare "Spanish", get this, and hear several words that
+are wrong for its drivers. A regional tag is the one thing that makes that
+visible in the site's own configuration file.
+
 The name of a DOOR is not in this repository and cannot be: `[intercoms.<uri>]
 name_audio` is a file the SITE supplies, played to the person on the phone
-before the case, and startup refuses an intercom without one.
+before the case, and startup refuses an intercom without one. It is also the one
+audio file this package does not produce, so it is the one whose properties are
+checked rather than known: **8 kHz, mono, 16-bit** like everything else the agent
+plays, and no longer than `[speech] name_audio_max_seconds` (published default
+**10.0**). The person's briefing waits for the whole of it, and a driver at the
+barrier waits for the briefing.
+
+### A line that cannot be played is a code, a timer and a true record
+
+Playing a file can be REFUSED by the user agent. Usually that is benign and a
+fifth of a second from resolving — the call's audio stream has not come up yet —
+so the line is kept and retried. What had no answer was the other cause: a file
+the user agent will not decode, an audio mode it will not play into, a mixer
+stuck in a mode it cannot leave. Retried for ever, that is a driver in an
+answered call hearing nothing, with no timer, no code, and a log saying their
+case was spoken. **Measured on this build: thirty-three hours of it, and a clean
+health surface throughout.**
+
+`[speech] line_timeout_seconds`, per site, **published default 10.0**. The clock
+starts when a line becomes DUE rather than when it is first refused, because a
+leg whose media never comes up is never even attempted and to the driver that is
+the same silence. Past it:
+
+| the leg | what happens |
+|---|---|
+| the driver's | `audio_playback_failed` `active`, subject `driver`. The case is still a case, so it goes to **the person** — briefed the same way, and timed the same way. |
+| the person's | `audio_playback_failed` `active`, subject `operator`. Nothing is left that can tell anybody anything, so the case ends with **`case_not_spoken`** and the driver's call is RELEASED rather than held open in silence. |
+
+`SPEAKING_CASE` and `BRIEFING` are both bounded by this. Neither used to be:
+both advanced only on a leg falling silent, which a queue that never drains never
+does.
+
+**`case_spoken` is written when the last file of the case has FINISHED playing**,
+never when it is queued. It used to be written at the moment the first file was
+put on the queue, which is a claim about a queue — and it stayed true in the log
+through the thirty-three hours above.
+
+> **The finish is timed from the file's own measured duration, not from a signal
+> the user agent sends, and that is a MEASUREMENT rather than a choice.** baresip
+> 4.11.0 emits **no** playback-complete event for `mixausrc_enc_start`, the verb
+> every sentence here is played with: its `mixausrc` module logs the end of a
+> file at debug level and raises no `bevent`, and `BEVENT_END_OF_FILE` is emitted
+> only from the call's own audio-device error handler, which this path does not
+> go through. Measured on a live call, with the positive control that DTMF events
+> arrived on the same drained control socket in the same window. The duration is
+> read out of each file at startup, which is a property of something this package
+> ships and can measure.
 
 ## The person, the bridge, and the authorisation set
 
@@ -1577,6 +1728,7 @@ assumptions** — nothing here measures how long a person takes to reach a phone
   "user_agent": {
     "kind": "baresip",
     "version": "4.11.0",
+    "reconnect_seconds": 5.0,
     "tested_versions": [
       "4.11.0"
     ],
@@ -1585,7 +1737,7 @@ assumptions** — nothing here measures how long a person takes to reach a phone
   "languages": {
     "driver": [
       "en",
-      "es"
+      "es-ES"
     ],
     "operator": "en"
   },
@@ -1603,6 +1755,13 @@ assumptions** — nothing here measures how long a person takes to reach a phone
     "nothing_usable_seconds": 20.0,
     "hold_reprompt_seconds": 45.0,
     "transfer_declared": false
+  },
+  "cases": {
+    "decision_max_age_seconds": 120.0
+  },
+  "speech": {
+    "line_timeout_seconds": 10.0,
+    "name_audio_max_seconds": 10.0
   }
 }
 ```

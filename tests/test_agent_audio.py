@@ -128,13 +128,18 @@ def test_every_file_names_a_licence_the_manifest_states_in_full():
     assert "/" not in MANIFEST["tool_version"], MANIFEST["tool_version"]
 
 
-def test_the_build_script_reports_a_planted_edit_as_stale():
+def test_a_planted_edit_is_found_by_the_same_predicate_the_script_uses():
     """THE CONTROL for the manifest, and it is the reason the manifest exists.
 
-    An edited sentence with unregenerated audio must be found. Run against a
-    copy with one row's text changed, `--check`'s comparison has to say so --
-    and it is run through the script's own comparison rather than a second copy
-    of it that happens to agree.
+    **What this actually does, said plainly:** it plants an edited sentence in a
+    COPY of the manifest and re-implements the script's staleness predicate --
+    `row["text"] != TEXT[line][language]` -- inline, here. It is NOT run through
+    `build_audio.py --check`, and the docstring used to claim it was. The
+    guarantee that a sentence cannot be edited without its audio being
+    regenerated is held by `test_the_manifest_says_what_every_file_says`, which
+    compares the shipped manifest against `lines.TEXT` and against the bytes on
+    disk; this asserts that the predicate those comparisons rest on is capable
+    of firing at all.
     """
     planted = json.loads(json.dumps(MANIFEST))
     name = audio_name("case.plate_unclear", "en")
@@ -145,3 +150,46 @@ def test_the_build_script_reports_a_planted_edit_as_stale():
         if row["text"] != TEXT[row["line"]][row["language"]]
     ]
     assert stale == [name], stale
+
+
+def test_the_manifest_records_who_wrote_the_words_and_from_what():
+    """The provenance of the TEXT, per language, and every file names its row.
+
+    The manifest recorded the voice, the tool and the tool's licence for the
+    AUDIO and nothing at all about the TEXT -- and the text is the thing the
+    audio is only a rendering of. `lines.py` said "the English is the source and
+    the Spanish is a translation of it", which says what the relationship is and
+    not who made it.
+    """
+    provenance = MANIFEST["text_provenance"]
+    assert set(provenance) == set(SHIPPED_LANGUAGES), sorted(
+        set(provenance) ^ set(SHIPPED_LANGUAGES)
+    )
+    for language, row in provenance.items():
+        for field in ("written_by", "from", "reviewed_by"):
+            assert row.get(field, "").strip(), f"{language} does not record {field}"
+    # Every file points at the row for its own language, so a language added
+    # without a provenance row cannot ship.
+    for name, row in MANIFEST["files"].items():
+        assert row["text_provenance"] == row["language"], name
+        assert row["text_provenance"] in provenance, name
+    # The Spanish row says what was NOT done, because that is the load-bearing
+    # half: no native speaker and no professional translator.
+    assert "native speaker" in provenance["es-ES"]["reviewed_by"].lower()
+
+
+def test_the_spanish_ships_under_a_regional_tag():
+    """`es-ES`, not `es`. The register is Castilian and the key says so.
+
+    Under a generic tag a garage in Texas or Bogota declares "Spanish", gets
+    this, and hears several words that are wrong for its drivers -- a register
+    chosen for them by a package that never asked.
+    """
+    assert "es-ES" in SHIPPED_LANGUAGES
+    assert "es" not in SHIPPED_LANGUAGES
+    assert all(name.split("/")[0] in SHIPPED_LANGUAGES for name in MANIFEST["files"])
+    # And the words that make it Castilian are actually in there, so the claim
+    # in the key is about the text rather than about a tag somebody typed.
+    spanish = " ".join(TEXT[line]["es-ES"] for line in LINES)
+    for word in ("matrícula", "aparcamiento", "almohadilla"):
+        assert word in spanish, f"{word} is not in the Spanish this key claims to be"

@@ -82,12 +82,22 @@ def world(tmp_path_factory):
         "person",
         accounts=["<sip:duty@127.0.0.1>;regint=0;audio_codecs=pcmu;answermode=manual"],
     )
-    for one in (ours, intercom, person):
+    # THE STRANGER. A fourth user agent, its own process on its own port, whose
+    # SIP identity this site does not declare -- which is the DEFAULT state of
+    # every caller on a network. It RECORDS WHAT IT HEARS, because the harm the
+    # round-5 cut is about is what an undeclared caller was conferenced into,
+    # and that is a waveform rather than a command log.
+    stranger = Instance(
+        root,
+        "stranger",
+        accounts=["<sip:nobody@127.0.0.1>;regint=0;audio_codecs=pcmu;answermode=manual"],
+    )
+    for one in (ours, intercom, person, stranger):
         one.start()
     try:
-        yield root, registrar, ours, intercom, person
+        yield root, registrar, ours, intercom, person, stranger
     finally:
-        for one in (person, intercom, ours):
+        for one in (stranger, person, intercom, ours):
             one.stop()
         registrar.stop()
 
@@ -137,7 +147,7 @@ class Ctrl:
 
 def agent_on(world, tmp_path, **kwargs):
     """The real `Agent`, driving the real baresip over its control socket."""
-    root, registrar, ours, _intercom, _person = world
+    root, registrar, ours, _intercom, _person, _stranger = world
     ua = BaresipUa(
         host="127.0.0.1",
         port=ours.ctrl_port,
@@ -214,7 +224,7 @@ def test_it_registers_and_the_health_surface_follows_it(world, tmp_path):
     lane cannot see whether an agent is registered. The control is a registrar
     that starts REFUSING, and the code going `active` from it.
     """
-    _root, registrar, ours, _intercom, _person = world
+    _root, registrar, ours, _intercom, _person, _stranger = world
     agent, ua = agent_on(world, tmp_path)
     try:
         pump(agent, lambda: ua.registered() is True, seconds=30)
@@ -242,6 +252,22 @@ def test_it_registers_and_the_health_surface_follows_it(world, tmp_path):
             if one["code"] == "sip_registration_lost"
         ][0]
         assert entry["state"] == HealthState.ACTIVE.value
+
+        # AND IT RECOVERS. This half was missing: the test asserted the raise
+        # and stopped, so a code that could only ever go one way -- a latch that
+        # reads like a state -- would have passed it. `human_unreachable` has
+        # exactly this assertion for exactly this reason.
+        registrar.refuse = False
+        ua._command("uareg", "1 0")
+        pump(agent, lambda: ua.registered() is True, seconds=30)
+        entry = [
+            one
+            for one in agent.health().to_dict()["codes"]
+            if one["code"] == "sip_registration_lost"
+        ][0]
+        assert entry["state"] == HealthState.OK.value, (
+            "the registrar answers 200 again and the code stayed active: it is a latch"
+        )
     finally:
         registrar.refuse = False
         ua.close()
@@ -255,7 +281,7 @@ def test_a_whole_case_over_real_sip(world, tmp_path):
     and the agent's event log -- rather than against the agent's description of
     itself.
     """
-    _root, _registrar, ours, intercom, person = world
+    _root, _registrar, ours, intercom, person, _stranger = world
     agent, ua = agent_on(world, tmp_path)
     caller = Ctrl(intercom.ctrl_port)
     callee = Ctrl(person.ctrl_port)
@@ -325,7 +351,7 @@ def test_a_whole_case_over_real_sip(world, tmp_path):
 
 def test_a_call_from_an_undeclared_intercom_is_answered_once_and_ended(world, tmp_path):
     """Over real SIP: one message, and the call is gone. No lane, no guess."""
-    _root, _registrar, ours, _intercom, person = world
+    _root, _registrar, ours, _intercom, person, _stranger = world
     agent, ua = agent_on(world, tmp_path)
     # The PERSON's user agent stands in for a stranger here: it is a SIP
     # identity this site does not declare, which is exactly the case.
@@ -349,3 +375,199 @@ def test_a_call_from_an_undeclared_intercom_is_answered_once_and_ended(world, tm
         ua.hangup_all()
         stranger.close()
         ua.close()
+
+
+def test_a_stranger_calling_mid_case_never_hears_the_driver(world, tmp_path):
+    """X1, MEASURED AS AUDIO. The blocker was a waveform, so the cut is too.
+
+    A whole case is run to the bridge; then a FOURTH baresip, whose identity
+    this site does not declare, dials the agent. With the identity checked
+    before the live case, that call was ANSWERED, given a session, and
+    conferenced into the live bridge -- the stranger heard the person at the
+    barrier at the ceiling of this measure, from the first bucket, identically
+    to the operator -- and the one fixed sentence it was told ended in
+    `hangup_all`, which cut the real driver and the real operator off mid-case.
+
+    Three things are asserted, and each is outside the agent: the stranger's own
+    recording, the real legs the intercom and the person still hold, and the
+    authorisation the real case reaches afterwards.
+    """
+    _root, _registrar, ours, intercom, person, stranger = world
+    agent, ua = agent_on(world, tmp_path)
+    caller = Ctrl(intercom.ctrl_port)
+    callee = Ctrl(person.ctrl_port)
+    intruder = Ctrl(stranger.ctrl_port)
+    try:
+        caller.command("dial", f"sip:agent@127.0.0.1:{ours.sip_port}")
+        pump(agent, lambda: agent.session is not None, seconds=20)
+
+        def ringing(ctrl) -> str | None:
+            for line in ctrl.command("listcalls")["data"].splitlines():
+                if "id " in line:
+                    return line.split("id ")[1].split("]")[0]
+            return None
+
+        pump(agent, lambda: ringing(callee) is not None, seconds=40)
+        callee.command("accept", ringing(callee))
+        pump(agent, lambda: agent.session.bridged, seconds=60)
+        settle(agent, 2.0)
+
+        # THE STRANGER DIALS, mid-case.
+        intruder.command("dial", f"sip:agent@127.0.0.1:{ours.sip_port}")
+        pump(
+            agent,
+            lambda: any(
+                event["kind"] == AgentEventKind.CALL_REFUSED_BUSY.value
+                for event in agent.events(0).to_dict()["events"]
+            ),
+            seconds=20,
+        )
+        settle(agent, 4.0)
+
+        # The real case is UNTOUCHED: both legs still up, at both far ends.
+        assert agent.session is not None, "the stranger took the real case's session"
+        assert agent.session.bridged
+        assert ringing(caller) is not None, "the real driver's call was cut off"
+        assert ringing(callee) is not None, "the real operator's call was cut off"
+
+        # The refusal names who called, and no `hangup_all` went out.
+        refused = [
+            event for event in agent.events(0).to_dict()["events"]
+            if event["kind"] == AgentEventKind.CALL_REFUSED_BUSY.value
+        ]
+        assert len(refused) == 1
+        assert refused[0]["intercom"] == "sip:nobody@127.0.0.1"
+
+        # AND THE REAL CASE STILL REACHES ITS AUTHORISATION.
+        callee.command("sndcode", "1")
+        pump(
+            agent,
+            lambda: any(
+                event["kind"] == AgentEventKind.AUTHORISATION_RECEIVED.value
+                for event in agent.events(0).to_dict()["events"]
+            ),
+            seconds=20,
+        )
+        settle(agent, 3.0)
+    finally:
+        try:
+            ua.hangup_all()
+        finally:
+            caller.close()
+            callee.close()
+            intruder.close()
+            ua.close()
+    time.sleep(1.0)
+
+    # THE MEASUREMENT. The intercom sends a 440 Hz tone; this is the share of
+    # the STRANGER's recording at exactly that frequency, half-second by
+    # half-second. Speech spreads its energy across the band and a pure tone
+    # does not, so this separates "heard the driver" from "heard the agent".
+    share = real_sip.tone_share(stranger.recording)
+    assert max(share, default=0.0) < 0.05, (
+        f"the stranger heard the driver at the barrier: {share}"
+    )
+    # THE POSITIVE CONTROL, and it is what makes the line above mean anything:
+    # the OPERATOR's recording, taken in the same run with the same measure,
+    # carries the driver's tone. Without it "below 0.05" would be satisfied by a
+    # microphone that recorded nothing.
+    operator_share = real_sip.tone_share(person.recording)
+    assert operator_share, f"the person's user agent recorded nothing:\n{person.tail()}"
+    assert max(operator_share) > 0.4, (
+        "the operator never heard the driver either, so the stranger's silence measures "
+        f"nothing: {operator_share}"
+    )
+
+
+def test_the_agent_refuses_to_start_against_an_aubridge_baresip(world, tmp_path):
+    """X5. Against a REAL baresip set up the way the contract forbids.
+
+    The source said these were "checked at startup" and they were not: `grep -rn
+    aubridge` over the whole repository returned four hits and not one was code.
+    A real baresip with `aubridge` on both devices STARTED, answered calls, and
+    refused every playback for ever.
+    """
+    from gate_agent.ua import UaMisconfigured
+
+    root = tmp_path / "aubridge-world"
+    misconfigured = Instance(
+        root,
+        "aubridge",
+        accounts=["<sip:agent@127.0.0.1>;regint=0;audio_codecs=pcmu;answermode=manual"],
+        audio_source="aubridge,pseudo0",
+        audio_player="aubridge,pseudo0",
+    )
+    misconfigured.start()
+    try:
+        ua = BaresipUa(
+            host="127.0.0.1",
+            port=misconfigured.ctrl_port,
+            driver_aor="sip:agent@127.0.0.1",
+            operator_aor="sip:agent-op@127.0.0.1",
+        )
+        try:
+            with pytest.raises(UaMisconfigured) as raised:
+                ua.start()
+            assert "aubridge" in str(raised.value)
+            assert "audio_source" in str(raised.value) or "audio_player" in str(raised.value)
+        finally:
+            ua.close()
+    finally:
+        misconfigured.stop()
+
+    # THE CONTROL: the same real binary, the same code, set up the way the
+    # contract says -- and it starts. Without this the refusal above could be an
+    # agent that refuses every baresip there is.
+    _root, _registrar, _ours, _intercom, _person, _stranger = world
+    agent, ua = agent_on(world, tmp_path)
+    try:
+        assert ua.version() in TESTED_VERSIONS
+    finally:
+        ua.close()
+
+
+def test_the_control_socket_comes_back_and_the_next_call_is_answered(world, tmp_path):
+    """X7, against a real baresip and a real second client on the port.
+
+    `ctrl_tcp` accepts exactly ONE client. Something else on the box opening it
+    -- a console, a script, a monitoring tool, the case the contract already
+    names -- took the agent's away, and the agent then reported `ua_unreachable`
+    while baresip was running perfectly and NEVER CAME BACK. The same thing
+    happened on any ordinary restart of that process, and the only repair was a
+    human restarting the agent.
+    """
+    _root, _registrar, ours, intercom, _person, _stranger = world
+    agent, ua = agent_on(world, tmp_path)
+    caller = Ctrl(intercom.ctrl_port)
+    try:
+        pump(agent, lambda: ua.registered() is True, seconds=30)
+
+        def code(name: str) -> str:
+            return [
+                one for one in agent.health().to_dict()["codes"] if one["code"] == name
+            ][0]["state"]
+
+        assert code("ua_unreachable") == HealthState.OK.value
+
+        # THE INTRUDER takes the socket.
+        intruder = socket.create_connection(("127.0.0.1", ours.ctrl_port), timeout=5)
+        try:
+            pump(agent, lambda: code("ua_unreachable") == HealthState.ACTIVE.value, seconds=30)
+            assert ours.process.poll() is None, "baresip died; this measures the wrong thing"
+        finally:
+            intruder.close()
+
+        # AND IT COMES BACK, inside the site's `reconnect_seconds`.
+        pump(agent, lambda: code("ua_unreachable") == HealthState.OK.value, seconds=30)
+
+        # A NEW CALL IS ANSWERED, which is the fact that matters: the agent used
+        # to be alive, registered, and unable to answer anything ever again.
+        caller.command("dial", f"sip:agent@127.0.0.1:{ours.sip_port}")
+        pump(agent, lambda: agent.session is not None, seconds=30)
+        assert agent.session.intercom.sip_uri == "sip:door1@127.0.0.1"
+    finally:
+        try:
+            ua.hangup_all()
+        finally:
+            caller.close()
+            ua.close()

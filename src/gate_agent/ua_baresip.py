@@ -14,21 +14,37 @@ command, and be driven over a socket that can be bound to loopback. Its licence
 is BSD-3-Clause, which is the least demanding of any candidate. The findings on
 the others are in the receipt for this round.
 
-**Three things about it are load-bearing and are configuration, not code**, so
-they are checked at startup and named in `docs/CONTRACT.md`:
+**What is load-bearing on the baresip side is CONFIGURATION, not code, and
+`_check_configuration` reads it back OUT OF THE RUNNING PROCESS at startup.**
+It used to say it was checked here and it was not: `grep -rn aubridge` over this
+repository returned four hits and not one of them was code, while
+`config/agent.example.toml` said the opposite -- correctly -- three files away.
+Two copies of a claim, and the hand-written one was the one that lied.
 
-  * `call_hold_other_calls no` -- baresip's default is to hold every other call
-    when a new one is established, and with it on, calling the operator puts the
-    driver on hold under this process rather than because it asked;
-  * the audio device must not be `aubridge` -- that driver loops the player back
-    into the source, which bridges every call to every other one whether the
-    agent asked for it or not. It was measured: with `aubridge`, the operator
-    heard the driver before `conference` was ever sent;
-  * TWO accounts, one per leg. baresip identifies the stream to play into by the
-    RTP CNAME, which is the local account's address of record -- so two calls on
-    ONE account cannot be told apart, and a menu meant for the operator plays to
-    the driver. Two accounts is also how baresip's own back-to-back module does
-    it.
+Measured on baresip 4.11.0: `ctrl_tcp` answers `config` with the LOADED
+configuration -- `audio_source`, `audio_player` and `call_hold_other_calls` all
+appear in it by name -- and `modules` with the loaded module list by name. Both
+commands come from the `debug_cmd` module, which is therefore a fifth install
+requirement and is named in `docs/CONTRACT.md` beside the others. So this build
+refuses to start, BY NAME:
+
+  * against `aubridge` on either audio device -- that driver loops the player
+    back into the source, which bridges every call to every other one whether
+    the agent asked for it or not;
+  * against `call_hold_other_calls yes` -- baresip's default is to hold every
+    other call when a new one is established, so with it on, calling the
+    operator puts the driver on hold under this process rather than because it
+    asked;
+  * with `mixminus`, `mixausrc` or `ctrl_tcp` missing -- `mixausrc` is what
+    plays one file into ONE leg and `mixminus` is what the bridge is;
+  * when `config` or `modules` is itself refused, naming `debug_cmd`, because a
+    check that quietly did not run is the thing this replaced.
+
+The fourth load-bearing fact is TWO accounts, one per leg -- baresip identifies
+the stream to play into by the RTP CNAME, so two calls on ONE account cannot be
+told apart and a menu meant for the operator plays to the driver. That one is
+the SITE's file rather than the user agent's, and `config.py` refuses the pair
+equal at startup.
 
 **It cannot reach a lane.** This module holds no target, no lane URL and no
 credential: it is given a host and a port that are the UA's, and
@@ -45,8 +61,18 @@ import re
 import socket
 import threading
 from collections import deque
+from time import monotonic
 
-from .ua import UaEvent, UaEventKind, UaLeg, UaRefused, UaUnreachable, UaUnsupportedVersion
+from .ua import (
+    UaCall,
+    UaEvent,
+    UaEventKind,
+    UaLeg,
+    UaMisconfigured,
+    UaRefused,
+    UaUnreachable,
+    UaUnsupportedVersion,
+)
 
 log = logging.getLogger(__name__)
 
@@ -81,10 +107,40 @@ MAX_MESSAGE_BYTES = 1 << 20
 #: driver waiting and long enough that a busy box is not called dead.
 DEFAULT_UA_TIMEOUT = 5.0
 
+#: The published default for `[user_agent] reconnect_seconds`: the LONGEST gap
+#: between attempts to reopen the control socket. The first retry is
+#: `RECONNECT_FLOOR` away and the gap doubles up to this, so an ordinary
+#: `systemctl restart baresip` is recovered from in about a second while a user
+#: agent that is gone for good is not hammered once per poll for ever.
+DEFAULT_RECONNECT_SECONDS = 5.0
+
+#: The first gap. Not a setting: it is short enough to be invisible and there is
+#: nothing a site could usefully make it instead.
+RECONNECT_FLOOR = 0.25
+
+#: The audio driver that must not be on either device. It loops the player back
+#: into the source, so every call is bridged to every other one whether the
+#: agent asked or not.
+FORBIDDEN_AUDIO_DRIVER = "aubridge"
+
+#: The modules the agent cannot work without, by the name baresip lists them
+#: under. `mixausrc` plays one file into ONE leg; `mixminus` IS the bridge;
+#: `ctrl_tcp` is how this process says anything at all.
+REQUIRED_MODULES: tuple[str, ...] = ("ctrl_tcp", "mixausrc", "mixminus")
+
+#: The module that answers `config` and `modules`. Without it the two checks
+#: below cannot run, which is a refusal rather than a check that quietly did not
+#: happen.
+INTROSPECTION_MODULE = "debug_cmd"
+
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _VERSION = re.compile(r"(\d+\.\d+\.\d+)")
 _CALL_ID = re.compile(r"call id:\s*([0-9a-fA-F]+)")
 _CNAME = re.compile(r"cname=(\S+)")
+#: One line of `listcalls`:  `[line 1, id 3aee..]  00:00:03   INCOMING            sip:x@y`
+_CALL_LINE = re.compile(
+    r"\[line\s+\d+,\s*id\s+(?P<id>[0-9a-fA-F]+)\]\s+\S+\s+(?P<state>[A-Z]+)\s+(?P<peer>.*)$"
+)
 
 
 class BaresipUa:
@@ -100,11 +156,19 @@ class BaresipUa:
         operator_aor: str,
         timeout: float = DEFAULT_UA_TIMEOUT,
         connect=socket.create_connection,
+        reconnect_seconds: float = DEFAULT_RECONNECT_SECONDS,
+        clock=None,
     ) -> None:
         self._address = (host, port)
         self._aors = {UaLeg.DRIVER: driver_aor, UaLeg.OPERATOR: operator_aor}
         self._timeout = timeout
         self._connect = connect
+        self.reconnect_seconds = reconnect_seconds
+        self._clock = clock or monotonic
+        #: When the next attempt to REOPEN the socket is allowed, and how long
+        #: the gap after it will be. Bounded backoff, reset on every success.
+        self._retry_at = 0.0
+        self._retry_gap = RECONNECT_FLOOR
         self._sock = None
         self._buffer = b""
         self._events: deque[UaEvent] = deque()
@@ -136,9 +200,10 @@ class BaresipUa:
     # -- the connection ----------------------------------------------------
 
     def start(self) -> None:
-        """Connect, learn the version, and refuse a version nobody tested."""
+        """Connect, learn the version, CHECK THE CONFIGURATION, and refuse."""
         self._open()
         self._read_registration()
+        self._check_configuration()
         version = self.version()
         if version not in TESTED_VERSIONS:
             raise UaUnsupportedVersion(
@@ -149,6 +214,79 @@ class BaresipUa:
                 "driver at the barrier."
             )
 
+    def _check_configuration(self) -> None:
+        """Read the LOADED configuration back, and refuse a fatal one by name.
+
+        Not from the site's copy of a file this package does not own: from the
+        running process, over the same socket everything else goes over.
+        """
+        try:
+            loaded = _ANSI.sub("", self._command("config"))
+            modules = _ANSI.sub("", self._command("modules"))
+        except UaRefused as exc:
+            raise UaMisconfigured(
+                f"the user agent refused `config`/`modules` ({exc}). Those two come from "
+                f"baresip's `{INTROSPECTION_MODULE}` module, which is an install "
+                "requirement of this agent precisely so the settings below can be CHECKED "
+                "rather than assumed. Add `module_app "
+                f"{INTROSPECTION_MODULE}.so` to the user agent's configuration."
+            ) from exc
+        settings = _settings(loaded)
+        for key in ("audio_source", "audio_player"):
+            value = settings.get(key, "")
+            if value.split(",")[0].strip() == FORBIDDEN_AUDIO_DRIVER:
+                raise UaMisconfigured(
+                    f"the user agent's {key} is `{value}`. `{FORBIDDEN_AUDIO_DRIVER}` loops "
+                    "the player back into the source, so every call is bridged to every "
+                    "other one whether this agent asked for it or not -- the operator hears "
+                    "the driver before `conference` is ever sent, and on this build every "
+                    "playback is refused for ever besides. Refusing to start."
+                )
+        hold = settings.get("call_hold_other_calls", "")
+        if hold and hold.lower() not in ("no", "false", "0"):
+            raise UaMisconfigured(
+                f"the user agent's call_hold_other_calls is `{hold}`. With it on, calling "
+                "the operator puts the driver at the barrier ON HOLD under this process "
+                "rather than because it asked. Refusing to start."
+            )
+        loaded_modules = {
+            line.split()[0] for line in modules.splitlines()
+            if "type=" in line and line.split()
+        }
+        missing = [one for one in REQUIRED_MODULES if one not in loaded_modules]
+        if missing:
+            raise UaMisconfigured(
+                f"the user agent has not loaded {', '.join(missing)}. `mixausrc` is what "
+                "plays one file into ONE leg, `mixminus` is what the bridge is, and "
+                "`ctrl_tcp` is how this process says anything at all. Refusing to start."
+            )
+
+    def calls(self) -> tuple[UaCall, ...]:
+        """Which calls the user agent is holding RIGHT NOW, and which are ringing.
+
+        Asked rather than remembered, and asked only after the control socket
+        has been lost: the events for anything that happened while it was down
+        went to nobody, so a call that is still ringing at the door is a fact
+        only the user agent has.
+        """
+        data = _ANSI.sub("", self._command("listcalls"))
+        found = []
+        for line in data.splitlines():
+            match = _CALL_LINE.search(line)
+            if match is None:
+                continue
+            found.append(
+                UaCall(
+                    call_id=match.group("id"),
+                    peer_uri=match.group("peer").strip() or None,
+                    # baresip's own word for a call that has arrived and has not
+                    # been answered. `RINGING` is the OUTGOING side of the same
+                    # moment and is not one this agent can answer.
+                    ringing=match.group("state") == "INCOMING",
+                )
+            )
+        return tuple(found)
+
     def _open(self) -> None:
         try:
             self._sock = self._connect(self._address, timeout=self._timeout)
@@ -156,6 +294,62 @@ class BaresipUa:
             raise UaUnreachable(f"{self._address[0]}:{self._address[1]}: {exc}") from exc
         self._sock.settimeout(self._timeout)
         self._buffer = b""
+        self._responses.clear()
+        self._retry_gap = RECONNECT_FLOOR
+        self._retry_at = 0.0
+
+    def _lost(self) -> None:
+        """The socket is gone. Drop it, and schedule the next attempt.
+
+        Dropping it is what makes the reconnect possible at all: it used to be
+        left in place, so every later command raised on a socket that would
+        never answer again and the agent reported `ua_unreachable` for the life
+        of the process -- for an ordinary `systemctl restart baresip`.
+        """
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+        self._sock = None
+        self._buffer = b""
+        self._schedule_retry()
+
+    def _schedule_retry(self) -> None:
+        """When the next attempt is allowed, and how long the gap after it is."""
+        self._retry_at = self._clock() + self._retry_gap
+        self._retry_gap = min(max(self._retry_gap * 2, RECONNECT_FLOOR),
+                              max(self.reconnect_seconds, RECONNECT_FLOOR))
+
+    def reconnect(self) -> tuple[UaCall, ...]:
+        """Reopen the control socket if it is time to, and say what is up.
+
+        Returns the calls the user agent is holding when a socket was actually
+        reopened, and an empty tuple otherwise -- so a caller can tell "there
+        was nothing to do" from "it came back and here is what it found".
+        """
+        if self._sock is not None:
+            return ()
+        if self._clock() < self._retry_at:
+            raise UaUnreachable(
+                f"the user agent's control socket is not open; the next attempt to reopen "
+                f"it is {self._retry_at - self._clock():.2f}s away"
+            )
+        try:
+            self._open()
+        except UaUnreachable:
+            # A REFUSED reopen schedules the next one. Without this the backoff
+            # only ever grew on a socket that was lost while in use, so a user
+            # agent that stayed down was retried once per poll for ever -- the
+            # bound was a number in a document.
+            self._schedule_retry()
+            raise
+        self._accounts.clear()
+        self._cnames.clear()
+        with self._lock:
+            self._events.clear()
+        self._read_registration()
+        return self.calls()
 
     def close(self) -> None:
         if self._sock is not None:
@@ -305,6 +499,7 @@ class BaresipUa:
         try:
             self._sock.sendall(b"%d:%s," % (len(payload), payload))
         except OSError as exc:
+            self._lost()
             raise UaUnreachable(f"{command}: {exc}") from exc
         while True:
             for message in list(self._responses):
@@ -332,8 +527,10 @@ class BaresipUa:
                 except (BlockingIOError, TimeoutError):
                     return
                 except OSError as exc:
+                    self._lost()
                     raise UaUnreachable(f"reading from the user agent: {exc}") from exc
                 if not chunk:
+                    self._lost()
                     raise UaUnreachable("the user agent closed its control socket")
                 self._buffer += chunk
                 self._parse()
@@ -345,10 +542,13 @@ class BaresipUa:
         try:
             chunk = self._sock.recv(65536)
         except TimeoutError as exc:
+            self._lost()
             raise UaUnreachable("the user agent did not answer in time") from exc
         except OSError as exc:
+            self._lost()
             raise UaUnreachable(f"reading from the user agent: {exc}") from exc
         if not chunk:
+            self._lost()
             raise UaUnreachable("the user agent closed its control socket")
         self._buffer += chunk
         self._parse()
@@ -360,10 +560,12 @@ class BaresipUa:
             try:
                 length = int(head)
             except ValueError as exc:
+                self._lost()
                 raise UaUnreachable(
                     f"the user agent framed a message this build cannot read: {head[:32]!r}"
                 ) from exc
             if length > MAX_MESSAGE_BYTES:
+                self._lost()
                 raise UaUnreachable(f"the user agent announced {length} bytes in one message")
             if len(rest) < length + 1:
                 return
@@ -413,4 +615,27 @@ class BaresipUa:
             self._cnames.pop(call_id, None)
 
 
-__all__ = ["DEFAULT_UA_TIMEOUT", "EVENT_KINDS", "TESTED_VERSIONS", "BaresipUa"]
+def _settings(text: str) -> dict[str, str]:
+    """baresip's `config` output as key -> value. Comments and blanks dropped."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) == 2:
+            out.setdefault(parts[0], parts[1].split("#")[0].strip())
+    return out
+
+
+__all__ = [
+    "DEFAULT_RECONNECT_SECONDS",
+    "DEFAULT_UA_TIMEOUT",
+    "EVENT_KINDS",
+    "FORBIDDEN_AUDIO_DRIVER",
+    "INTROSPECTION_MODULE",
+    "RECONNECT_FLOOR",
+    "REQUIRED_MODULES",
+    "TESTED_VERSIONS",
+    "BaresipUa",
+]
