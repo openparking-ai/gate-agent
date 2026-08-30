@@ -9,6 +9,11 @@
 [monitor]
 id = "monitor-1"
 site_id = "site-1"
+# How many notifications GET /v1/monitor/events can still serve behind the
+# current cursor. A SETTING AND AN ASSUMPTION, published default 256: fall
+# further behind than this and that route says `reset` rather than serving a
+# short page. Omit it and the default applies.
+event_window_depth = 256
 
 # --- what to watch ----------------------------------------------------------
 
@@ -43,6 +48,16 @@ timeout_seconds = 10
 [targets.identity_service]
 url = "http://127.0.0.1:8088"
 poll_seconds = 30
+
+# A capture process — this package's own second process, or anything
+# implementing the capture half of docs/CONTRACT.md. Its codes are in the LANE's
+# entry shape, so the monitor reads them with the same code and passes them
+# through unchanged. This is the path a dead camera takes to a human.
+[targets.capture]
+url = "http://127.0.0.1:8093"
+poll_seconds = 30
+# Only when that process is bound off loopback and therefore demands one. A FILE.
+# token_file = "/etc/openparking/capture-read.token"
 
 # The platform. Read with an OPERATOR token; the tenant comes from the token.
 [targets.platform]

@@ -9,6 +9,14 @@
  * This is the repo-side half of that rule. The metadata half is
  * check-commit-emails.js.
  *
+ * AND SINCE THIS PACKAGE STORES IMAGES, IT REFUSES AN IMAGE FILE OUTRIGHT.
+ * Not "an image of a plate", not "an image of a car": ANY image, anywhere in
+ * the tree. A photograph committed as a fixture is the exact thing this project
+ * has decided a store keeps for thirty days and then deletes, and a rule that
+ * asked what was IN a picture would be a rule nobody can run. Every image in
+ * this repository's tests is synthetic and is built in the process that uses it
+ * (`tests/cameras.py`), so there is nothing here for this to refuse.
+ *
  * Usage:
  *   check-no-real-data.js               scan every tracked file
  *   check-no-real-data.js --self-test   prove the scan can fail
@@ -35,6 +43,38 @@ const FORBIDDEN = [
 
 const SKIP = /^(LICENSE|package-lock\.json|\.github\/scripts\/check-no-real-data\.js)$/;
 
+/** Image extensions, refused by name. */
+const IMAGE_EXTENSION = /\.(jpe?g|png|gif|bmp|webp|tiff?|heic|heif|avif|ico|svg)$/i;
+
+/**
+ * What an image file starts with, refused by CONTENT.
+ *
+ * Both halves are needed and neither is enough. A `.jpg` that is empty is still
+ * a file somebody meant to be an image; a JPEG committed as `frame.dat` is
+ * still a JPEG. Keying on one of them is a check somebody walks past by
+ * renaming a file.
+ */
+const IMAGE_MAGIC = [
+  { bytes: [0xff, 0xd8, 0xff], what: 'JPEG' },
+  { bytes: [0x89, 0x50, 0x4e, 0x47], what: 'PNG' },
+  { bytes: [0x47, 0x49, 0x46, 0x38], what: 'GIF' },
+  { bytes: [0x42, 0x4d], what: 'BMP' },
+];
+
+function imageProblems(file, buffer) {
+  const problems = [];
+  if (IMAGE_EXTENSION.test(file)) {
+    problems.push({ file, value: file, why: 'an image file; every image here is synthetic and built in the test that uses it' });
+  }
+  for (const { bytes, what } of IMAGE_MAGIC) {
+    if (buffer.length >= bytes.length && bytes.every((b, i) => buffer[i] === b)) {
+      problems.push({ file, value: what, why: `${what} data in a tracked file` });
+      break;
+    }
+  }
+  return problems;
+}
+
 function trackedFiles() {
   return execFileSync('git', ['ls-files'], { encoding: 'utf8' })
     .split('\n')
@@ -58,13 +98,14 @@ function scanText(file, text) {
 function scanRepo() {
   const problems = [];
   for (const file of trackedFiles()) {
-    let text;
+    let buffer;
     try {
-      text = readFileSync(file, 'utf8');
+      buffer = readFileSync(file);
     } catch {
-      continue; // binary or unreadable
+      continue; // unreadable
     }
-    problems.push(...scanText(file, text));
+    problems.push(...imageProblems(file, buffer));
+    problems.push(...scanText(file, buffer.toString('utf8')));
   }
   return problems;
 }
@@ -84,9 +125,33 @@ function selfTest() {
       return false;
     }
     console.log('self-test OK — a real-looking address fails; an example.com one passes.');
-    return true;
   } finally {
     rmSync(probe, { force: true });
+  }
+
+  // AND THE IMAGE HALF, both ways round: by name and by content.
+  const planted = '_no_real_data_control.jpg';
+  const renamed = '_no_real_data_control.dat';
+  try {
+    writeFileSync(planted, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]));
+    if (imageProblems(planted, readFileSync(planted)).length === 0) {
+      console.error('SELF-TEST FAILED: a planted .jpg was not caught');
+      return false;
+    }
+    writeFileSync(renamed, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]));
+    if (imageProblems(renamed, readFileSync(renamed)).length === 0) {
+      console.error('SELF-TEST FAILED: JPEG data under a non-image name was not caught');
+      return false;
+    }
+    if (imageProblems('docs/CONTRACT.md', Buffer.from('# a document\n')).length !== 0) {
+      console.error('SELF-TEST FAILED: an ordinary text file was wrongly rejected');
+      return false;
+    }
+    console.log('self-test OK — a .jpg fails, JPEG bytes under any name fail, a document passes.');
+    return true;
+  } finally {
+    rmSync(planted, { force: true });
+    rmSync(renamed, { force: true });
   }
 }
 
@@ -99,4 +164,6 @@ if (problems.length > 0) {
   console.error('\nFixtures, tests and docs use invented values.\n');
   process.exit(1);
 }
-console.log(`${trackedFiles().length} tracked file(s) scanned; no real personal data.`);
+console.log(
+  `${trackedFiles().length} tracked file(s) scanned; no real personal data and no image.`
+);

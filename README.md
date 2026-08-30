@@ -1,28 +1,39 @@
 # Open Parking AI — gate agent
 
-The intercom module. Its first process is the **malfunction monitor**: it watches
-whatever a site declares — a lane, an identification service, a platform — and
-tells a human what changed. Gate broken, camera broken, no connection.
+The intercom module. It ships **two processes**, and neither of them can open a
+barrier.
+
+**The malfunction monitor** watches whatever a site declares — a lane, an
+identification service, a platform, a capture process — and tells a human what
+changed. Gate broken, camera broken, no connection.
+
+**The capture process** photographs the declared cameras every minute and every
+time the lane vends, keeps what a per-site retention rule allows, and deletes the
+rest. When a barrier is broken the camera's job changes from deciding to
+recording; this is where the recording goes.
 
 The agent itself — the SIP endpoint that answers a driver at the barrier — joins
-it in this repository later. It is the same module, and this is the half of it
-that has to be right first, because a monitor that is wrong is a monitor nobody
-believes.
+them in this repository later. It is the same module, and these are the halves of
+it that have to be right first: a monitor that is wrong is a monitor nobody
+believes, and a store that is wrong is personal data nobody is deleting.
 
 **The contract is [`docs/CONTRACT.md`](docs/CONTRACT.md).** Everything else here
-is an implementation detail that may be rewritten.
+is an implementation detail that may be rewritten. Both processes are versioned
+under one `contract_version`.
 
 ```sh
 pip install -e .
 gate-agent monitor --config config/monitor.example.toml
+gate-agent capture --config config/capture.example.toml
 ```
 
-## What it will not do
+## What they will not do
 
-**It has no opening authority.** It reads `GET`s and it sends messages. It never
-calls a vend, never resolves a transit, never writes to a lane. There is no
-client in this package capable of a method other than `GET` — swept out of the
-source, and observed at lanes that record what arrived.
+**Neither has opening authority.** They read `GET`s; one sends messages and the
+other writes to its own disk. Nothing here calls a vend, resolves a transit, or
+writes to a lane. There is no client in this package capable of a method other
+than `GET` — swept out of the source, and observed at lanes and cameras that
+record what arrived.
 
 The one thing that leaves by another method is a **webhook**, which points at a
 paging system and never at a lane. It lives in its own module, that module may
@@ -36,6 +47,21 @@ as `ok`.
 **It never pages on a code the wire marks `never_alarm`.** That flag travels in
 the payload with the code, and this package holds no list of its own — two lists
 drift, and the drift is a technician dispatched because a car arrived.
+
+**Nothing it stores identifies a vehicle.** A capture record is the JPEG the
+camera sent and seven fields saying when it was taken, by which camera, why, and
+which lane event it answers by CURSOR. No plate, no plate region, no vehicle
+attribute, and nothing from a lane event's `detail` — which is where a lane puts
+what it knows. Swept over every route and every byte in the store, with a plate
+planted in a lane event as the control.
+
+**Nothing it keeps is kept for ever.** `[capture] retention_days`, published
+default and bounds in the contract, and the purge DELETES: there is no foreign
+key here and no money record, so the image is the datum and a rule that kept it
+would not be one. Where the store goes and how big it may get are DECLARED — the
+process refuses to start without them, because nothing in this package has ever
+seen a capture from any of the cameras it is written for and a default would be a
+disk budget it invented.
 
 ## It is an ordinary client of the lane contract
 
@@ -57,16 +83,47 @@ enum.
 `openparking-lane-controller` is a **test** dependency, pinned to a commit, and
 appears nowhere in `src/`.
 
-## What it watches
+## What the monitor watches
 
 | | |
 |---|---|
 | `lane` | Anything implementing the lane contract. Identity read once; health polled. |
 | `identity_service` | A Vehicle ID `GET /v1/health`. Unauthenticated by that contract's own decision — it carries no plate and no image. |
 | `platform` | The operator surface, for `lane_devices.last_seen_at`: a lane that has gone quiet is quiet, so the fault is only visible from the other end. |
+| `capture` | The capture process. Its codes are in the lane's entry shape, so one reader serves both — and that is the path a dead camera takes to a human. |
 
 Each is per-site declared and optional; **at least one is required**. Standalone
 is a mode, not a smaller product.
+
+## What the capture process photographs
+
+Every camera it is given, on `[capture] interval_seconds`, and one snapshot per
+camera on every `frames_captured` and every `vended` the lane records. It learns
+those from `GET /v1/lane/events?since=` — the read contract, the seat a third
+party takes — so **the lane does not know this process exists and does not have
+to**. With no lane declared it takes interval captures only and says so when it
+starts; a garage with a camera and no gate is a customer of this process.
+
+That seat costs something, and the cost is measured rather than described: the
+picture is taken when the event was SEEN, and every lane-triggered record carries
+`capture_minus_lane_event_ms`. It is named for the subtraction it is, because it
+spans this process's clock and the lane's — the contract says what it can and
+cannot be read as.
+
+**One camera implementation this version: an HTTP JPEG snapshot with standard
+HTTP authentication.** No RTSP — a stream needs a decoder and this package has no
+dependencies. **A camera whose only documented snapshot route takes the password
+as a query parameter is named unsupported in the contract**, with the reason,
+rather than made to work by putting a password in a URL. Of the two default-tier
+cameras the lane's reference-hardware note names, that is the **Reolink
+RLC-810A**: the only snapshot route its own documentation gives puts the password
+in the query string, so this build does not support it. The **AXIS P1465-LE** is
+supported — VAPIX authenticates in a header.
+
+`[cameras.<id>] timeout_seconds` is a deadline on the whole read, not a socket
+option, so one slow camera cannot hold the poller; and `[capture]
+max_snapshot_bytes` — refused unless it is below `[capture] max_bytes` — is what
+stops a camera deciding how much of a site's store survives.
 
 ## How a human is told
 
@@ -84,13 +141,25 @@ messenger too.
 ## What it publishes
 
 ```
-GET /v1/monitor                 who it is, what it watches, what it can tell
-GET /v1/monitor/health          its own codes, and every target's, passed through
-GET /v1/monitor/events?since=N  the notifications it sent
+GET /v1/monitor                    who it is, what it watches, what it can tell
+GET /v1/monitor/health             its own codes, and every target's, passed through
+GET /v1/monitor/events?since=N     the notifications it sent
+
+GET /v1/capture                    who it is, what it is set to do
+GET /v1/capture/health             every capture code, and what is on the disk
+GET /v1/capture/records?since=N    the sidecars, never the bytes
+GET /v1/capture/images/<id>        one JPEG
 ```
 
-All `GET`. Loopback by default; off loopback it refuses to start without a
-credential, and every token is read from a **file**, never taken as a value.
+All `GET`. Loopback by default; off loopback each refuses to start without a
+credential, and every token is read from a **file**, never taken as a value. On
+the capture surface the credential is required on **every** route including the
+images: an image route left open "because it is just a JPEG" is the whole store
+readable by anyone who can enumerate a record id.
+
+**How much disk a site needs is a READ, on `GET /v1/capture/health`**, against
+that site's own directory. This repository publishes no size, no rate and no
+capacity anywhere, because nothing in it has measured one.
 
 A target's codes are **passed through** — the state and the source that target
 gave, unchanged. A monitor that restated a lane's health in its own words would
@@ -105,10 +174,15 @@ pytest -q
 python scripts/monitor_fail_control.py
 ```
 
-The second one is the point. It breaks each property this monitor exists to have
-and requires the suite to go red on every one — every break in the reassuring
-direction, because that is the direction a monitor fails in when nobody is
-looking. Both run in CI.
+The second one is the point. It breaks each property these processes exist to
+have — no opening authority, `unknown` never reading as `ok`, a plate never
+reaching the store, a purge that actually deletes, a camera that is dead never
+reading as fine — and requires the suite to go red on every one. Every break is
+in the reassuring direction, because that is the direction this kind of software
+fails in when nobody is looking. Both run in CI, on 3.11 and 3.12.
+
+**There is no image file in this repository, and CI refuses one.** Every image in
+the tests is synthetic and built in the process that uses it.
 
 ## Licence and contributing
 
