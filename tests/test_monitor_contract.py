@@ -33,9 +33,10 @@ from fakes import (
 )
 from foreign_lane import ForeignLane
 from foreign_lane import make_server as foreign_server
-from gate_agent.config import RETENTION_DAYS_BOUNDS
+from gate_agent.config import DEFAULT_MAX_SNAPSHOT_BYTES_SETTING, RETENTION_DAYS_BOUNDS
 from gate_agent.contract import (
     CONTRACT_VERSION,
+    CameraUnreachableCause,
     CaptureCode,
     CaptureReason,
     HealthState,
@@ -498,8 +499,14 @@ def test_the_payload_layer_refuses_a_credential_bearing_url_outright():
 PUBLISHED_SETS = {
     "monitor_codes": lambda: [code.value for code in MonitorCode],
     "capture_codes": lambda: [code.value for code in CaptureCode],
+    "camera_unreachable_causes": lambda: [cause.value for cause in CameraUnreachableCause],
     "capture_reasons": lambda: [reason.value for reason in CaptureReason],
     "retention_days_bounds": lambda: list(RETENTION_DAYS_BOUNDS),
+    # NOT a set, and here for the reason the document gives beside it: it is a
+    # published DEFAULT that no payload example may carry, because every size in
+    # a capture example is `null`. This block is the one place a number in this
+    # document is held to the constant it came from.
+    "max_snapshot_bytes_default": lambda: DEFAULT_MAX_SNAPSHOT_BYTES_SETTING,
 }
 
 

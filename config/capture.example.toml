@@ -33,6 +33,17 @@ directory = "captures"
 # and `purged_by_size` climbing.
 # max_bytes = 0
 
+# The most this process will read from ONE camera before it stops reading. A
+# SETTING with a published default (the contract's closed sets carry it), and it
+# is REFUSED AT STARTUP UNLESS IT IS BELOW max_bytes above.
+#
+# That bound is the whole point of the setting rather than a constant: the store
+# evicts to make room for what arrives, so a ceiling at or above the whole cap
+# would let one camera's answer decide how much of this site's store survives —
+# and how long that answer is, is the camera's to choose. If your store's cap is
+# smaller than the published default, you must answer this one too.
+# max_snapshot_bytes = 8388608
+
 # How often each camera is photographed when nothing has happened. A SETTING AND
 # AN ASSUMPTION, with a published default of 60 seconds — Gokhan's spec, "every
 # minute". Omit it and the default applies.
@@ -89,8 +100,10 @@ timeout_seconds = 10
 [targets.lane]
 url = "http://127.0.0.1:8090"
 # How often the lane's events are read. A SETTING AND AN ASSUMPTION, published
-# default 30 seconds — and the delay it costs is not a number in a document: it
-# is `trigger_to_capture_ms`, published on every record this lane triggers.
+# default 30 seconds — and what it costs is not a number in a document: it is
+# `capture_minus_lane_event_ms`, published on every record this lane triggers.
+# Read the contract on what that number spans before acting on one: it is a
+# subtraction across this box's clock and the lane's, not a measured delay.
 poll_seconds = 30
 timeout_seconds = 10
 # Only when that lane is bound off loopback and therefore demands a credential.

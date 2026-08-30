@@ -170,7 +170,7 @@ def test_entry_pending_is_not_a_trigger_and_its_detail_is_never_copied(wired):
             assert value.encode() not in path.read_bytes()
 
 
-def test_trigger_to_capture_ms_is_on_every_lane_record_and_no_interval_one(wired):
+def test_capture_minus_lane_event_ms_is_on_every_lane_record_and_no_interval_one(wired):
     """The seat's cost, measured on every record rather than described once."""
     lane, _camera, process, now = wired
     lane.record("vended", now().isoformat())
@@ -181,8 +181,8 @@ def test_trigger_to_capture_ms_is_on_every_lane_record_and_no_interval_one(wired
     by_lane = triggered(process)
     interval = [one for one in stored if one["reason"] == CaptureReason.INTERVAL.value]
     assert by_lane and interval, "this run produced only one kind of record"
-    assert all(one["trigger_to_capture_ms"] == 2500 for one in by_lane)
-    assert all(one["trigger_to_capture_ms"] is None for one in interval)
+    assert all(one["capture_minus_lane_event_ms"] == 2500 for one in by_lane)
+    assert all(one["capture_minus_lane_event_ms"] is None for one in interval)
 
 
 def test_the_first_read_takes_the_lanes_place_and_photographs_nothing_past(tmp_path):
@@ -314,3 +314,136 @@ def states(process):
         (entry["code"], entry["subject"]): entry["state"]
         for entry in process.health().to_dict()["codes"]
     }
+
+
+# ---------------------------------------------------------------------------
+# W1 / W9 — A PAGE THIS BUILD CANNOT READ IS REFUSED WHOLE
+#
+# A lane this process did not write is the DESIGNED case, not the exotic one --
+# SETTLED 1: works standalone, integrates with a third party's, through one
+# versioned contract. So the answer to a page it cannot read may not be silence,
+# and it may not be a half-followed page either.
+# ---------------------------------------------------------------------------
+
+
+UNSUPPORTED = CaptureCode.LANE_CONTRACT_UNSUPPORTED.value
+BACKLOG = CaptureCode.LANE_BACKLOG_LOST.value
+
+
+def test_an_occurred_at_with_no_utc_offset_refuses_the_whole_page(wired):
+    """The third-party case, and the one the L3 found `/records` dying on.
+
+    A naive timestamp is not a moment this process can subtract from its own.
+    The event used to be followed with its reference DROPPED -- which files a
+    capture under `reason=lane_arrival` with no cursor, a pair this package's own
+    contract refuses to publish. The record then sat on the disk making
+    `GET /v1/capture/records` raise for every consumer of that store, for up to
+    `retention_days`, while `GET /v1/capture/health` answered `200`.
+    """
+    lane, _camera, process, _now = wired
+    lane.record("frames_captured", "2026-08-30T14:03:11.482913")
+    process.poll(force=True)
+
+    assert triggered(process) == [], "a capture was filed against a reference it could not read"
+    assert states(process)[(UNSUPPORTED, "lane")] == "active"
+    # AND THE ROUTE ANSWERS. This is the half that used to be a dead route.
+    assert process.records(0).to_dict()["records"] is not None
+
+    # THE CURSOR IS NOT ADOPTED, so this recovers by itself the moment the lane
+    # serves a page that can be read -- and the event that was refused is then
+    # followed, because it is still in the window.
+    lane.log[-1]["occurred_at"] = "2026-08-30T14:03:11.482913+00:00"
+    process.poll(force=True)
+    assert states(process)[(UNSUPPORTED, "lane")] == "ok"
+    assert [one["reason"] for one in triggered(process)] == [CaptureReason.LANE_ARRIVAL.value]
+
+
+def test_a_cursor_that_goes_backwards_without_reset_refuses_the_whole_page(wired):
+    """The lane contract says the cursor is monotonic within a run.
+
+    Adopting a backwards one re-serves the same events on the next poll and
+    photographs them AGAIN, for ever. Every duplicate consumes `max_bytes`, so
+    the size rule then evicts real captures to make room for them.
+    """
+    lane, _camera, process, _now = wired
+    for _ in range(5):
+        lane.record("vended", AT)
+    process.poll(force=True)
+    after_first = len(triggered(process))
+    assert after_first == 5, "the control page was not followed, so nothing below is measured"
+    held = process._cursor
+
+    # The lane now serves three events under cursors this process has already
+    # passed, and says `reset: false` -- which is a lane breaking its own
+    # contract, and is the third-party case again.
+    lane.suppress_reset = True
+    lane._seq = 0
+    lane.log = []
+    for _ in range(3):
+        lane.record("vended", AT)
+    process.poll(force=True)
+    process.poll(force=True)
+
+    assert len(triggered(process)) == after_first, "the same events were photographed again"
+    assert states(process)[(UNSUPPORTED, "lane")] == "active"
+    assert process._cursor == held, "a backwards cursor was adopted"
+
+
+def test_a_triggering_event_with_no_cursor_refuses_the_whole_page(wired):
+    """The cursor IS the join to who the car was. There is no capture without it."""
+    lane, _camera, process, _now = wired
+    lane.record("frames_captured", AT)
+    lane.drop_event_cursor = True
+    process.poll(force=True)
+    assert triggered(process) == []
+    assert states(process)[(UNSUPPORTED, "lane")] == "active"
+
+
+def test_an_event_kind_this_build_does_not_trigger_on_is_not_a_contract_break(wired):
+    """The control for all three above: an unknown kind is the ORDINARY case.
+
+    A lane gaining an event kind is expected, and this contract says a consumer
+    ignores what it does not recognise. If this went `active` too, the refusals
+    above would be measuring "the lane said something" rather than "the lane
+    said something this build cannot read".
+    """
+    lane, _camera, process, _now = wired
+    lane.record("a_kind_from_a_later_version", AT)
+    process.poll(force=True)
+    assert states(process)[(UNSUPPORTED, "lane")] == "ok"
+    assert triggered(process) == []
+
+
+# ---------------------------------------------------------------------------
+# W5 — A LOST BACKLOG IS A CODE AND A COUNT
+# ---------------------------------------------------------------------------
+
+
+def test_a_reset_from_the_lane_is_a_code_and_a_count_and_not_only_a_log_line(wired):
+    """400 arrivals photographed nothing, and the only trace was one log line.
+
+    SETTLED 3g's capture mode exists so the entries can be reconstructed, and
+    the busiest hour is exactly the hour that outruns a window. This module has
+    an email path and a webhook path built for precisely this.
+    """
+    lane, _camera, process, _now = wired
+    lane.record("vended", AT)
+    process.poll(force=True)
+    assert states(process)[(BACKLOG, "lane")] == "ok"
+    before = len(triggered(process))
+
+    # The lane outruns its window between two polls: 400 events, a window of 64.
+    for _ in range(400):
+        lane.record("vended", AT)
+    process.poll(force=True)
+
+    assert len(triggered(process)) == before, "the backlog was photographed, so nothing was lost"
+    assert states(process)[(BACKLOG, "lane")] == "active"
+    assert process.health().to_dict()["lane_events_missed"] == 400
+
+    # RECOVERS on the next page that is not a reset, and the count does NOT go
+    # backwards: it is what was lost since this process started.
+    lane.record("vended", AT)
+    process.poll(force=True)
+    assert states(process)[(BACKLOG, "lane")] == "ok"
+    assert process.health().to_dict()["lane_events_missed"] == 400

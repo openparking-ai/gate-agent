@@ -40,6 +40,11 @@ def raw_for(tmp_path, auth, **capture):
             "site_id": "site-1",
             "directory": str(tmp_path),
             "max_bytes": 1 << 20,
+            # Declared here because the published default is 32 MiB and this
+            # store's cap is 1 MiB: the ceiling on ONE read must be BELOW the
+            # cap on the whole store, and a fixture that left them crossed
+            # would be refused before any of these tests measured anything.
+            "max_snapshot_bytes": 1 << 16,
         },
         "cameras": {
             "front": {"snapshot_url": "http://camera.example.com/snap", "auth_file": str(auth)}

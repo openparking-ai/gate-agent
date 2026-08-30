@@ -106,6 +106,15 @@ class ForeignLane:
         #: field as optional writes. The contract requires it on every entry;
         #: this is how a test asks what happens when it is not there.
         self.drop_never_alarm = False
+        #: Whether a triggering event is served with NO `cursor`. A lane that
+        #: does this has broken its own contract -- the cursor is the join --
+        #: and a consumer has to have somewhere to put that fact.
+        self.drop_event_cursor = False
+        #: Whether `reset` is forced to `false` however far this lane's cursor
+        #: has moved. The two contract breaks a consumer cannot tell apart from
+        #: an ordinary page without checking are "the cursor went backwards" and
+        #: "it went backwards and did not say so", and this is the second.
+        self.suppress_reset = False
         #: How many events this lane can still serve behind its cursor, and what
         #: `GET /v1/lane` publishes as `event_window_depth`. Published from the
         #: same attribute the eviction uses, so a test that widens the window
@@ -207,12 +216,21 @@ class ForeignLane:
         flag cannot tell it from a complete one.
         """
         oldest = self.log[0]["cursor"] if self.log else None
+        served = []
+        for item in self.log:
+            if item["cursor"] <= since:
+                continue
+            item = dict(item)
+            if self.drop_event_cursor:
+                del item["cursor"]
+            served.append(item)
+        reset = since > self._seq or (oldest is not None and since + 1 < oldest)
         return {
             "contract_version": 1,
             "cursor": self._seq,
-            "reset": since > self._seq or (oldest is not None and since + 1 < oldest),
+            "reset": False if self.suppress_reset else reset,
             "dropped": self.dropped,
-            "events": [item for item in self.log if item["cursor"] > since],
+            "events": served,
         }
 
 

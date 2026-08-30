@@ -17,8 +17,17 @@ already exists for one.
 
 **Written atomically.** Both files are written to temporary names in the same
 directory and then renamed. A crash before the first rename leaves no record at
-all; a crash between the two leaves an image with no sidecar, which is
-REPORTED (`store_record_incomplete`) and purged, never silently kept.
+all AND NO IMAGE: a live write removes its own temporary files in a `finally`,
+and any that survive -- which only a crash can leave -- are removed and COUNTED
+(`purged_by_crash`) by the next index rebuild. A crash between the two renames
+leaves an image with no sidecar, which is REPORTED
+(`store_record_incomplete`) and purged, never silently kept.
+
+**A record is built THROUGH the contract before the disk is touched.** A record
+this package could write but could not then publish is a store whose own read
+route raises on it, for as long as the retention window keeps it. The class the
+read route builds its page from is the class the write is validated by, so there
+is no second opinion to drift.
 
 **The index is rebuilt by reading the directory, every start.** A check, never a
 memory: there is no manifest to go stale, no counter to be wrong, and a file
@@ -46,6 +55,8 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from .contract import RecordRef
 
 log = logging.getLogger(__name__)
 
@@ -78,7 +89,7 @@ SIDECAR_FIELDS = (
     "reason",
     "lane_event_cursor",
     "lane_event_at",
-    "trigger_to_capture_ms",
+    "capture_minus_lane_event_ms",
     "bytes",
 )
 
@@ -102,6 +113,17 @@ class StoreOverBudget(Exception):
     """
 
 
+class StoreRecordRefused(Exception):
+    """The contract will not publish this record, so it is not filed.
+
+    Raised BEFORE anything touches the disk. A record this package could write
+    but could not then serve is a store that answers its own read route with an
+    exception -- for as long as the record is kept, which is the retention
+    window. The check is the contract class itself: the record is BUILT through
+    it, so there is no second opinion about what is publishable.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class Record:
     """One stored capture: the sidecar's seven fields, and where the bytes are."""
@@ -112,7 +134,7 @@ class Record:
     reason: str
     lane_event_cursor: int | None
     lane_event_at: str | None
-    trigger_to_capture_ms: int | None
+    capture_minus_lane_event_ms: int | None
     bytes: int
     image_path: Path
 
@@ -152,6 +174,15 @@ class CaptureStore:
         self._sequence = 0
         self.purged_by_age = 0
         self.purged_by_size = 0
+        #: How many temporary files an index rebuild has removed, since start.
+        #: A temp file at a rebuild is BY DEFINITION a write that died: nothing
+        #: else can leave one, because a live write removes its own in a
+        #: `finally`. Counted rather than swept, because how often a site loses
+        #: power mid-write is a fact about that site.
+        self.purged_by_crash = 0
+        #: Whether the newest record held is stamped AFTER the clock that reads
+        #: it. Measured on every purge, and true for as long as it holds.
+        self.clock_stepped_back = False
         #: What the last index rebuild found that was half a record. Held so the
         #: health route can name it after it has been purged: the fault is that
         #: it HAPPENED, and deleting the evidence must not delete the report.
@@ -162,8 +193,15 @@ class CaptureStore:
 
         Called by the capture process so the whole module runs on ONE clock: the
         moment a record is stamped with and the moment its retention window is
-        measured against must be the same read, or a box whose clock is wrong
-        deletes by one rule and records by another.
+        measured against are the same read.
+
+        **ONE CLOCK IS NOT A MONOTONIC ONE, and this used to claim otherwise.**
+        A single wall clock that steps -- NTP correcting a box with no RTC
+        battery, which is the environment this package names for itself -- still
+        stamps one record after another with an earlier moment, and still holds
+        records stamped ahead of it that no age rule can reach. That is
+        `clock_stepped_back`, measured on every purge and published, because it
+        cannot be fixed here.
         """
         self._now = now
 
@@ -215,8 +253,21 @@ class CaptureStore:
         sidecar.
         """
         images, sidecars, incomplete = {}, {}, []
+        crashed = 0
         for path in sorted(self.directory.iterdir()):
-            if not path.is_file() or path.name.startswith(TEMP_PREFIX):
+            if not path.is_file():
+                continue
+            if path.name.startswith(TEMP_PREFIX):
+                # A TEMPORARY FILE AT A REBUILD IS A WRITE THAT DIED. Nothing
+                # else leaves one: a live write removes its own in a `finally`,
+                # and this process is the only writer of this directory. It
+                # holds image bytes, it is outside the index, outside
+                # `bytes_used` and outside the retention rule -- which reads a
+                # sidecar there is none of. It is removed and counted here, so
+                # the rule that says a crash "leaves no record at all" is true
+                # of the IMAGE and not only of the record.
+                _remove(path)
+                crashed += 1
                 continue
             if path.suffix == IMAGE_SUFFIX and RECORD_ID.match(path.stem):
                 images[path.stem] = path
@@ -248,6 +299,13 @@ class CaptureStore:
             (int(RECORD_ID.match(record.id).group(3)) for record in records), default=0
         )
         self.incomplete = tuple(incomplete)
+        self.purged_by_crash += crashed
+        if crashed:
+            log.error(
+                "%d temporary file(s) from a write that did not finish found in %s and removed",
+                crashed,
+                self.directory,
+            )
         if incomplete:
             log.error(
                 "%d incomplete record(s) found in %s and purged: %s",
@@ -267,27 +325,39 @@ class CaptureStore:
         lane_event_cursor: int | None = None,
         lane_event_at: str | None = None,
     ) -> Record:
-        """One record, atomically, after a purge that must make room for it.
+        """One record, BUILT THROUGH THE CONTRACT, then written atomically.
 
-        The purge runs FIRST, and it is told how much room this record needs --
-        so the rule that decides what is kept is applied before the thing that
-        would break it is written, and a store at its cap rolls forward by
-        deleting its oldest rather than by refusing its newest.
+        The order here is the whole rule, and it is three steps:
 
-        `store_over_budget` is what is left when that cannot work: ONE purge has
-        emptied everything it is allowed to and this capture still does not fit,
-        which means a single capture is larger than the whole cap. That is a
-        misconfiguration and not a full disk, and the write is REFUSED and named
-        rather than dropped -- a store that quietly discarded what it could not
-        fit would be a recording missing exactly the busiest hour.
+        **1. CAN THIS CAPTURE EVER FIT?** `len(image)` against `max_bytes`,
+        BEFORE any purge. A capture larger than the whole cap can never be
+        stored however much is deleted for it, so deleting anything for it
+        destroys a site's store to make room for a write that is then refused --
+        and how long a camera's answer is, is the camera's to choose. Refused
+        first, and nothing is purged.
+
+        **2. IS THIS A RECORD THIS PROCESS CAN PUBLISH?** The record is built
+        through `contract.RecordRef` before anything touches the disk. A record
+        the contract would refuse is a record that is not filed, and the poll
+        that produced it is refused -- rather than a file on a disk that makes
+        `GET /v1/capture/records` raise for as long as the retention window.
+
+        **3. THEN the purge makes room**, told how much this record needs, so a
+        store at its cap rolls forward by deleting its oldest rather than by
+        refusing its newest.
+
+        `store_over_budget` is what step 1 raises. It is a misconfiguration and
+        not a full disk, and the write is REFUSED and named rather than dropped
+        -- a store that quietly discarded what it could not fit would be a
+        recording missing exactly the busiest hour.
         """
-        self.purge(headroom=len(image))
-        if self.bytes_used() + len(image) > self.max_bytes:
+        if len(image) > self.max_bytes:
             raise StoreOverBudget(
-                f"{camera_id}: this capture is {len(image)} bytes and one purge could not get "
-                f"{self.directory} under its {self.max_bytes}-byte cap. The capture was not "
-                "written. Raise `[capture] max_bytes`, lower `[capture] retention_days`, or "
-                "give this store a bigger disk."
+                f"{camera_id}: this capture is {len(image)} bytes and {self.directory}'s whole "
+                f"cap is {self.max_bytes} bytes, so no purge can make room for it. NOTHING WAS "
+                "PURGED and the capture was not written. Raise `[capture] max_bytes`, or lower "
+                "`[capture] max_snapshot_bytes` so this camera cannot answer with more than "
+                "this store can hold."
             )
 
         self._sequence += 1
@@ -296,11 +366,21 @@ class CaptureStore:
             self._sequence += 1
             record_id = f"{_stamp(captured_at)}_{camera_id}_{self._sequence:06d}"
 
-        trigger_ms = None
+        difference_ms = None
         if lane_event_at is not None:
-            trigger_ms = int(
-                (captured_at - datetime.fromisoformat(lane_event_at)).total_seconds() * 1000
-            )
+            try:
+                lane_moment = datetime.fromisoformat(lane_event_at)
+            except ValueError as exc:
+                raise StoreRecordRefused(
+                    f"{camera_id}: lane_event_at={lane_event_at!r} is not a timestamp this "
+                    "process can subtract from its own"
+                ) from exc
+            if lane_moment.tzinfo is None:
+                raise StoreRecordRefused(
+                    f"{camera_id}: lane_event_at={lane_event_at!r} carries no UTC offset, so "
+                    "it is not a moment this process can subtract from its own"
+                )
+            difference_ms = int((captured_at - lane_moment).total_seconds() * 1000)
         record = Record(
             id=record_id,
             captured_at=captured_at.astimezone(UTC).isoformat(),
@@ -308,21 +388,33 @@ class CaptureStore:
             reason=reason,
             lane_event_cursor=lane_event_cursor,
             lane_event_at=lane_event_at,
-            trigger_to_capture_ms=trigger_ms,
+            capture_minus_lane_event_ms=difference_ms,
             bytes=len(image),
             image_path=self.directory / f"{record_id}{IMAGE_SUFFIX}",
         )
+        # THROUGH THE CONTRACT, before the disk. `RecordRef` is the class the
+        # records route builds its page from, so this is the same judgement that
+        # route will make later -- not a second one that could come to differ.
+        _refuse_unpublishable(record)
+
+        self.purge(headroom=len(image))
+        if self.bytes_used() + len(image) > self.max_bytes:
+            raise StoreOverBudget(
+                f"{camera_id}: this capture is {len(image)} bytes and one purge could not get "
+                f"{self.directory} under its {self.max_bytes}-byte cap. The capture was not "
+                "written."
+            )
 
         image_temp = self.directory / f"{TEMP_PREFIX}{record_id}{IMAGE_SUFFIX}"
         sidecar_temp = self.directory / f"{TEMP_PREFIX}{record_id}{SIDECAR_SUFFIX}"
         try:
             # BOTH temporary files are complete on the disk before either is
             # renamed. A crash anywhere before the first rename leaves two files
-            # nothing reads and the index ignores; a crash between the two
-            # renames leaves an image with no sidecar, which is the case the
-            # rebuild reports and purges. That window is one `rename` wide and
-            # it cannot be closed without a filesystem that renames two names at
-            # once, so it is named here rather than claimed away.
+            # the index removes and COUNTS at the next start; a crash between
+            # the two renames leaves an image with no sidecar, which is the case
+            # the rebuild reports and purges. That window is one `rename` wide
+            # and it cannot be closed without a filesystem that renames two
+            # names at once, so it is named here rather than claimed away.
             _write_atomic_body(image_temp, image)
             _write_atomic_body(
                 sidecar_temp,
@@ -331,9 +423,17 @@ class CaptureStore:
             os.replace(image_temp, record.image_path)
             os.replace(sidecar_temp, self.directory / f"{record_id}{SIDECAR_SUFFIX}")
         except OSError as exc:
+            raise StoreUnwritable(f"{self.directory}: {exc}") from exc
+        finally:
+            # ALWAYS, and not only on an `OSError`. A live write cleans up after
+            # itself whatever ended it -- an exception from anywhere inside this
+            # block, an interrupt, a `SystemExit` -- because a temporary file
+            # this process leaves behind while it is still running is one the
+            # index will report as a crash at the next start, and one holding
+            # image bytes nothing counts in the meantime. After the two renames
+            # these two names no longer exist, so this removes nothing.
             for path in (image_temp, sidecar_temp):
                 _remove(path)
-            raise StoreUnwritable(f"{self.directory}: {exc}") from exc
 
         self._cursor += 1
         self._records.append((self._cursor, record))
@@ -359,6 +459,17 @@ class CaptureStore:
         makes room for them, so a store sitting exactly at its cap keeps
         recording by deleting its oldest -- which is what a retention rule with
         a size cap in it is FOR.
+
+        **THE SIZE HALF IS BOUNDED BY WHAT THIS CAPTURE NEEDS, and it can never
+        be `while self._records`.** Headroom that does not fit under the cap
+        makes that condition unsatisfiable, so the loop empties the store and
+        the write is refused anyway: one impossible capture, and a site's whole
+        recording is gone. Asked for, it does nothing and says so.
+
+        **OLDEST IS BY VALUE, not by position.** The index is in insertion
+        order and a clock that steps back inserts an earlier record after a
+        later one, so "oldest first" read off the front of the list is whatever
+        happened to be written first.
         """
         moment = now or self._now()
         cutoff = moment - timedelta(days=self.retention_days)
@@ -373,10 +484,29 @@ class CaptureStore:
         self._records = kept
 
         by_size = 0
-        while self._records and self.bytes_used() + headroom > self.max_bytes:
-            _cursor, record = self._records.pop(0)
-            self._delete(record)
-            by_size += 1
+        if headroom > self.max_bytes:
+            log.error(
+                "%s: asked to make room for %d bytes under a %d-byte cap; nothing was purged, "
+                "because no amount of deleting makes room for a capture larger than the cap",
+                self.directory,
+                headroom,
+                self.max_bytes,
+            )
+        else:
+            while self._records and self.bytes_used() + headroom > self.max_bytes:
+                oldest = min(self._records, key=lambda one: (_at(one[1].captured_at), one[0]))
+                self._records.remove(oldest)
+                self._delete(oldest[1])
+                by_size += 1
+
+        # MEASURED HERE, on every purge: the newest record this store holds
+        # against the clock that is about to decide what is old. A record ahead
+        # of the clock is not deleted early and it is not ignored -- the age
+        # rule simply cannot reach it, and this is how that is said.
+        self.clock_stepped_back = bool(
+            self._records
+            and max(_at(record.captured_at) for _cursor, record in self._records) > moment
+        )
 
         self.purged_by_age += by_age
         self.purged_by_size += by_size
@@ -389,6 +519,32 @@ class CaptureStore:
                 self.directory,
             )
         return by_age, by_size
+
+    def purge_records(self, record_ids) -> int:
+        """Delete named records and drop them from the index. Returns how many.
+
+        The read route's answer to a record it cannot publish. It is the same
+        deletion the incomplete-record path makes at a rebuild, for the same
+        reason: a record nothing can say anything about, sitting under a
+        retention rule, is what this store exists not to have. It counts as
+        `store_record_incomplete`, which is what it is.
+        """
+        wanted = set(record_ids)
+        gone = [pair for pair in self._records if pair[1].id in wanted]
+        for pair in gone:
+            self._records.remove(pair)
+            self._delete(pair[1])
+        if gone:
+            self.incomplete = tuple(
+                sorted({*self.incomplete, *(record.id for _cursor, record in gone)})
+            )
+            log.error(
+                "%d record(s) in %s could not be published and were purged: %s",
+                len(gone),
+                self.directory,
+                ", ".join(record.id for _cursor, record in gone),
+            )
+        return len(gone)
 
     def _delete(self, record: Record) -> None:
         _remove(record.image_path)
@@ -406,7 +562,13 @@ class CaptureStore:
         return self._cursor
 
     def oldest_cursor(self) -> int | None:
-        return self._records[0][0] if self._records else None
+        """The LOWEST cursor still held, by value.
+
+        `self._records[0]` is the front of a list in insertion order, and the
+        size purge now deletes by the value of `captured_at` -- so the front of
+        the list is not necessarily the lowest cursor any more.
+        """
+        return min((cursor for cursor, _record in self._records), default=None)
 
     def dropped(self) -> int:
         return self.purged_by_age + self.purged_by_size
@@ -440,8 +602,13 @@ class CaptureStore:
         recent = [record for record in records if _at(record.captured_at) >= day_ago]
         recent_bytes = sum(record.bytes for record in recent)
 
-        oldest = records[0].captured_at if records else None
-        newest = records[-1].captured_at if records else None
+        # BY VALUE. `records[0]` and `records[-1]` are the ends of a list in
+        # insertion order: after a clock steps back, the last record written is
+        # the earliest one held, and the two fields published here read as
+        # `newest_at` before `oldest_at`. That is not a store that is broken,
+        # it is a read that was taken by position.
+        oldest = min((record.captured_at for record in records), key=_at, default=None)
+        newest = max((record.captured_at for record in records), key=_at, default=None)
         projected = None
         if oldest is not None:
             span = min((moment - _at(oldest)).total_seconds(), 24 * 3600.0)
@@ -458,12 +625,37 @@ class CaptureStore:
             "projected_bytes_per_day": projected,
             "purged_by_age": self.purged_by_age,
             "purged_by_size": self.purged_by_size,
+            "purged_by_crash": self.purged_by_crash,
         }
 
 
 # ---------------------------------------------------------------------------
 # The disk, and nothing above it
 # ---------------------------------------------------------------------------
+
+
+def _refuse_unpublishable(record: Record) -> None:
+    """Build the record through the contract class, and let it judge.
+
+    `contract.RecordRef` is what `GET /v1/capture/records` builds its page from.
+    Constructing one here means the judgement made before the disk is written is
+    THE SAME judgement, made by the same code, that the read route will make
+    later -- not a second opinion that can come to differ from it.
+    """
+    try:
+        RecordRef(
+            id=record.id,
+            captured_at=record.captured_at,
+            camera_id=record.camera_id,
+            reason=record.reason,
+            lane_event_cursor=record.lane_event_cursor,
+            lane_event_at=record.lane_event_at,
+            capture_minus_lane_event_ms=record.capture_minus_lane_event_ms,
+            bytes=record.bytes,
+            image_url=f"/v1/capture/images/{record.id}",
+        )
+    except ValueError as exc:
+        raise StoreRecordRefused(f"{record.camera_id}: {exc}") from exc
 
 
 def _write_atomic_body(path: Path, body: bytes) -> None:
@@ -497,20 +689,31 @@ def _read_record(record_id: str, image: Path, sidecar: Path) -> Record | None:
         size = image.stat().st_size
     except OSError:
         return None
-    return Record(
+    record = Record(
         id=record_id,
         captured_at=str(body["captured_at"]),
         camera_id=str(body["camera_id"]),
         reason=str(body["reason"]),
         lane_event_cursor=body["lane_event_cursor"],
         lane_event_at=body["lane_event_at"],
-        trigger_to_capture_ms=body["trigger_to_capture_ms"],
+        capture_minus_lane_event_ms=body["capture_minus_lane_event_ms"],
         # The size on the DISK, not the number the sidecar remembers. They agree
         # unless something truncated the image, and where they disagree the disk
         # is the one the cap has to be applied against.
         bytes=size,
         image_path=image,
     )
+    try:
+        # AND THROUGH THE CONTRACT, on the way in. A sidecar this process would
+        # not write -- edited by hand, written by an older build, corrupted in a
+        # way that still parses as JSON -- is half a record: it goes down the
+        # same path as an image with no sidecar at all, reported as
+        # `store_record_incomplete` and purged, rather than being kept until the
+        # read route trips over it.
+        _refuse_unpublishable(record)
+    except StoreRecordRefused:
+        return None
+    return record
 
 
 def _remove(path: Path) -> None:
@@ -546,5 +749,6 @@ __all__ = [
     "CaptureStore",
     "Record",
     "StoreOverBudget",
+    "StoreRecordRefused",
     "StoreUnwritable",
 ]

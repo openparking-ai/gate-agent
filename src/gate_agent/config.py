@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .camera import DEFAULT_SNAPSHOT_TIMEOUT
+from .camera import DEFAULT_MAX_SNAPSHOT_BYTES, DEFAULT_SNAPSHOT_TIMEOUT
 from .client import DEFAULT_TIMEOUT
 from .contract import SinkKind, TargetKind
 
@@ -115,6 +115,16 @@ RETENTION_DAYS_BOUNDS = (1, 3650)
 #: because this is where a site overrides it -- one copy, and the reason it is
 #: the number it is travels with it.
 DEFAULT_SNAPSHOT_TIMEOUT_SECONDS = DEFAULT_SNAPSHOT_TIMEOUT
+
+#: The published default for the most this process reads from one camera. The
+#: constant lives in `camera.py`, beside the code that stops reading, and is
+#: bound here because this is where a site overrides it.
+#:
+#: **IT IS REFUSED AT STARTUP UNLESS IT IS BELOW `[capture] max_bytes`.** The
+#: store evicts to make room for what arrives, so a ceiling at or above the
+#: whole cap would let ONE camera's answer decide how much of a site's store
+#: survives -- and the length of that answer is the camera's to choose.
+DEFAULT_MAX_SNAPSHOT_BYTES_SETTING = DEFAULT_MAX_SNAPSHOT_BYTES
 
 #: What a camera id may be made of. A camera id becomes part of every filename
 #: in the store, so one carrying a `/` or a `..` would write a site's captures
@@ -301,8 +311,12 @@ class CameraConfig:
     username: str | None
     password: str | None
     #: How long this camera has to answer one snapshot. Setting, default
-    #: published above, and an assumption.
+    #: published above, and an assumption. It is a DEADLINE on the whole read.
     timeout_seconds: float = DEFAULT_SNAPSHOT_TIMEOUT_SECONDS
+    #: The most this process reads from this camera. `[capture]
+    #: max_snapshot_bytes`, carried per camera because it is the camera the
+    #: reader is holding when it applies.
+    max_snapshot_bytes: int = DEFAULT_MAX_SNAPSHOT_BYTES_SETTING
 
     @property
     def authenticated(self) -> bool:
@@ -327,6 +341,11 @@ class CaptureConfig:
     directory: Path
     max_bytes: int
     cameras: tuple[CameraConfig, ...]
+    #: The most this process reads from one camera. A SETTING with a published
+    #: default, refused at startup unless it is BELOW `max_bytes` -- see
+    #: `DEFAULT_MAX_SNAPSHOT_BYTES_SETTING` for why that bound is the one that
+    #: matters.
+    max_snapshot_bytes: int = DEFAULT_MAX_SNAPSHOT_BYTES_SETTING
     #: The lane whose events trigger captures, or `None`. **Standalone is a
     #: MODE**: a garage with a camera and no gate is a customer of this process,
     #: and it takes minute captures and says so on the line it prints at start.
@@ -383,13 +402,27 @@ class CaptureConfig:
                 "morning; above the ceiling this store keeps personal data longer than anything "
                 "else in this estate is allowed to."
             )
-        cameras = _cameras(_table(raw, "cameras"), relative_to)
+        max_snapshot_bytes = _positive_int(
+            capture.get("max_snapshot_bytes"),
+            "[capture].max_snapshot_bytes",
+            DEFAULT_MAX_SNAPSHOT_BYTES_SETTING,
+        )
+        if max_snapshot_bytes >= max_bytes:
+            raise ConfigError(
+                f"[capture].max_snapshot_bytes is {max_snapshot_bytes} and [capture].max_bytes "
+                f"is {max_bytes}. The ceiling on ONE read must be below the cap on the WHOLE "
+                "store: the store evicts to make room for what arrives, so a ceiling at or "
+                "above the cap lets one camera's answer decide how much of this site's store "
+                "survives -- and how long that answer is, is the camera's to choose."
+            )
+        cameras = _cameras(_table(raw, "cameras"), relative_to, max_snapshot_bytes)
         lanes = _targets(_table(raw, "targets", required=False), relative_to, (TargetKind.LANE,))
         return cls(
             capture_id=str(capture["id"]),
             site_id=str(capture["site_id"]),
             directory=_resolve(directory, relative_to),
             max_bytes=max_bytes,
+            max_snapshot_bytes=max_snapshot_bytes,
             cameras=cameras,
             lane=lanes[0] if lanes else None,
             interval_seconds=_positive(
@@ -675,7 +708,9 @@ def _sinks(raw: dict, relative_to: Path | None) -> tuple[object, ...]:
     return tuple(sinks)
 
 
-def _cameras(raw: dict, relative_to: Path | None) -> tuple[CameraConfig, ...]:
+def _cameras(
+    raw: dict, relative_to: Path | None, max_snapshot_bytes: int
+) -> tuple[CameraConfig, ...]:
     """Every declared camera, and the four refusals a camera can earn.
 
     A capture process with NO camera is refused here, for the reason a monitor
@@ -729,6 +764,7 @@ def _cameras(raw: dict, relative_to: Path | None) -> tuple[CameraConfig, ...]:
                     f"[cameras.{camera_id}].timeout_seconds",
                     DEFAULT_SNAPSHOT_TIMEOUT_SECONDS,
                 ),
+                max_snapshot_bytes=max_snapshot_bytes,
             )
         )
     return tuple(cameras)
@@ -791,6 +827,7 @@ __all__ = [
     "DEFAULT_EMAIL_TLS",
     "DEFAULT_EVENT_WINDOW_DEPTH",
     "DEFAULT_RETENTION_DAYS",
+    "DEFAULT_MAX_SNAPSHOT_BYTES_SETTING",
     "DEFAULT_SNAPSHOT_TIMEOUT_SECONDS",
     "DEFAULT_TIMEOUT_SECONDS",
     "DEFAULT_LANE_QUIET_SECONDS",

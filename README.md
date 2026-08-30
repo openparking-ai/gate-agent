@@ -106,13 +106,24 @@ starts; a garage with a camera and no gate is a customer of this process.
 
 That seat costs something, and the cost is measured rather than described: the
 picture is taken when the event was SEEN, and every lane-triggered record carries
-`trigger_to_capture_ms`.
+`capture_minus_lane_event_ms`. It is named for the subtraction it is, because it
+spans this process's clock and the lane's — the contract says what it can and
+cannot be read as.
 
 **One camera implementation this version: an HTTP JPEG snapshot with standard
 HTTP authentication.** No RTSP — a stream needs a decoder and this package has no
 dependencies. **A camera whose only documented snapshot route takes the password
 as a query parameter is named unsupported in the contract**, with the reason,
-rather than made to work by putting a password in a URL.
+rather than made to work by putting a password in a URL. Of the two default-tier
+cameras the lane's reference-hardware note names, that is the **Reolink
+RLC-810A**: the only snapshot route its own documentation gives puts the password
+in the query string, so this build does not support it. The **AXIS P1465-LE** is
+supported — VAPIX authenticates in a header.
+
+`[cameras.<id>] timeout_seconds` is a deadline on the whole read, not a socket
+option, so one slow camera cannot hold the poller; and `[capture]
+max_snapshot_bytes` — refused unless it is below `[capture] max_bytes` — is what
+stops a camera deciding how much of a site's store survives.
 
 ## How a human is told
 

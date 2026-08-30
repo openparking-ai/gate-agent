@@ -378,22 +378,42 @@ without adding it here.
     "store_unwritable",
     "store_over_budget",
     "store_record_incomplete",
+    "clock_stepped_back",
     "lane_unreachable",
-    "lane_refused_us"
+    "lane_refused_us",
+    "lane_contract_unsupported",
+    "lane_backlog_lost"
+  ],
+  "camera_unreachable_causes": [
+    "timeout",
+    "network",
+    "server_error",
+    "not_a_picture"
   ],
   "capture_reasons": [
     "interval",
     "lane_arrival",
     "lane_vend"
   ],
-  "retention_days_bounds": [1, 3650]
+  "retention_days_bounds": [1, 3650],
+  "max_snapshot_bytes_default": 33554432
 }
 ```
 
-`capture_codes` and `capture_reasons` belong to the capture process and are
-described under its own routes below; `retention_days_bounds` is the range a
-site's `[capture] retention_days` must fall inside. All four sets are held to the
-code by the same test, in both directions.
+`capture_codes`, `camera_unreachable_causes` and `capture_reasons` belong to the
+capture process and are described under its own routes below;
+`retention_days_bounds` is the range a site's `[capture] retention_days` must
+fall inside, and `max_snapshot_bytes_default` is the published default for
+`[capture] max_snapshot_bytes`. Every set here is held to the code by the same
+test, in both directions.
+
+**`max_snapshot_bytes_default` is a number in a document, and it is here rather
+than in an example for one reason: it is a CEILING ON A READ and not a claim
+about how big a picture is.** Nothing in this package has measured a capture
+from any of the cameras it is written for. This is the most it will read from
+one before it stops reading, it is a per-site setting, and startup refuses it
+unless it is BELOW `[capture] max_bytes` — see the retention rule below for why
+that bound is the one that matters.
 
 Two of the monitor's codes deserve saying out loud, because they are spelt the
 same as codes the LANE publishes and they are different facts:
@@ -613,8 +633,14 @@ path is the boundary every outside reviewer of this project has named.
 **And that seat costs something, which is MEASURED rather than described.** This
 process learns about an arrival by POLLING, so the picture is taken when the
 event was SEEN, not when the frames were grabbed. Every lane-triggered record
-carries `trigger_to_capture_ms`, which is that delay, on that record, at that
-site. A sentence here could only describe one installation.
+carries `capture_minus_lane_event_ms`, which is that subtraction, on that record,
+at that site. A sentence here could only describe one installation — and what
+that number spans, which is two machines' clocks, is stated under the records
+route below.
+
+**A LANE THIS PROCESS DID NOT WRITE IS THE DESIGNED CASE, NOT THE EXOTIC ONE.**
+That is the whole point of the seat. So a page this build cannot read is refused
+WHOLE, and said out loud: see "When a lane breaks its own contract" below.
 
 ## Nothing it stores identifies a vehicle
 
@@ -658,8 +684,42 @@ this process — the camera records because the barrier cannot be trusted.
 nothing for what is already in that lane's window. Those cars have gone; a
 picture taken now and filed against one of their events would be an image of an
 empty lane carrying a reference to a vehicle, which reads as a record *of* that
-vehicle. A `reset` from the lane is answered the same way, and how many events
-were not followed is logged rather than absorbed.
+vehicle.
+
+### When a lane breaks its own contract, and when it merely loses a backlog
+
+Two different facts, two codes, and neither of them is a log line on a box.
+
+**`lane_backlog_lost`** — the lane answered `reset`: it restarted, or it evicted
+further than this process had fallen behind. This process takes its place at the
+new cursor and photographs nothing for the gap, for the same reason as the first
+read. **What was in that gap can never be photographed** — those cars have gone
+— so it is `active` until the next page that is not a reset, and
+`lane_events_missed` on the health route counts how many events that was, since
+this process started. SETTLED 3g's capture mode exists so the entries can be
+reconstructed, and the busiest hour is exactly the hour that outruns a window: a
+gap nobody knows about is worse than one that is counted, which is the same
+sentence `dropped` exists for.
+
+**`lane_contract_unsupported`** — the lane served a page this build cannot read.
+**The page is refused WHOLE**: the cursor is NOT adopted, nothing is photographed
+under a lane reason, and the next poll asks for the same events again — so it
+recovers by itself the moment the lane serves a page that can be read. It is the
+same answer, in the same shape, as the monitor's `target_contract_unsupported`.
+
+A page is refused when:
+
+| | |
+|---|---|
+| `occurred_at` **carries no UTC offset** | It is not a moment this process can subtract from its own — two machines, two timezones — and a capture filed under a lane reason with its reference dropped is a record this package's own contract refuses to publish. |
+| `occurred_at` is absent, is not a string, or is not a timestamp | Same fact, one step earlier. |
+| a triggering event carries **no cursor** | The cursor IS the join to who the car was. A capture with no reference filed under a lane reason is the same refused record. |
+| the page's `cursor` **went backwards** with `reset: false` | The lane contract says the cursor is monotonic within a run and that a restart sets `reset`. Adopting a backwards cursor re-serves the same events on the next poll and photographs them **again**, for ever — and every duplicate consumes `max_bytes`, so the size rule then evicts real captures to make room for them. |
+| the page carries no `cursor`, or no `events` list | There is nothing here to follow. |
+
+An event of a kind this build does not trigger on is **not** a contract break: a
+lane gaining an event kind is the ordinary case, and this contract says a
+consumer ignores what it does not recognise.
 
 ## The camera
 
@@ -674,6 +734,26 @@ setting nobody can answer correctly.
 needs a decoder, and this package has no dependencies at all — it runs on a box
 in a gate housing where every dependency is one more thing to cross-compile,
 patch and have go wrong with no keyboard attached.
+
+**`[cameras.<id>] timeout_seconds` IS A DEADLINE ON THE WHOLE READ, not a socket
+option.** A camera that answers, declares a length and then sends one byte every
+quarter second never trips a per-operation timeout, because no single read waits
+long enough. This process runs ONE poller thread, so such a camera would hold
+every other camera's interval capture and the lane's event poll behind it, for as
+long as it chose, with nothing going `active`. The body is therefore read in
+chunks against a wall of `timeout_seconds` from the moment the request went out,
+and past it the read is abandoned: `camera_unreachable` with a `cause` of
+`timeout`. **One camera cannot hold this process for longer than that camera's
+own timeout.**
+
+**`[capture] max_snapshot_bytes` is the most this process reads from one camera**
+— a per-site setting whose published default is in the closed sets above, and a
+CEILING ON A READ rather than a claim about how big a picture is. **Startup
+refuses it unless it is below `[capture] max_bytes`**, and that bound is the
+point of the setting: the store evicts to make room for what arrives, so a
+ceiling at or above the whole cap would let one camera's answer decide how much
+of a site's store survives — and how long that answer is, is the camera's to
+choose.
 
 **A credential never goes in the URL.** `[cameras.<id>].snapshot_url` carrying
 userinfo is refused at startup, by name, by the same code that refuses it in a
@@ -704,12 +784,21 @@ The same split the monitor makes for a target, because it is the same fact:
 
 | | |
 |---|---|
-| `camera_unreachable` | Nothing came back — a network failure, a timeout, a **5xx**, or a body that does not begin as a JPEG. This is *"camera disconnected is a malfunction"*. |
+| `camera_unreachable` | Nothing came back — a network failure, a timeout, a **5xx**, or a body that does not begin as a JPEG. This is *"camera disconnected is a malfunction"*. It carries a **`cause`** out of `camera_unreachable_causes`: one fact to this process, four different repairs to the person sent to fix it. `null` until it has been measured. |
 | `camera_refused_us` | It ANSWERED, and the answer was no — a **3xx** or a **4xx**, with its status on the entry. **401** is the credential in the file beside this process and the camera is fine; **404** is a snapshot route this camera does not have; **3xx** is a camera steering this process somewhere else, which is refused rather than followed. |
 
 A body that is not a JPEG is refused rather than stored: a login page served as
 `image/jpeg` fills a store with documents that read as a working installation
 right up until somebody opens one.
+
+The four causes, in full:
+
+| | |
+|---|---|
+| `timeout` | The deadline passed. The body was still arriving, or was not arriving at all, and this process stopped reading. |
+| `network` | The socket failed, or nothing answered on it. |
+| `server_error` | A **5xx**: the camera's own process answered that it could not take the picture. The repair is at the camera either way, which is why it is here and not under `camera_refused_us`. |
+| `not_a_picture` | Something came back and it was not a JPEG, or it was longer than `[capture] max_snapshot_bytes`. |
 
 **Nothing this process opens follows a redirect**, in either direction and for
 both the camera and the lane. It matters most at the camera: the retry is the
@@ -723,8 +812,8 @@ hand a site's camera password to whichever host it named.
 - **the JPEG exactly as the camera sent it**, never re-encoded — so the size
   measured is the camera's and not this package's;
 - **a sidecar** of `captured_at`, `camera_id`, `reason`, `lane_event_cursor`,
-  `lane_event_at`, `trigger_to_capture_ms` and `bytes`. Seven fields, and there
-  is no eighth.
+  `lane_event_at`, `capture_minus_lane_event_ms` and `bytes`. Seven fields, and
+  there is no eighth.
 
 **A record's name is a timestamp, the camera id and a sequence number, and
 nothing else.** A directory listing is readable by anyone who can read the
@@ -732,21 +821,46 @@ directory, and a filename is the one part of a file that survives being copied
 somewhere with no context.
 
 **Written atomically.** Both files are written under temporary names in the same
-directory and then renamed. A crash before the first rename leaves no record at
-all. The window this cannot close is **one `rename` wide** — between the image's
-and the sidecar's — and a crash inside it leaves an image with no sidecar, which
-is **reported and purged, never silently kept**. Closing it would need a
-filesystem that renames two names at once, so it is named here rather than
-claimed away.
+directory and then renamed.
+
+**A crash before the first rename leaves no record — AND NO IMAGE.** Those
+temporary files hold the JPEG. Left on the disk they are outside the index,
+outside `bytes_used`, outside every report, and outside the retention rule
+itself, because that rule reads a sidecar and there is none to read: a
+photograph of a car, kept for ever, on a box in a gate housing. So both halves
+are closed. **A live write removes its own temporary files in a `finally`** —
+whatever ended it. And **every temporary file the next index rebuild finds is
+removed and COUNTED** as `purged_by_crash`: nothing but a crash can leave one,
+because this process is the only writer of this directory and a live write
+cleans up after itself. The count is published because how often a site loses
+power mid-write is a fact about that site.
+
+The window this cannot close is **one `rename` wide** — between the image's and
+the sidecar's — and a crash inside it leaves an image with no sidecar, which is
+**reported and purged, never silently kept**. Closing it would need a filesystem
+that renames two names at once, so it is named here rather than claimed away.
+
+**A record is BUILT THROUGH THE CONTRACT before anything touches the disk.** The
+class `GET /v1/capture/records` builds its page from is the class the write is
+validated by, so there is no second opinion to drift: **a record this process
+could not publish is a record it does not file**, and the poll that produced it
+is refused. Without that, a lane page this build half-accepted could leave a file
+on a disk that makes the records route raise for every consumer until it aged
+out — up to `retention_days`, with the health route saying `ok` throughout.
 
 **The index is rebuilt by reading the directory, every start. A check, never a
 memory.** There is no manifest to go stale and no counter to be wrong, and a file
-somebody deleted by hand is simply not in the index. It is also how the two kinds
-of half record are found: an image with no sidecar, and a sidecar with no image
-or one that will not parse. Both are `store_record_incomplete`, and both are
-deleted — a half record is a photograph nobody can say anything about, sitting
-under a retention rule that **cannot reach it**, because the rule reads the
-sidecar.
+somebody deleted by hand is simply not in the index. It is also how the three
+kinds of half record are found: an image with no sidecar, a sidecar with no
+image, and a sidecar **the contract will not accept** — one that will not parse,
+one missing a field, or one carrying a combination this process would not have
+written. All three are `store_record_incomplete`, and all three are deleted — a
+half record is a photograph nobody can say anything about, sitting under a
+retention rule that **cannot reach it**, because the rule reads the sidecar.
+
+**And `GET /v1/capture/records` never dies on what it finds.** A record it cannot
+publish is reported and purged on the spot rather than raised: a route that
+raised would answer nothing, for every consumer, until that one record aged out.
 
 **One process per directory.** Two capture processes sharing one store would each
 rebuild an index the other is writing into, and the size cap would be enforced
@@ -784,6 +898,39 @@ for; the cap is then applied to what is left, oldest first. Reversing them would
 let a large recent day evict a record the retention rule was still keeping
 deliberately, which is a window nobody can state.
 
+**A capture that cannot fit is refused BEFORE anything is purged.** `len(image)`
+is checked against `max_bytes` first, and **nothing is deleted** — because no
+amount of deleting makes room for a capture larger than the whole cap, so a purge
+run for one destroys a site's store to make room for a write that is then refused
+anyway. The size rule also evicts **only what THIS capture needs**: it is bounded
+by that headroom and is never "while there is anything left", which is the same
+defect one level down.
+
+**Oldest is by VALUE, not by position.** The index is in insertion order, and a
+clock that steps back writes an earlier record after a later one — so "oldest
+first" read off the front of a list is whatever happened to be written first.
+`oldest_at` and `newest_at` are the minimum and maximum of `captured_at` for the
+same reason.
+
+### `clock_stepped_back`, and what it suspends
+
+**A record stamped after the clock that reads it is not deleted early and is not
+ignored: it is named.** `clock_stepped_back` is measured on every purge, as
+`newest_at` later than `now`, and is `active` for as long as that holds.
+
+**While it is active the AGE rule is suspended for those records** — a record
+stamped later than now is not older than any window, so the retention rule
+cannot reach it — **and the size rule is the only bound on them.** That is stated
+rather than corrected: this process cannot know which of the two readings is the
+right one, and deleting a record because a clock moved is exactly the failure a
+retention window exists to prevent.
+
+**One clock is not a monotonic one.** This package reads every moment — the stamp
+on a record, the window it is measured against, the projection — from a single
+callable, and that is worth having; it is not a fix for a clock that steps. A box
+in a gate housing with no RTC battery, which is the environment this package
+names for itself, is corrected by NTP after it comes up.
+
 **It DELETES, and that differs from what the platform does on purpose.** The
 platform's identity retention nulls a vehicle's attributes and keeps the row,
 because the row is a foreign key and a money record hangs off it. Here there is
@@ -794,11 +941,16 @@ rule that kept it would not be one.
 `purged_by_age` and `purged_by_size` — so a store that is silently eating itself
 because the cap is too small is visible rather than quiet.
 
-`store_over_budget` is what is left when the rule cannot work: one purge has
-removed everything it is allowed to and the capture still does not fit, which
-means a single capture is larger than the whole cap. The write is **refused and
-named** rather than dropped — a store that quietly discarded what it could not
-fit would be a recording missing exactly the busiest hour.
+`store_over_budget` is what is left when the rule cannot work: a single capture
+is larger than the whole cap, or one purge could not get under it. The write is
+**refused and named** rather than dropped — a store that quietly discarded what it
+could not fit would be a recording missing exactly the busiest hour.
+
+A correctly configured process cannot reach it, and that is deliberate:
+`max_snapshot_bytes` is refused at startup unless it is below `max_bytes`, so
+nothing a camera can answer with is larger than this store can hold. It remains
+the store's own refusal, so that a caller handing it more is told rather than
+obeyed.
 
 ## `GET /v1/capture` — who this process is, and what it is set to do
 
@@ -812,6 +964,7 @@ fit would be a recording missing exactly the busiest hour.
   "interval_seconds": 60.0,
   "retention_days": 30,
   "max_bytes": null,
+  "max_snapshot_bytes": null,
   "lane_declared": true,
   "lane_url": "http://127.0.0.1:8090",
   "cameras": [
@@ -836,6 +989,10 @@ measured, and a test refuses one.
 first question anybody asks of this process, and the answer is a path on a box
 rather than a credential.
 
+`max_snapshot_bytes` is on it **beside `max_bytes`**, because the relationship
+between the two is the thing a site has to get right and startup refuses them the
+wrong way round.
+
 `snapshot_url` and `lane_url` are **rebuilt** from scheme, host, port and path,
 the way `GET /v1/monitor` rebuilds a target's. `authenticated` says a credential
 is configured. It is not the credential: **every credential in this package is
@@ -858,9 +1015,11 @@ it. It decides whether any record here can ever carry a lane event reference.
       "source": "measured",
       "never_alarm": false,
       "caveat": "IDENTICAL means identical: this compares the bytes of two consecutive snapshots and nothing else. A camera that burns a clock, a date or a frame counter into the image is therefore NEVER frozen by this measure, however dead its sensor -- the overlay changes the bytes. A camera with no overlay pointed at an empty lane at night can be byte-identical while working perfectly. This measure is a cheap true negative, not a test of whether a camera is seeing.",
-      "status": null
+      "status": null,
+      "cause": null
     }
   ],
+  "lane_events_missed": null,
   "store": {
     "bytes_used": null,
     "record_count": null,
@@ -871,7 +1030,8 @@ it. It decides whether any record here can ever carry a lane event reference.
     "bytes_last_24h": null,
     "projected_bytes_per_day": null,
     "purged_by_age": null,
-    "purged_by_size": null
+    "purged_by_size": null,
+    "purged_by_crash": null
   }
 }
 ```
@@ -880,15 +1040,32 @@ it. It decides whether any record here can ever carry a lane event reference.
 
 One entry per `(code, subject)`, and **every member of `capture_codes` ships on
 every response** — a payload missing one is refused when it is built, because a
-code that is absent reads to a consumer exactly like a code that is fine. A code
-with no subject yet ships once, `unknown`, under this process's own id: at a
-standalone site both lane codes are exactly that, and *"no lane is declared"* is
-not the same fact as *"the lane is answering"*.
+code that is absent reads to a consumer exactly like a code that is fine.
+
+**AND COMPLETE PER `(code, camera)`, which is the same rule one level down.**
+Every declared camera ships under **every camera code**, on every response,
+`unknown` until its first attempt — and a payload missing one of those pairs is
+refused when it is built, exactly as a missing code is. Without it, a camera that
+has never produced a state disappears from this payload the moment any OTHER
+camera reports: and the camera that has not answered since the process started is
+the one worth asking about. At a site with four cameras, Gokhan's *"camera
+disconnected is a malfunction"* would fail for the camera that is worst broken.
+
+The lane's four codes ship under this process's own id at a **standalone** site:
+there is no lane to name, and *"no lane is declared"* is not the same fact as
+*"the lane is answering"*.
 
 The entry is the **lane contract's entry, field for field** — `state`, `source`,
-a boolean `never_alarm` on every entry, a `caveat`, and a `status` on the codes
-that exist because something answered. That is not a coincidence: it is what lets
-a monitor read this surface with the code that already reads a lane.
+a boolean `never_alarm` on every entry, and a `caveat` — plus two fields that
+belong to a code rather than to the shape: a `status` on the codes that exist
+because something answered, and a `cause` on `camera_unreachable`. That the
+first four are the lane's is not a coincidence: it is what lets a monitor read
+this surface with the code that already reads a lane, and a monitor passing these
+entries on carries the four it knows.
+
+`lane_events_missed`, beside `codes`, is **how many lane events this process is
+known not to have followed since it started** — see `lane_backlog_lost` above.
+`0` at a standalone site: there is no lane to miss events from.
 
 **Everything here is `measured` and nothing here is `never_alarm`.** Every code
 is a physical thing that needs a person: a camera that has stopped answering, a
@@ -915,11 +1092,12 @@ value**, because nothing here has ever measured one.
 | | |
 |---|---|
 | `bytes_used`, `record_count` | Summed over the index, which is read off the disk. |
-| `oldest_at`, `newest_at` | The `captured_at` of the first and last records held. |
+| `oldest_at`, `newest_at` | The minimum and maximum `captured_at` held, **by value**. Not the ends of the index: a clock that steps back writes an earlier record after a later one, and read by position these two come out the wrong way round. |
 | `mean_bytes_per_record` | `bytes_used` over `record_count`. `null` at an empty store. |
 | `records_last_24h`, `bytes_last_24h` | Over records whose `captured_at` is within 24 hours of now. |
 | `projected_bytes_per_day` | `bytes_last_24h` scaled to a day over however much of that window this store has actually been recording for. **`null` under an hour of data** — multiplying four minutes by three hundred and sixty is a number that looks measured. |
 | `purged_by_age`, `purged_by_size` | How many records each half of the purge has removed since this process started. |
+| `purged_by_crash` | How many temporary files an index rebuild has removed since this process started. One of them is a write that died — nothing else can leave one — so this is how often a site is losing power mid-write. |
 
 ## `GET /v1/capture/records?since=N` — the sidecars, never the bytes
 
@@ -939,7 +1117,7 @@ value**, because nothing here has ever measured one.
       "reason": "lane_vend",
       "lane_event_cursor": 7,
       "lane_event_at": "2026-08-30T14:03:11.102913+00:00",
-      "trigger_to_capture_ms": 380,
+      "capture_minus_lane_event_ms": 380,
       "bytes": null,
       "image_url": "/v1/capture/images/20260830T140311482Z_front_000002"
     }
@@ -968,10 +1146,29 @@ estate.**
 **The bytes are never inline.** A records page is a page a consumer polls, and a
 JPEG on it would make the cheapest read the most expensive one.
 
-`trigger_to_capture_ms` is present on exactly the records a lane triggered, and
-`null` on an interval capture — which has no trigger to be late for. It is
-`captured_at` minus `lane_event_at`, and it is the measured cost of this process
-being a CONSUMER of the lane's contract rather than something the lane calls.
+### `capture_minus_lane_event_ms`, and the two clocks it spans
+
+Present on exactly the records a lane triggered, and `null` on an interval
+capture, which has no lane event to subtract. **It used to be called
+`trigger_to_capture_ms`** — a name that said "delay", which is a measurement, for
+a number that is a subtraction across two machines. It is named for what it is,
+and what it is says so here, in the one copy this document and the code share:
+
+> This is a SUBTRACTION ACROSS TWO CLOCKS: `captured_at` is read from this
+> process's clock and `lane_event_at` from the lane's. It is not a measured
+> delay. A NEGATIVE VALUE IS REACHABLE and is served -- it means the two
+> clocks disagree by at least that much, with the lane's ahead. Nothing here
+> measures the offset between them, so nothing here can separate the offset
+> from the time this process took to see the event, and correcting it would
+> mean a second measurement nobody has made. Where the two clocks are the
+> same box, or are disciplined to the same source, it is the cost of this
+> process being a CONSUMER of the lane's contract rather than something the
+> lane calls.
+
+This is the monitor half's "`lane_gone_quiet`, and the two clocks it spans"
+applied to this field, and for the same reason. The sentence lives in
+`contract.CAPTURE_MINUS_LANE_EVENT_NOTE`, is published here from that one copy,
+and a value test holds the two together: editing either goes red.
 
 ## `GET /v1/capture/images/<id>` — one JPEG
 
@@ -1023,7 +1220,14 @@ were taken.**
   no platform. What leaves this box is what somebody fetches from these routes.
 - **No sizing.** How much disk a site needs is a read of that site's disk, on the
   health route. Nothing in this package has measured a capture from any of the
-  cameras it is written for, and no figure appears in this document.
+  cameras it is written for, and no figure appears in this document. The one
+  number that does — `max_snapshot_bytes_default` — is a ceiling on a read, is a
+  setting, and says so where it is published.
+- **No clock discipline, and no measurement of an offset.** This process reads
+  one clock. It does not correct one, it does not compare one against a lane's,
+  and it does not know how far out either is. What it does instead is say when
+  the two disagree in a way that changes what it keeps: `clock_stepped_back` on
+  its own, and `capture_minus_lane_event_ms` on every lane-triggered record.
 
 ---
 

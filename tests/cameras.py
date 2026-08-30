@@ -24,6 +24,7 @@ the process says it did.
 from __future__ import annotations
 
 import hashlib
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -167,4 +168,64 @@ def camera_server(camera: FakeCamera, host: str = "127.0.0.1", port: int = 0):
     return ThreadingHTTPServer((host, port), type("_Bound", (_Handler,), {"camera": camera}))
 
 
-__all__ = ["JPEG_END", "JPEG_HEADER", "FakeCamera", "camera_server", "jpeg"]
+class _DripHandler(BaseHTTPRequestHandler):
+    """A camera that ANSWERS, and takes far longer than its timeout to finish.
+
+    It is the hostile case a socket timeout cannot see: every individual read
+    comes back well inside the timeout, so no single operation ever waits long
+    enough to trip one, while the body as a whole takes `body * drip` seconds to
+    arrive. Against a timeout an order of magnitude shorter, a client with a
+    deadline over the read abandons it and a client with only a socket timeout
+    reads the whole thing and calls it a picture.
+
+    **It is BOUNDED on purpose.** A camera that dripped for ever would make a
+    client with no deadline HANG rather than fail, and a control that hangs is
+    not a control -- the fail-control that reverts the deadline has to go red,
+    not stop. The body it eventually sends is a real synthetic JPEG.
+    """
+
+    body: int = 200
+    drip: float = 0.02
+
+    server_version = "drip-camera"
+    sys_version = ""
+
+    def log_message(self, fmt: str, *args) -> None:
+        pass
+
+    def do_GET(self) -> None:  # noqa: N802
+        payload = JPEG_HEADER + b"\x00" * self.body + JPEG_END
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        try:
+            self.wfile.write(JPEG_HEADER)
+            self.wfile.flush()
+            for byte in payload[len(JPEG_HEADER) :]:
+                time.sleep(self.drip)
+                self.wfile.write(bytes([byte]))
+                self.wfile.flush()
+        except OSError:
+            # The client stopped reading. That is the whole point of the test
+            # that uses this, and it is not an error here.
+            pass
+
+
+def drip_camera_server(
+    host: str = "127.0.0.1", port: int = 0, drip: float = 0.02, body: int = 200
+):
+    """A camera whose answer takes `body * drip` seconds to arrive."""
+    return ThreadingHTTPServer(
+        (host, port), type("_BoundDrip", (_DripHandler,), {"drip": drip, "body": body})
+    )
+
+
+__all__ = [
+    "JPEG_END",
+    "JPEG_HEADER",
+    "FakeCamera",
+    "camera_server",
+    "drip_camera_server",
+    "jpeg",
+]

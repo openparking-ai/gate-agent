@@ -360,7 +360,11 @@ def test_the_capture_example_configuration_is_refused_as_shipped_and_says_why():
 
     # And with that one question answered, the rest of the file parses -- so the
     # refusal above is about `max_bytes` and not about a broken example.
-    raw["capture"]["max_bytes"] = 1 << 20
+    # Above the published `max_snapshot_bytes` default, because the ceiling on
+    # one read is refused unless it is below the cap on the whole store -- so a
+    # site whose store is smaller than that ceiling answers both questions, and
+    # this one is answering only the one the example asks.
+    raw["capture"]["max_bytes"] = 64 << 20
     auth = Path(raw["cameras"]["front"]["auth_file"])
     assert not auth.exists(), "this test would be reading a real credential file"
     raw["cameras"]["front"]["auth_file"] = "front.auth"
