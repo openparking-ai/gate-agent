@@ -205,6 +205,16 @@ BREAKS = [
         "to": "        if False:",
     },
     {
+        "name": "an_orphaned_operator_leg",
+        "why": "a driver hangs up and the person is left live, to be bridged into the next case",
+        "file": "src/gate_agent/agent.py",
+        "from": "                if session.operator_call:\n"
+                "                    self.ua.hangup(session.operator_call)\n"
+                "                    session.operator_call = None\n"
+                "                self._end(session)",
+        "to": "                self._end(session)",
+    },
+    {
         "name": "keyed_takes_anything",
         "why": "the one field a caller fills stops being digits, so a plate can go in it",
         "file": "src/gate_agent/contract.py",

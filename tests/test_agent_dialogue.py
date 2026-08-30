@@ -498,3 +498,26 @@ def test_without_a_switch_every_declared_language_keeps_playing(tmp_path, lane):
     )
     spoken = [name for name in files(ua, "driver") if "authorisation.do_not_open" in name]
     assert {name.split("/")[0] for name in spoken} == {"en", "es"}, spoken
+
+
+def test_a_driver_who_hangs_up_takes_the_operators_leg_with_them(tmp_path, lane):
+    """The leg left live would be bridged into the NEXT case.
+
+    This user agent's bridge is site-wide, so a person still holding for a
+    driver who has gone would be conferenced into a stranger's call the moment
+    the next one is answered. It is the same reason `concurrent_cases` is 1,
+    seen from the other end.
+    """
+    _served, url = lane
+    agent, ua, clock, operator = brief_and_bridge(tmp_path, url)
+    ua.closed("call-1")
+    agent.poll()
+    assert ("hangup", operator) in ua.commands, ua.commands
+    assert agent.session is None
+    assert kinds(agent)[-1] == AgentEventKind.CALL_ENDED.value
+
+    # THE CONTROL: the next call is answered on a user agent with nothing left
+    # over -- and it is answered, so the session really did end.
+    ua.incoming(INTERCOM, call_id="call-9")
+    agent.poll()
+    assert ("answer", "call-9") in ua.commands
