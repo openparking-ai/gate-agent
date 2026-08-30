@@ -124,9 +124,23 @@ BREAKS = [
         "name": "the_order_is_ours_not_the_sites",
         "why": "the driver hears the languages in this package's order, not the site's",
         "file": "src/gate_agent/agent.py",
-        "from": "            (self.config.operator_language,) if operator else self.config.driver_languages",
+        "from": "            (self.config.operator_language,) if operator else session.languages",
         "to": "            (self.config.operator_language,) if operator "
-              "else tuple(sorted(self.config.driver_languages))",
+              "else tuple(sorted(session.languages))",
+    },
+    {
+        "name": "a_language_switch_is_ignored",
+        "why": "a driver who answered in one language goes on hearing every other one",
+        "file": "src/gate_agent/agent.py",
+        "from": "        session.languages = (language,)",
+        "to": "        return",
+    },
+    {
+        "name": "an_undeclared_language_is_switched_to",
+        "why": "a call switches to a language this package has no words for",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if language not in self.config.driver_languages:",
+        "to": "        if False:",
     },
     {
         "name": "a_disabled_authorisation_is_accepted",
@@ -161,10 +175,10 @@ BREAKS = [
         "name": "the_no_answer_timer_never_fires",
         "why": "the person does not pick up and the driver is never told",
         "file": "src/gate_agent/agent.py",
-        "from": "        if session.state is State.CALLING_HUMAN and session.deadline is not None:\n"
-                "            if now >= session.deadline:",
-        "to": "        if session.state is State.CALLING_HUMAN and session.deadline is not None:\n"
-              "            if False:",
+        "from": "        if session.state is State.CALLING_HUMAN and session.deadline is not"
+                " None:\n            if now >= session.deadline:",
+        "to": "        if session.state is State.CALLING_HUMAN and session.deadline is not"
+              " None:\n            if False:",
     },
     {
         "name": "the_nothing_usable_timer_never_fires",
@@ -194,7 +208,8 @@ BREAKS = [
         "name": "keyed_takes_anything",
         "why": "the one field a caller fills stops being digits, so a plate can go in it",
         "file": "src/gate_agent/contract.py",
-        "from": "        if self.keyed is not None and (not self.keyed or not self.keyed.isdigit()):",
+        "from": "        if self.keyed is not None and (not self.keyed or not "
+                "self.keyed.isdigit()):",
         "to": "        if False:",
     },
     {

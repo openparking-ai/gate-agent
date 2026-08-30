@@ -119,6 +119,17 @@ class Session:
     keyed: str = ""
     prompts_left: int = REPROMPTS
     deadline: float | None = None
+    #: WHICH LANGUAGES this call is being spoken in, and it is per call.
+    #:
+    #: It starts as the site's declared order -- the driver has no keypad and
+    #: nothing has told us otherwise -- and one function narrows it to a single
+    #: language for the rest of the call. Gokhan, 2026-08-30: *"if the customer
+    #: starts speaking in Spanish, no English, it should start Spanish from
+    #: there."* WHAT DETECTS THAT IS NOT HERE: hearing a language is ASR, which
+    #: is a later step gated on a measurement of narrowband SIP audio that
+    #: nobody has made. What is here is the state it will set, so that step adds
+    #: a detector and nothing else.
+    languages: tuple = ()
     #: The calls whose MEDIA is up. A file played into a call that has been
     #: answered but whose audio stream does not exist yet is refused by the user
     #: agent, and the driver hears the first sentence of their case not at all.
@@ -313,6 +324,7 @@ class Agent:
                     driver_call=event.call_id,
                     started=self._clock(),
                     state=State.CLOSING,
+                    languages=self.config.driver_languages,
                 )
                 self.session = session
                 self._say(session, UaLeg.DRIVER, "driver.undeclared_intercom")
@@ -329,7 +341,10 @@ class Agent:
             return
         self.ua.answer(event.call_id)
         session = Session(
-            intercom=intercom, driver_call=event.call_id, started=self._clock()
+            intercom=intercom,
+            driver_call=event.call_id,
+            started=self._clock(),
+            languages=self.config.driver_languages,
         )
         self.session = session
         self._code(
@@ -613,7 +628,7 @@ class Agent:
         skipped would be somebody at a barrier who was told nothing.
         """
         languages = (
-            (self.config.operator_language,) if operator else self.config.driver_languages
+            (self.config.operator_language,) if operator else session.languages
         )
         for language in languages:
             path = self.config.audio_directory / audio_name(line, language)
@@ -622,6 +637,36 @@ class Agent:
                 log.error("no audio for %s in %s", line, language)
                 continue
             session.speech[leg].append(path)
+
+    def set_language(self, call_id: str, language: str) -> None:
+        """Speak the rest of THIS call in one language, from the next sentence on.
+
+        The one function the language switch goes through, and the reason it
+        exists now rather than with the thing that will call it: a driver who
+        answers in Spanish should not go on hearing English first for the rest
+        of the call, and the detector that notices is a later step. Everything
+        that step has to add is the noticing.
+
+        **A language this site did not declare is REFUSED**, not accepted and
+        then found to have no audio: this package would have no words for it,
+        and a switch that silently did nothing is a driver still being spoken to
+        in a language they said they do not have.
+
+        What is already queued is not re-cut. A sentence that has begun playing
+        finishes; the switch applies from the next one, which is what "from
+        there" means on a call somebody is listening to.
+        """
+        session = self.session
+        if session is None or session.driver_call != call_id:
+            raise ValueError(f"no call {call_id!r} is in progress")
+        if language not in self.config.driver_languages:
+            raise ValueError(
+                f"{language!r} is not a language this site declared "
+                f"({', '.join(self.config.driver_languages)}). This package has no words for "
+                "it, and a switch that silently did nothing would leave a driver being "
+                "spoken to in a language they have just said they do not have."
+            )
+        session.languages = (language,)
 
     def _play(self, session: Session, leg: UaLeg, path: Path) -> None:
         if path not in self._durations:

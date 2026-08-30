@@ -1461,11 +1461,22 @@ default**, and startup refuses either if it is empty or names a language this
 build has no lines for.
 
 **The driver has no keypad**, so every sentence they hear plays in EVERY declared
-driver language, in the declared ORDER, one after the other. A driver-chosen
-language waits for a channel that can carry the choice — the display, and then
-voice — and is not invented here. The person on the phone hears the operator
-language only; they are staff, and a menu played twice is a menu somebody keys
-over.
+driver language, in the declared ORDER, one after the other. The person on the
+phone hears the operator language only; they are staff, and a menu played twice
+is a menu somebody keys over.
+
+**The language is PER CALL and can narrow mid-call.** Gokhan's spec: *"if the
+customer starts speaking in Spanish, no English, it should start Spanish from
+there."* One function does it — `Agent.set_language(call, language)` — and from
+the next sentence on, that call is spoken in that language and no other. A
+language the site did not declare is **refused**, not accepted and then found to
+have no audio: a switch that silently did nothing would leave a driver being
+spoken to in a language they have just said they do not have.
+
+**What NOTICES they switched is not in this version.** Hearing a language is
+automatic speech recognition, which is a later step and is gated on a
+measurement of narrowband SIP audio nobody has made. What is here is the state
+that step will set, so that step adds a detector and nothing else.
 
 **Every string is a value in the repository, per language, tested**, and the
 audio file for it is a file the package installs whose name derives from the
