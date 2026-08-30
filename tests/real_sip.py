@@ -247,6 +247,13 @@ class Instance:
                     "call_max_calls          4",
                     f"audio_player            {audio_player}",
                     f"audio_source            {audio_source}",
+                    # The RING TONE has its own device, and it is named here
+                    # because leaving it unset is not harmless: baresip falls
+                    # back to the first registered player with an empty device
+                    # name, which is `aufile` writing `speaker.wav` INTO THE
+                    # WORKING DIRECTORY. It reached a commit on this branch
+                    # before anybody noticed.
+                    f"audio_alert             aufile,{self.root / 'alert.wav'}",
                     "ausrc_format            s16",
                     "auplay_format           s16",
                     "auenc_format            s16",
