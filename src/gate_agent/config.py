@@ -38,7 +38,9 @@ from urllib.parse import urlsplit
 
 from .camera import DEFAULT_MAX_SNAPSHOT_BYTES, DEFAULT_SNAPSHOT_TIMEOUT
 from .client import DEFAULT_TIMEOUT
-from .contract import SinkKind, TargetKind
+from .contract import Authorisation, SinkKind, TargetKind
+from .lines import DRIVER_LINES, OPERATOR_LINES, SHIPPED_LANGUAGES, audio_name, missing_text
+from .ua_baresip import DEFAULT_UA_TIMEOUT, TESTED_VERSIONS
 
 #: The published default for how often a target is polled.
 #:
@@ -821,6 +823,15 @@ def _renotify(raw: dict) -> float | None:
 
 
 __all__ = [
+    "AgentConfig",
+    "DEFAULT_HOLD_REPROMPT_SECONDS",
+    "DEFAULT_NO_ANSWER_SECONDS",
+    "DEFAULT_NOTHING_USABLE_SECONDS",
+    "DEFAULT_UA_HOST",
+    "DEFAULT_UA_PORT",
+    "Intercom",
+    "STANDALONE",
+    "UserAgentSettings",
     "CAMERA_ID",
     "CREDENTIAL_VALUE_KEYS",
     "DEFAULT_CAPTURE_INTERVAL_SECONDS",
@@ -842,3 +853,465 @@ __all__ = [
     "Target",
     "WebhookSinkConfig",
 ]
+
+
+# ---------------------------------------------------------------------------
+# The agent
+# ---------------------------------------------------------------------------
+
+#: The word an intercom uses to say it has NO LANE. A garage with an intercom
+#: and no gate is a customer of this process, and every call there is a human
+#: case from the first second -- so standalone is spelt out loud in the file
+#: rather than being what a missing key happens to mean. `[lanes.none]` is
+#: refused by name for the same reason: a lane called `none` would make one
+#: spelling mean two things at the moment somebody is reading a configuration
+#: to work out why a barrier did not open.
+STANDALONE = "none"
+
+#: The published default for where the user agent's control socket is. LOOPBACK,
+#: and it is a default rather than a declaration because the safe value is
+#: knowable here: that socket can place a call, bridge two of them, and play
+#: audio at whoever is on the line. Off loopback, anything that can reach the
+#: port can do all three.
+DEFAULT_UA_HOST = "127.0.0.1"
+DEFAULT_UA_PORT = 4444
+
+#: The published default for how long the human has to answer before the driver
+#: is told nobody did.
+#:
+#: A PER-SITE SETTING AND AN ASSUMPTION. Nothing here measures how long a person
+#: takes to reach a phone. It is drawn long enough for somebody to cross a room
+#: and short enough that a driver at a barrier is not left listening to silence
+#: while a queue builds behind them.
+DEFAULT_NO_ANSWER_SECONDS = 30.0
+
+#: The published default for how long the agent waits for a digit it can use
+#: before it gives up and tells the driver so. Same kind of number, same absence
+#: of a measurement behind it.
+DEFAULT_NOTHING_USABLE_SECONDS = 20.0
+
+#: The published default for how often a driver on HOLD is told they are still
+#: on hold. Silence on a door station is indistinguishable from a dead intercom.
+DEFAULT_HOLD_REPROMPT_SECONDS = 45.0
+
+
+@dataclass(frozen=True, slots=True)
+class Intercom:
+    """One declared intercom: a SIP identity, a lane, and a name to say.
+
+    `lane` is `None` for a standalone intercom. `name_audio` is the file the
+    OPERATOR hears first, and it is the site's: no sentence in this repository
+    can say the name of a door, and a human dispatched to a garage without being
+    told which barrier has been told half of what they need.
+    """
+
+    sip_uri: str
+    lane: str | None
+    name_audio: Path
+
+
+@dataclass(frozen=True, slots=True)
+class UserAgentSettings:
+    """Where the external user agent is, and which accounts hold which leg."""
+
+    kind: str
+    host: str
+    port: int
+    driver_aor: str
+    operator_aor: str
+    timeout_seconds: float = DEFAULT_UA_TIMEOUT
+
+
+@dataclass(frozen=True, slots=True)
+class AgentConfig:
+    """What the agent was told to do, after every refusal it makes.
+
+    Almost nothing here has a default, and that is the point. A defaulted
+    intercom answers a door nobody declared; a defaulted lane tells a driver
+    about a barrier that is not theirs; a defaulted language plays a driver a
+    sentence in a language nobody at that site speaks; a defaulted set of
+    authorisations decides, on a site's behalf, what a person on a phone at
+    three in the morning is allowed to say.
+    """
+
+    agent_id: str
+    site_id: str
+    intercoms: tuple[Intercom, ...]
+    lanes: tuple[Target, ...]
+    user_agent: UserAgentSettings
+    driver_languages: tuple[str, ...]
+    operator_language: str
+    authorisations: frozenset[Authorisation]
+    human_sip_uri: str
+    audio_directory: Path
+    transfer_sip_uri: str | None = None
+    no_answer_seconds: float = DEFAULT_NO_ANSWER_SECONDS
+    nothing_usable_seconds: float = DEFAULT_NOTHING_USABLE_SECONDS
+    hold_reprompt_seconds: float = DEFAULT_HOLD_REPROMPT_SECONDS
+    event_window_depth: int = DEFAULT_EVENT_WINDOW_DEPTH
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> AgentConfig:
+        try:
+            with open(path, "rb") as handle:
+                raw = tomllib.load(handle)
+        except OSError as exc:
+            raise ConfigError(f"could not read {path}: {exc}") from exc
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(f"{path} is not valid TOML: {exc}") from exc
+        return cls.from_dict(raw, relative_to=Path(path).resolve().parent)
+
+    @classmethod
+    def from_dict(cls, raw: dict, relative_to: Path | None = None) -> AgentConfig:
+        _refuse_credential_values(raw, "")
+        agent = _table(raw, "agent")
+        for key in ("id", "site_id"):
+            if key not in agent:
+                raise ConfigError(
+                    f"[agent] does not declare {key}. An agent with no identity cannot be "
+                    "told apart from another site's on its own surface or in a message."
+                )
+        audio_directory = _audio_directory(agent.get("audio_directory"), relative_to)
+        lanes = _agent_lanes(_table(raw, "lanes", required=False), relative_to)
+        intercoms = _intercoms(_table(raw, "intercoms", required=False), lanes, relative_to)
+        driver_languages, operator_language = _languages(_table(raw, "languages"))
+        _refuse_missing_lines(driver_languages, operator_language, audio_directory)
+        escalation = _table(raw, "escalation")
+        human = escalation.get("human_sip_uri")
+        if not isinstance(human, str) or not human.strip():
+            raise ConfigError(
+                "[escalation] does not declare human_sip_uri. There is no default: every case "
+                "but one in this version ends with a person, and an agent with nobody to call "
+                "would play a driver a sentence about connecting them and then stop."
+            )
+        _refuse_sip_credential(human, "[escalation].human_sip_uri")
+        transfer = escalation.get("transfer_sip_uri")
+        if transfer is not None:
+            if not isinstance(transfer, str) or not transfer.strip():
+                raise ConfigError("[escalation].transfer_sip_uri must be a SIP URI")
+            _refuse_sip_credential(transfer, "[escalation].transfer_sip_uri")
+        authorisations = _authorisations(_table(raw, "authorisations"), transfer)
+        return cls(
+            agent_id=str(agent["id"]),
+            site_id=str(agent["site_id"]),
+            intercoms=intercoms,
+            lanes=lanes,
+            user_agent=_user_agent(_table(raw, "user_agent")),
+            driver_languages=driver_languages,
+            operator_language=operator_language,
+            authorisations=authorisations,
+            human_sip_uri=human,
+            audio_directory=audio_directory,
+            transfer_sip_uri=transfer.strip() if isinstance(transfer, str) else None,
+            no_answer_seconds=_positive(
+                escalation.get("no_answer_seconds"),
+                "[escalation].no_answer_seconds",
+                DEFAULT_NO_ANSWER_SECONDS,
+            ),
+            nothing_usable_seconds=_positive(
+                escalation.get("nothing_usable_seconds"),
+                "[escalation].nothing_usable_seconds",
+                DEFAULT_NOTHING_USABLE_SECONDS,
+            ),
+            hold_reprompt_seconds=_positive(
+                escalation.get("hold_reprompt_seconds"),
+                "[escalation].hold_reprompt_seconds",
+                DEFAULT_HOLD_REPROMPT_SECONDS,
+            ),
+            event_window_depth=_positive_int(
+                agent.get("event_window_depth"),
+                "[agent].event_window_depth",
+                DEFAULT_EVENT_WINDOW_DEPTH,
+            ),
+        )
+
+    def lane(self, name: str) -> Target | None:
+        for target in self.lanes:
+            if target.name == name:
+                return target
+        return None
+
+
+def _audio_directory(value, relative_to: Path | None) -> Path:
+    """Where the agent's audio is. Defaults to what shipped with the package.
+
+    A default IS safe here and is the only one in this table, because the
+    default is a directory this package installed itself and whose contents it
+    can check line by line. A site that has recorded its own voice points this
+    somewhere else and gets the same startup refusal if a line is missing.
+    """
+    if value is None:
+        return Path(__file__).resolve().parent / "audio"
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError("[agent].audio_directory must be a path")
+    return _resolve(value, relative_to)
+
+
+def _agent_lanes(raw: dict, relative_to: Path | None) -> tuple[Target, ...]:
+    """`[lanes.<name>]`, one per lane this agent answers an intercom for."""
+    lanes = []
+    for name in sorted(raw):
+        if name == STANDALONE:
+            raise ConfigError(
+                f"[lanes.{STANDALONE}] is refused: `{STANDALONE}` is the word an intercom "
+                "uses to say it has no lane, and a lane with that name would make one "
+                "spelling mean two things in the file somebody reads to find out why a "
+                "barrier did not open."
+            )
+        table = raw[name]
+        if not isinstance(table, dict):
+            raise ConfigError(f"[lanes.{name}] must be a table")
+        url = table.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise ConfigError(f"[lanes.{name}] does not declare a url")
+        _refuse_userinfo(url, f"[lanes.{name}].url")
+        token = None
+        if "token_file" in table:
+            token = _read_token(table["token_file"], f"[lanes.{name}].token_file", relative_to)
+        lanes.append(
+            Target(
+                name=name,
+                kind=TargetKind.LANE,
+                url=url.rstrip("/"),
+                poll_seconds=DEFAULT_POLL_SECONDS,
+                token=token,
+                timeout_seconds=_positive(
+                    table.get("timeout_seconds"),
+                    f"[lanes.{name}].timeout_seconds",
+                    DEFAULT_TIMEOUT_SECONDS,
+                ),
+            )
+        )
+    return tuple(lanes)
+
+
+def _intercoms(raw: dict, lanes: tuple[Target, ...], relative_to: Path | None):
+    """`[intercoms.<sip-uri>]`, and the four refusals an intercom can earn.
+
+    The mapping is the whole of A2: a call arrives with a SIP identity, and that
+    identity is the only thing that says which barrier it is about. There is no
+    default and no guess -- an agent that guessed which lane a call belonged to
+    would be guessing which barrier a person is standing at.
+    """
+    if not raw:
+        raise ConfigError(
+            "no intercom is declared. An agent with no [intercoms.<sip-uri>] answers every "
+            "call with `this intercom is not configured` while publishing a working "
+            "surface, which is the shape of every quiet failure this package exists to "
+            "prevent."
+        )
+    names = {lane.name for lane in lanes}
+    intercoms = []
+    claimed: set[str] = set()
+    for sip_uri in sorted(raw):
+        table = raw[sip_uri]
+        if not isinstance(table, dict):
+            raise ConfigError(f"[intercoms.{sip_uri!r}] must be a table")
+        _refuse_sip_credential(sip_uri, f"[intercoms.{sip_uri!r}]")
+        if "lane" not in table:
+            raise ConfigError(
+                f"[intercoms.{sip_uri!r}] does not declare lane. There is no default: an "
+                f"agent that guessed would be guessing which barrier somebody is standing "
+                f"at. Write the name of a [lanes.<name>], or `lane = \"{STANDALONE}\"` for "
+                "an intercom that has no lane."
+            )
+        lane = table["lane"]
+        if not isinstance(lane, str) or not lane.strip():
+            raise ConfigError(f"[intercoms.{sip_uri!r}].lane must be a lane name or `none`")
+        if lane != STANDALONE and lane not in names:
+            raise ConfigError(
+                f"[intercoms.{sip_uri!r}].lane is {lane!r} and there is no [lanes.{lane}]. "
+                "An intercom pointed at a lane that is not declared has no state to read, "
+                "and every call at it would be answered as though the lane were down."
+            )
+        audio = table.get("name_audio")
+        if not isinstance(audio, str) or not audio.strip():
+            raise ConfigError(
+                f"[intercoms.{sip_uri!r}] does not declare name_audio. It is the recording "
+                "the OPERATOR hears first, saying where the call is from. There is no "
+                "default and there cannot be one: no sentence in this package can say the "
+                "name of a door, and a person told a case without being told which barrier "
+                "has been told half of what they need."
+            )
+        path = _resolve(audio, relative_to)
+        if not path.is_file():
+            raise ConfigError(
+                f"[intercoms.{sip_uri!r}].name_audio is {path}, which is not a file. It is "
+                "played to a person on every call from this intercom; a missing one is "
+                "silence at the moment they are being told where they are needed."
+            )
+        if lane != STANDALONE:
+            claimed.add(lane)
+        intercoms.append(Intercom(sip_uri=sip_uri, lane=None if lane == STANDALONE else lane,
+                                  name_audio=path))
+    orphans = sorted(names - claimed)
+    if orphans:
+        raise ConfigError(
+            f"[lanes.{orphans[0]}] has no intercom declared for it"
+            + (f" (also: {', '.join(orphans[1:])})" if len(orphans) > 1 else "")
+            + ". A lane this agent reads and never answers a call about is a lane whose "
+            "state is polled for nobody -- and it is far more likely that an intercom's URI "
+            "was mistyped, in which case every call at that door is refused."
+        )
+    return tuple(intercoms)
+
+
+def _languages(raw: dict) -> tuple[tuple[str, ...], str]:
+    """`[languages] driver` and `operator`. DECLARED, both, no default."""
+    driver = raw.get("driver")
+    if isinstance(driver, str):
+        driver = [driver]
+    if not isinstance(driver, list) or not driver or not all(
+        isinstance(one, str) and one.strip() for one in driver
+    ):
+        raise ConfigError(
+            "[languages] does not declare driver. There is no default: it is the ORDER a "
+            "driver hears every sentence in, and a default would pick a language for "
+            "somebody at a barrier on a site nobody asked."
+        )
+    if len(set(driver)) != len(driver):
+        raise ConfigError("[languages].driver names a language twice")
+    operator = raw.get("operator")
+    if not isinstance(operator, str) or not operator.strip():
+        raise ConfigError(
+            "[languages] does not declare operator. It is the one language the person on "
+            "the phone hears, and this package will not choose it for a site's staff."
+        )
+    unknown = sorted({*driver, operator} - set(SHIPPED_LANGUAGES))
+    if unknown:
+        raise ConfigError(
+            f"[languages] names {', '.join(unknown)}, which this build has no lines for. "
+            f"It ships {', '.join(SHIPPED_LANGUAGES)}. A language declared with nothing "
+            "behind it is a silence with a configuration key in front of it."
+        )
+    return tuple(driver), operator
+
+
+def _refuse_missing_lines(driver_languages, operator_language, directory: Path) -> None:
+    """Every line, in every declared language, with the audio that says it.
+
+    Both halves, at startup, together: a line with no words and a line with no
+    recording are the same fact to a driver, and it is silence at a barrier.
+    """
+    missing = missing_text(driver_languages, operator_language)
+    if missing:
+        raise ConfigError(
+            f"no words for {len(missing)} line(s) in a declared language: "
+            f"{', '.join(missing[:8])}{' …' if len(missing) > 8 else ''}"
+        )
+    absent = []
+    for line in DRIVER_LINES:
+        for language in driver_languages:
+            if not (directory / audio_name(line, language)).is_file():
+                absent.append(audio_name(line, language))
+    for line in OPERATOR_LINES:
+        if not (directory / audio_name(line, operator_language)).is_file():
+            absent.append(audio_name(line, operator_language))
+    if absent:
+        raise ConfigError(
+            f"no audio for {len(absent)} line(s) under {directory}: "
+            f"{', '.join(absent[:8])}{' …' if len(absent) > 8 else ''}. A line with no file "
+            "is not skipped and not played in another language: it would be a driver at a "
+            "barrier hearing silence, which tells them nothing and looks like a dead "
+            "intercom."
+        )
+
+
+def _authorisations(raw: dict, transfer_sip_uri) -> frozenset[Authorisation]:
+    """`[authorisations]`, each a boolean, no default, at least one true."""
+    known = {value.value for value in Authorisation}
+    unknown = sorted(set(raw) - known)
+    if unknown:
+        raise ConfigError(
+            f"[authorisations] declares {', '.join(unknown)}, which is not an authorisation "
+            f"this version has. The set is closed: {', '.join(sorted(known))}."
+        )
+    enabled = set()
+    for key, value in raw.items():
+        if not isinstance(value, bool):
+            raise ConfigError(
+                f"[authorisations].{key} must be true or false, got {value!r}. It decides "
+                "what a person on a phone is offered; a string that happens to be truthy is "
+                "not a decision anybody made."
+            )
+        if value:
+            enabled.add(Authorisation(key))
+    if not enabled:
+        raise ConfigError(
+            "[authorisations] enables nothing. A site that enables none has called a human "
+            "who can authorise nothing, which is a phone ringing at three in the morning "
+            "for a conversation the system will not record."
+        )
+    if Authorisation.TRANSFER in enabled and not transfer_sip_uri:
+        raise ConfigError(
+            "[authorisations].transfer is enabled and [escalation] declares no "
+            "transfer_sip_uri. The option would be offered to a person who could key it and "
+            "reach nobody. Declare the URI, or turn the authorisation off -- silently not "
+            "offering an option a site switched on is the quiet half of the same failure."
+        )
+    return frozenset(enabled)
+
+
+def _refuse_sip_credential(uri: str, where: str) -> None:
+    """A SIP URI may carry a password too, and `urlsplit` does not see it.
+
+    `sip:duty:S3CRET@10.0.0.5` has no `//`, so urllib parses the whole of it as
+    a path and reports no userinfo at all -- which is how the check that catches
+    `https://ops:S3CRET@host` walks straight past the same credential in the one
+    field this configuration is mostly made of. Split by SHAPE: whatever is
+    before the `@` is the user part, and a `:` in it is a password.
+    """
+    _refuse_userinfo(uri, where)
+    text = uri.strip()
+    if "@" not in text:
+        return
+    user = text.split("@", 1)[0]
+    _scheme, _, rest = user.partition(":")
+    if ":" in rest:
+        raise ConfigError(
+            f"{where} has userinfo in URL: a SIP URI with a password in it is that password "
+            "in this file, in every backup of it, and on the read surface that republishes "
+            "which intercoms this site has. Credentials come from files."
+        )
+
+
+def _user_agent(raw: dict) -> UserAgentSettings:
+    """`[user_agent]`. The two accounts are DECLARED; the socket has defaults."""
+    kind = raw.get("kind", "baresip")
+    if kind != "baresip":
+        raise ConfigError(
+            f"[user_agent].kind is {kind!r}. This build drives baresip "
+            f"{', '.join(TESTED_VERSIONS)} and nothing else, and it checks the version it "
+            "finds rather than trusting this key."
+        )
+    aors = {}
+    for key in ("driver_aor", "operator_aor"):
+        value = raw.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"[user_agent] does not declare {key}. The user agent identifies the call to "
+                "play audio into by the local account, so the two legs are two accounts -- "
+                "and with one, the menu meant for the person on the phone plays to the "
+                "driver at the barrier instead."
+            )
+        _refuse_sip_credential(value, f"[user_agent].{key}")
+        aors[key] = value.strip()
+    if aors["driver_aor"] == aors["operator_aor"]:
+        raise ConfigError(
+            "[user_agent].driver_aor and operator_aor are the same address. Two calls on one "
+            "account cannot be told apart by the user agent, so every private message would "
+            "be played to whichever leg it happened to pick."
+        )
+    port = raw.get("port", DEFAULT_UA_PORT)
+    if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
+        raise ConfigError(f"[user_agent].port must be a port number, got {port!r}")
+    return UserAgentSettings(
+        kind=kind,
+        host=str(raw.get("host", DEFAULT_UA_HOST)),
+        port=port,
+        driver_aor=aors["driver_aor"],
+        operator_aor=aors["operator_aor"],
+        timeout_seconds=_positive(
+            raw.get("timeout_seconds"), "[user_agent].timeout_seconds", DEFAULT_UA_TIMEOUT
+        ),
+    )

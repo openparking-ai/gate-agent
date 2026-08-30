@@ -1,0 +1,112 @@
+# The gate agent. Answers the intercom, says what happened, calls a person.
+#
+# IT OPENS NOTHING. Every authorisation below is a RECORD of what a person said.
+# There is no vend route in this package and none on the lane contract this build
+# reads, so `open_now` ends in an event, a message to the driver, and one fixed
+# sentence to the person who keyed it saying this version cannot move a barrier.
+#
+# Almost nothing here has a default, and the ones that do are published in
+# `docs/CONTRACT.md`. A defaulted intercom answers a door nobody declared; a
+# defaulted lane tells a driver about a barrier that is not theirs; a defaulted
+# language plays somebody a sentence in a language nobody at this site speaks.
+
+[agent]
+id = "agent-1"
+site_id = "site-1"
+# Optional. Defaults to the audio that shipped with the package, which is the
+# only default in this file that is safe: it is a directory this package
+# installed and whose every file it checks at startup. Point it somewhere else
+# if this site has recorded its own voice; a missing line is refused either way.
+# audio_directory = "/opt/openparking/audio"
+# event_window_depth = 256
+
+# --- the external SIP user agent -------------------------------------------
+# An INSTALL REQUIREMENT, not a dependency of this package: baresip runs as its
+# own process and this agent drives it over its `ctrl_tcp` control socket. The
+# version is checked at startup and a version this build was not tested against
+# is refused.
+#
+# The baresip side needs three things that are easy to get wrong and are checked
+# nowhere but in baresip's own configuration file:
+#   ctrl_tcp_listen        127.0.0.1:4444    # loopback. That socket can place a
+#                                            # call and bridge two of them.
+#   call_hold_other_calls  no                # or calling the person puts the
+#                                            # driver on hold behind our back
+#   audio_source / audio_player              # NOT `aubridge`: it loops the
+#                                            # player into the source, which
+#                                            # bridges every call to every other
+#                                            # whether this agent asked or not
+[user_agent]
+kind = "baresip"
+host = "127.0.0.1"
+port = 4444
+# TWO accounts, one per leg. baresip identifies the stream to play into by the
+# local account, so with one account the menu meant for the person on the phone
+# plays to the driver at the barrier instead.
+driver_aor = "sip:agent@10.0.0.20"
+operator_aor = "sip:agent-operator@10.0.0.20"
+# timeout_seconds = 5.0
+
+# --- which lane a call belongs to ------------------------------------------
+# The SIP identity of the caller is the mapping and there is no default. An
+# agent that guessed would be guessing which barrier somebody is standing at.
+#
+# `name_audio` is the recording the PERSON hears first, saying where the call is
+# from. It is the site's file: no sentence in this package can say the name of a
+# door, and somebody told a case without being told which barrier has been told
+# half of what they need.
+[intercoms."sip:door1@10.0.0.9"]
+lane = "entry"
+name_audio = "/opt/openparking/audio/site/door1.wav"
+
+# A standalone intercom: no lane, and every call is a human case from the first
+# second. NOT a degraded mode -- a garage with an intercom and no gate is the
+# whole product for that site.
+[intercoms."sip:lobby@10.0.0.11"]
+lane = "none"
+name_audio = "/opt/openparking/audio/site/lobby.wav"
+
+# --- the lanes it reads -----------------------------------------------------
+# Read GET-only, through the lane contract. Every declared lane must have an
+# intercom pointing at it: a lane nobody ever answers a call about is far more
+# likely to be a mistyped URI above, in which case every call at that door is
+# refused.
+[lanes.entry]
+url = "http://127.0.0.1:8090"
+# token_file = "/etc/openparking/lane.token"
+# timeout_seconds = 10.0
+
+# --- languages --------------------------------------------------------------
+# DECLARED, both. `driver` is the ORDER a driver hears every sentence in: they
+# have no keypad and no way to choose, so each sentence plays in every language
+# here, one after the other. `operator` is the one language the person on the
+# phone hears.
+[languages]
+driver = ["en", "es"]
+operator = "en"
+
+# --- what the person on the phone may authorise -----------------------------
+# Each a boolean, no default, at least one true. A site that enables none has
+# called somebody who can authorise nothing.
+#
+# The DIGITS are fixed and published: 1 open now, 2 open and flag, 3 do not
+# open, 4 hold, 5 transfer, 6 call back. A site enables a subset; it does not
+# renumber the set, because the person keying it is often the same person across
+# several garages at three in the morning.
+[authorisations]
+open_now = true
+open_and_flag = true
+do_not_open = true
+hold = true
+transfer = false
+call_back = true
+
+# --- the person -------------------------------------------------------------
+[escalation]
+human_sip_uri = "sip:duty@10.0.0.5"
+# Required if `transfer` above is true, and startup refuses the pair otherwise:
+# the option would be offered to somebody who could key it and reach nobody.
+# transfer_sip_uri = "sip:manager@10.0.0.5"
+# no_answer_seconds = 30.0
+# nothing_usable_seconds = 20.0
+# hold_reprompt_seconds = 45.0

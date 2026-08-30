@@ -1,0 +1,416 @@
+"""The adapter for baresip, and the ONLY module here that opens a socket to it.
+
+baresip's `ctrl_tcp` module is a JSON control channel: netstring-framed messages
+in both directions, commands with an optional token echoed on the response, and
+an asynchronous stream of events. This module speaks that and translates it into
+the six verbs and six event kinds of `ua.py`. Nothing above this line knows the
+word "baresip".
+
+**Which baresip, and why it is the one.** Of the user agents that exist as a
+process and can be driven over a local socket, this is the one that does all six
+things the job needs -- register, answer, play a file into ONE call, receive DTMF
+tagged with the call it arrived on, hold two calls at once and BRIDGE them on
+command, and be driven over a socket that can be bound to loopback. Its licence
+is BSD-3-Clause, which is the least demanding of any candidate. The findings on
+the others are in the receipt for this round.
+
+**Three things about it are load-bearing and are configuration, not code**, so
+they are checked at startup and named in `docs/CONTRACT.md`:
+
+  * `call_hold_other_calls no` -- baresip's default is to hold every other call
+    when a new one is established, and with it on, calling the operator puts the
+    driver on hold under this process rather than because it asked;
+  * the audio device must not be `aubridge` -- that driver loops the player back
+    into the source, which bridges every call to every other one whether the
+    agent asked for it or not. It was measured: with `aubridge`, the operator
+    heard the driver before `conference` was ever sent;
+  * TWO accounts, one per leg. baresip identifies the stream to play into by the
+    RTP CNAME, which is the local account's address of record -- so two calls on
+    ONE account cannot be told apart, and a menu meant for the operator plays to
+    the driver. Two accounts is also how baresip's own back-to-back module does
+    it.
+
+**It cannot reach a lane.** This module holds no target, no lane URL and no
+credential: it is given a host and a port that are the UA's, and
+`tests/test_no_opening_authority.py` requires that it import neither the target
+client nor the `Target` type -- the same rule, and the same sweep, that keeps the
+webhook sink from being able to reach one.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import socket
+import threading
+from collections import deque
+
+from .ua import UaEvent, UaEventKind, UaLeg, UaRefused, UaUnreachable, UaUnsupportedVersion
+
+log = logging.getLogger(__name__)
+
+#: The versions of baresip this build has been TESTED against, and the only ones
+#: it will start on. Not a floor and not a range: a range would be a claim about
+#: versions nobody ran, and the whole reason this check exists is that a control
+#: vocabulary is not a stable interface the way a contract is.
+TESTED_VERSIONS: tuple[str, ...] = ("4.11.0",)
+
+#: What baresip calls the things this package's seam names. A type outside this
+#: map is DROPPED rather than passed through: an event this build cannot place
+#: is not an event it can act on, and inventing a kind for it would put a
+#: guess into the agent's record of what happened.
+EVENT_KINDS: dict[str, UaEventKind] = {
+    "CALL_INCOMING": UaEventKind.CALL_INCOMING,
+    "CALL_ESTABLISHED": UaEventKind.CALL_ESTABLISHED,
+    "CALL_RTPESTAB": UaEventKind.CALL_MEDIA,
+    "CALL_CLOSED": UaEventKind.CALL_CLOSED,
+    "CALL_DTMF_START": UaEventKind.DTMF,
+    "REGISTER_OK": UaEventKind.REGISTERED,
+    "REGISTER_FAIL": UaEventKind.REGISTRATION_LOST,
+    "UNREGISTERING": UaEventKind.REGISTRATION_LOST,
+}
+
+#: How much of one framed message this module will read before deciding the UA
+#: is answering something that is not a control message.
+MAX_MESSAGE_BYTES = 1 << 20
+
+#: How long a command waits for its response. A SETTING with a published
+#: default, and an ASSUMPTION: nothing here measures how long baresip takes to
+#: answer on a loaded gate controller. It is drawn short because there is a
+#: driver waiting and long enough that a busy box is not called dead.
+DEFAULT_UA_TIMEOUT = 5.0
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_VERSION = re.compile(r"(\d+\.\d+\.\d+)")
+_CALL_ID = re.compile(r"call id:\s*([0-9a-fA-F]+)")
+_CNAME = re.compile(r"cname=(\S+)")
+
+
+class BaresipUa:
+    """One baresip, driven over `ctrl_tcp`. Answers, plays, bridges, hangs up."""
+
+    kind = "baresip"
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        driver_aor: str,
+        operator_aor: str,
+        timeout: float = DEFAULT_UA_TIMEOUT,
+        connect=socket.create_connection,
+    ) -> None:
+        self._address = (host, port)
+        self._aors = {UaLeg.DRIVER: driver_aor, UaLeg.OPERATOR: operator_aor}
+        self._timeout = timeout
+        self._connect = connect
+        self._sock = None
+        self._buffer = b""
+        self._events: deque[UaEvent] = deque()
+        self._responses: deque[dict] = deque()
+        self._lock = threading.Lock()
+        self._token = 0
+        self._version: str | None = None
+        #: `None` until the UA has said something about registration. NOT
+        #: `False`: a registration nobody has heard about is not a registration
+        #: known to be lost, and publishing the second would page somebody to a
+        #: site that is working.
+        self._registered: bool | None = None
+        #: Which account each call belongs to, learnt from the events.
+        self._accounts: dict[str, str] = {}
+        #: The RTP CNAME of each call's audio stream, READ OUT OF THE USER AGENT
+        #: rather than derived from the configuration.
+        #:
+        #: This is the one thing in this adapter that had to be measured rather
+        #: than assumed. baresip identifies the stream to play into by CNAME and
+        #: matches it WHOLE -- a prefix does not match -- and the CNAME is not
+        #: the account's address of record: it is the user part at the LOCAL SIP
+        #: address and port, which is a different host and port from the AOR
+        #: whenever a site registers with a registrar that is not on the same
+        #: box. Built from the configuration, every playback failed with
+        #: `Invalid argument`, which the agent reports as `ua_unreachable` and a
+        #: driver hears as silence. Asked for, it is exact.
+        self._cnames: dict[str, str] = {}
+
+    # -- the connection ----------------------------------------------------
+
+    def start(self) -> None:
+        """Connect, learn the version, and refuse a version nobody tested."""
+        self._open()
+        self._read_registration()
+        version = self.version()
+        if version not in TESTED_VERSIONS:
+            raise UaUnsupportedVersion(
+                f"the user agent is baresip {version!r}; this build was tested against "
+                f"{TESTED_VERSIONS}. Refusing to start: a control vocabulary is not a "
+                "versioned contract, so a command that has been renamed or has grown a "
+                "parameter would be a call answered and then handled wrongly, with a "
+                "driver at the barrier."
+            )
+
+    def _open(self) -> None:
+        try:
+            self._sock = self._connect(self._address, timeout=self._timeout)
+        except OSError as exc:
+            raise UaUnreachable(f"{self._address[0]}:{self._address[1]}: {exc}") from exc
+        self._sock.settimeout(self._timeout)
+        self._buffer = b""
+
+    def close(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            finally:
+                self._sock = None
+
+    # -- the six verbs -----------------------------------------------------
+
+    def version(self) -> str:
+        if self._version is None:
+            data = _ANSI.sub("", self._command("about"))
+            found = _VERSION.search(data)
+            if not found:
+                raise UaUnreachable(
+                    "the user agent did not say which version it is. This build refuses to "
+                    "drive a process it cannot identify."
+                )
+            self._version = found.group(1)
+        return self._version
+
+    def registered(self) -> bool | None:
+        return self._registered
+
+    def _read_registration(self) -> None:
+        """Ask what the registration is NOW, rather than waiting to be told.
+
+        The control channel only forwards events to a client that is connected,
+        and a user agent registers when IT starts -- which is before this
+        process opens the socket. Without this read, an agent that came up after
+        a perfectly healthy registration would publish `unknown` for as long as
+        that registration lasted, and the first thing it ever said about the one
+        code it exists to measure would be that it does not know.
+        """
+        try:
+            data = _ANSI.sub("", self._command("reginfo"))
+        except UaUnreachable:
+            return
+        for line in data.splitlines():
+            if self._aors[UaLeg.DRIVER] not in line:
+                continue
+            # `OK`, `ERR` and `zzz` are the user agent's own three words for it,
+            # and the third one means it has not tried yet -- which is `None`
+            # here and never `False`. A registration nobody has heard about is
+            # not one known to be lost.
+            if "OK" in line:
+                self._registered = True
+            elif "ERR" in line:
+                self._registered = False
+            return
+
+    def answer(self, call_id: str) -> None:
+        self._command("accept", call_id)
+
+    def dial(self, uri: str, leg: UaLeg = UaLeg.OPERATOR) -> str:
+        """Place a call FROM `leg`'s account, and return the call it created.
+
+        The account matters and is not cosmetic: it is what `play` targets, so a
+        call placed from the wrong one is a call this process cannot speak to
+        privately afterwards.
+        """
+        self._command("uafind", self._aors[leg])
+        data = self._command("dial", uri)
+        found = _CALL_ID.search(data)
+        if not found:
+            raise UaUnreachable(f"the user agent did not name the call it placed: {data!r}")
+        call_id = found.group(1)
+        self._accounts[call_id] = self._aors[leg]
+        return call_id
+
+    def play(self, call_id: str, path: str) -> None:
+        """One audio file, into ONE call, with that call's own audio silenced.
+
+        `0` is the volume the call's live audio is faded to and `100` the volume
+        of the file: the agent has no microphone and its audio source is
+        silence, so this is a statement about what the file replaces rather than
+        a mix.
+        """
+        self._command(
+            "mixausrc_enc_start", f"aufile {path} 0 100 cname={self._cname(call_id)}"
+        )
+
+    def stop_playing(self, call_id: str) -> None:
+        self._command("mixausrc_enc_stop", f"cname={self._cname(call_id)}")
+
+    def _cname(self, call_id: str) -> str:
+        """The call's own CNAME, asked of the user agent and then remembered."""
+        if call_id not in self._cnames:
+            self._command("callfind", call_id)
+            found = _CNAME.search(_ANSI.sub("", self._command("audio_debug")))
+            if not found:
+                raise UaUnreachable(
+                    f"the user agent did not name the audio stream of call {call_id}. "
+                    "Without it there is nothing to play a file into, and a driver at a "
+                    "barrier hears silence."
+                )
+            self._cnames[call_id] = found.group(1)
+        return self._cnames[call_id]
+
+    def bridge(self) -> None:
+        """From this moment, both calls hear each other. Not before.
+
+        Everything before this is private to a leg, which is what lets the
+        operator be told the case and offered a menu without the driver hearing
+        either.
+        """
+        self._command("conference")
+
+    def hangup(self, call_id: str) -> None:
+        """End ONE call. Selected first, because the command acts on `current`."""
+        self._command("callfind", call_id)
+        self._command("hangup")
+        self._accounts.pop(call_id, None)
+        self._cnames.pop(call_id, None)
+
+    def hangup_all(self) -> None:
+        self._command("hangupall", "")
+        self._accounts.clear()
+        self._cnames.clear()
+
+    def poll(self) -> tuple[UaEvent, ...]:
+        """Everything the UA has said since the last poll, in this seam's words."""
+        self._drain()
+        with self._lock:
+            events = tuple(self._events)
+            self._events.clear()
+        return events
+
+    # -- the wire ----------------------------------------------------------
+
+    def _command(self, command: str, params: str = "") -> str:
+        """One command, and its response. Events arriving meanwhile are kept.
+
+        Responses are matched BY TOKEN and not by arrival order: baresip
+        interleaves events with responses, and a reader that took the next
+        message as the answer would read an incoming call as the result of the
+        command that was in flight when it arrived.
+        """
+        if self._sock is None:
+            raise UaUnreachable("the user agent's control socket is not open")
+        self._token += 1
+        token = str(self._token)
+        payload = json.dumps(
+            {"command": command, "params": params, "token": token}
+        ).encode("utf-8")
+        try:
+            self._sock.sendall(b"%d:%s," % (len(payload), payload))
+        except OSError as exc:
+            raise UaUnreachable(f"{command}: {exc}") from exc
+        while True:
+            for message in list(self._responses):
+                if message.get("token") == token:
+                    self._responses.remove(message)
+                    if not message.get("ok"):
+                        # It ANSWERED, and what it answered was no. A different
+                        # fact from a dead socket, and the difference decides
+                        # whether anybody is paged.
+                        raise UaRefused(
+                            f"the user agent refused `{command}`: {message.get('data')!r}"
+                        )
+                    return str(message.get("data") or "")
+            self._read_more()
+
+    def _drain(self) -> None:
+        """Read whatever is already there, without waiting for anything."""
+        if self._sock is None:
+            raise UaUnreachable("the user agent's control socket is not open")
+        self._sock.settimeout(0.0)
+        try:
+            while True:
+                try:
+                    chunk = self._sock.recv(65536)
+                except (BlockingIOError, TimeoutError):
+                    return
+                except OSError as exc:
+                    raise UaUnreachable(f"reading from the user agent: {exc}") from exc
+                if not chunk:
+                    raise UaUnreachable("the user agent closed its control socket")
+                self._buffer += chunk
+                self._parse()
+        finally:
+            if self._sock is not None:
+                self._sock.settimeout(self._timeout)
+
+    def _read_more(self) -> None:
+        try:
+            chunk = self._sock.recv(65536)
+        except TimeoutError as exc:
+            raise UaUnreachable("the user agent did not answer in time") from exc
+        except OSError as exc:
+            raise UaUnreachable(f"reading from the user agent: {exc}") from exc
+        if not chunk:
+            raise UaUnreachable("the user agent closed its control socket")
+        self._buffer += chunk
+        self._parse()
+
+    def _parse(self) -> None:
+        """Netstrings out of the buffer: `<length>:<payload>,`."""
+        while b":" in self._buffer:
+            head, _, rest = self._buffer.partition(b":")
+            try:
+                length = int(head)
+            except ValueError as exc:
+                raise UaUnreachable(
+                    f"the user agent framed a message this build cannot read: {head[:32]!r}"
+                ) from exc
+            if length > MAX_MESSAGE_BYTES:
+                raise UaUnreachable(f"the user agent announced {length} bytes in one message")
+            if len(rest) < length + 1:
+                return
+            body, self._buffer = rest[:length], rest[length + 1 :]
+            try:
+                message = json.loads(body)
+            except ValueError:
+                # Not a control message. Dropped rather than guessed at; the
+                # command that is waiting will time out and say so, which names
+                # the UA rather than inventing an answer from it.
+                log.warning("the user agent sent something that is not JSON")
+                continue
+            if not isinstance(message, dict):
+                continue
+            if message.get("event"):
+                self._event(message)
+            else:
+                self._responses.append(message)
+
+    def _event(self, message: dict) -> None:
+        kind = EVENT_KINDS.get(str(message.get("type")))
+        if kind is None:
+            return
+        call_id = message.get("id")
+        account = message.get("accountaor")
+        if isinstance(call_id, str) and isinstance(account, str):
+            self._accounts[call_id] = account
+        if kind is UaEventKind.REGISTERED:
+            self._registered = True
+        elif kind is UaEventKind.REGISTRATION_LOST:
+            self._registered = False
+        with self._lock:
+            self._events.append(
+                UaEvent(
+                    kind=kind,
+                    call_id=call_id if isinstance(call_id, str) else None,
+                    peer_uri=message.get("peeruri")
+                    if isinstance(message.get("peeruri"), str)
+                    else None,
+                    digit=str(message.get("param"))
+                    if kind is UaEventKind.DTMF and message.get("param") is not None
+                    else None,
+                )
+            )
+        if kind is UaEventKind.CALL_CLOSED and isinstance(call_id, str):
+            self._accounts.pop(call_id, None)
+            self._cnames.pop(call_id, None)
+
+
+__all__ = ["DEFAULT_UA_TIMEOUT", "EVENT_KINDS", "TESTED_VERSIONS", "BaresipUa"]

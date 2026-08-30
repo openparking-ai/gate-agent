@@ -88,6 +88,7 @@ KNOWN_VERSIONS: dict[TargetKind, tuple[int, ...]] = {
     TargetKind.LANE: KNOWN_LANE_VERSIONS,
     TargetKind.IDENTITY_SERVICE: KNOWN_IDENTITY_VERSIONS,
     TargetKind.CAPTURE: (CONTRACT_VERSION,),
+    TargetKind.AGENT: (CONTRACT_VERSION,),
     TargetKind.PLATFORM: (),
 }
 
@@ -425,15 +426,22 @@ class Monitor:
             # observer of one field.
             body = client.get("/v1/health")
             return _version(body.get("schema_version")), ()
-        if target.kind is TargetKind.CAPTURE:
+        if target.kind in (TargetKind.CAPTURE, TargetKind.AGENT):
             # The capture process publishes a malfunction table in the LANE's
             # entry shape, on purpose, so it is read by the code that already
             # reads a lane: same states, same sources, same `never_alarm` on the
             # wire, same refusal when one of them is unreadable. This is how
             # `camera_unreachable` -- Gokhan's "camera disconnected is a
             # malfunction" -- gets from a camera nobody can reach to a human who
-            # can go and look at it.
-            body = client.get("/v1/capture/health")
+            # can go and look at it. The AGENT publishes the same shape for the
+            # same reason, so this branch is one branch and not two: a third
+            # dialect would be a third place for `never_alarm` to be read wrong.
+            route = (
+                "/v1/capture/health"
+                if target.kind is TargetKind.CAPTURE
+                else "/v1/agent/health"
+            )
+            body = client.get(route)
             codes = body.get("codes")
             if not isinstance(codes, list):
                 raise TargetUnreachable(
