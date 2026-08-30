@@ -289,6 +289,14 @@ class Agent:
             return
         if event.kind is UaEventKind.CALL_CLOSED:
             if event.call_id == session.driver_call:
+                # The driver hung up. **The operator's leg goes with it**, and
+                # not because it is tidy: this user agent's bridge is site-wide,
+                # so a leg left live after its case ended would be conferenced
+                # into the NEXT case -- a person still holding for a driver who
+                # has gone, put into a stranger's call.
+                if session.operator_call:
+                    self.ua.hangup(session.operator_call)
+                    session.operator_call = None
                 self._end(session)
             elif event.call_id == session.operator_call:
                 session.operator_call = None
