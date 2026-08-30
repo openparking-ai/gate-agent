@@ -52,12 +52,45 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e '.[dev]'
 
+      - name: Build the user agent this build was tested against
+        # baresip is an INSTALL REQUIREMENT of the agent, not a dependency of
+        # this package, and it is built from source at the exact tag the agent
+        # refuses to start without: Debian and Ubuntu package older releases
+        # that carry neither `mixausrc` (which plays one file into ONE leg) nor
+        # `mixminus` (which IS the bridge), so an apt install would leave the
+        # only measurements in this suite that touch SIP unable to run.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake build-essential libssl-dev
+          git clone --quiet --depth 1 -b v4.11.0 https://github.com/baresip/re.git /tmp/re
+          cmake -S /tmp/re -B /tmp/re/build -DCMAKE_BUILD_TYPE=Release >/dev/null
+          cmake --build /tmp/re/build -j"$(nproc)" >/dev/null
+          sudo cmake --install /tmp/re/build >/dev/null
+          sudo ldconfig
+          git clone --quiet --depth 1 -b v4.11.0 \
+            https://github.com/baresip/baresip.git /tmp/baresip
+          cmake -S /tmp/baresip -B /tmp/baresip/build -DCMAKE_BUILD_TYPE=Release >/dev/null
+          cmake --build /tmp/baresip/build -j"$(nproc)" >/dev/null
+          sudo cmake --install /tmp/baresip/build >/dev/null
+          sudo ldconfig
+          test -f /usr/local/lib/baresip/modules/mixminus.so
+          test -f /usr/local/lib/baresip/modules/mixausrc.so
+          test -f /usr/local/lib/baresip/modules/ctrl_tcp.so
+
       - name: Tests
         # No hardware, no camera, no barrier, no SMTP server and no database.
         # Every target is a real HTTP server on an ephemeral socket, including a
         # REAL lane built from the installed lane-controller: a fake shaped like
         # our lane would make "the same code reads ours and a third party's" a
         # claim about two fakes.
+        #
+        # REQUIRE_SIP=1 turns a missing baresip into a FAILURE rather than a
+        # skip. The SIP tests are the only measurements in this suite that touch
+        # SIP at all -- a real registrar, three real user agents, real RTP, real
+        # RFC 4733 DTMF and the audio each side received, measured -- and a
+        # guarantee test that can skip silently is not a guarantee.
+        env:
+          REQUIRE_SIP: "1"
         run: pytest -q
 
       - name: Fail-control — monitor and capture
@@ -93,3 +126,24 @@ jobs:
         # Each break fails in the REASSURING direction, because that is the
         # direction this kind of software fails in when nobody is looking.
         run: python scripts/monitor_fail_control.py
+
+      - name: Fail-control — the agent
+        # Breaks each property the AGENT exists to have and requires the suite
+        # to go red on every one: a verb that opens something, an act existing
+        # at all, the socket module able to see a lane, a socket opened
+        # elsewhere, an undeclared intercom guessed at, an unrecognised reason
+        # mapped to the nearest thing we know, a dead engine told to a driver as
+        # a dirty plate, `never_alarm` read from a list instead of the wire, an
+        # invented reason in the subset, a missing recording started on, a
+        # language skipped, the site's order replaced by ours, a disabled
+        # authorisation accepted, a disabled authorisation offered, the person
+        # not told the barrier cannot move, the bridge made before the briefing,
+        # each of the three timers never firing, a second call answered, the one
+        # caller-supplied field taking anything, a user agent version not
+        # checked, an unknown registration published as healthy, a health
+        # payload shipping a subset, a sentence edited without its audio, an
+        # intercom with no lane, a site that enables nothing, a transfer quietly
+        # not offered, one account for both legs, a password in a SIP URI, the
+        # agent's surface accepting a write, and it binding off loopback with no
+        # credential.
+        run: python scripts/agent_fail_control.py

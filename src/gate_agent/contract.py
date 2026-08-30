@@ -72,6 +72,12 @@ class TargetKind(StrEnum):
     #: passthrough rule -- and it is how `camera_unreachable` gets from a camera
     #: nobody can reach to a human who can go and look at it.
     CAPTURE = "capture"
+    #: A gate agent -- this package's own third process, or anything
+    #: implementing the agent half of this contract. Its health entries are in
+    #: the lane's shape too, for the same reason: one reader. It is the target
+    #: that answers the intercom, so a monitor that cannot reach it is a site
+    #: whose drivers are pressing a button nobody hears.
+    AGENT = "agent"
 
 
 class SinkKind(StrEnum):
@@ -109,6 +115,7 @@ class MonitorCode(StrEnum):
     IDENTITY_SERVICE_UNREACHABLE = "identity_service_unreachable"
     PLATFORM_UNREACHABLE = "platform_unreachable"
     CAPTURE_UNREACHABLE = "capture_unreachable"
+    AGENT_UNREACHABLE = "agent_unreachable"
     #: The target ANSWERED, and what it answered was no -- a 3xx or a 4xx. It
     #: is not down: it is up, it received the request, and it declined it, and
     #: the `status` on the entry says which decline. A dead credential (401), a
@@ -121,6 +128,7 @@ class MonitorCode(StrEnum):
     IDENTITY_SERVICE_REFUSED_US = "identity_service_refused_us"
     PLATFORM_REFUSED_US = "platform_refused_us"
     CAPTURE_REFUSED_US = "capture_refused_us"
+    AGENT_REFUSED_US = "agent_refused_us"
     #: A target answered with a contract version this build does not know. Its
     #: codes STOP being passed through while this holds: half-understanding a
     #: payload is worse than admitting you cannot read it.
@@ -198,6 +206,8 @@ MONITOR_SOURCES: dict[MonitorCode, Source] = {
     MonitorCode.IDENTITY_SERVICE_REFUSED_US: Source.MEASURED,
     MonitorCode.PLATFORM_REFUSED_US: Source.MEASURED,
     MonitorCode.CAPTURE_REFUSED_US: Source.MEASURED,
+    MonitorCode.AGENT_UNREACHABLE: Source.MEASURED,
+    MonitorCode.AGENT_REFUSED_US: Source.MEASURED,
     MonitorCode.TARGET_CONTRACT_UNSUPPORTED: Source.MEASURED,
     MonitorCode.SINK_DELIVERY_FAILED: Source.MEASURED,
     MonitorCode.LANE_GONE_QUIET: Source.MEASURED,
@@ -211,6 +221,7 @@ UNREACHABLE_CODE: dict[TargetKind, MonitorCode] = {
     TargetKind.IDENTITY_SERVICE: MonitorCode.IDENTITY_SERVICE_UNREACHABLE,
     TargetKind.PLATFORM: MonitorCode.PLATFORM_UNREACHABLE,
     TargetKind.CAPTURE: MonitorCode.CAPTURE_UNREACHABLE,
+    TargetKind.AGENT: MonitorCode.AGENT_UNREACHABLE,
 }
 
 #: The same pairing for the OTHER half of a failed poll: the target answered,
@@ -222,6 +233,7 @@ REFUSED_CODE: dict[TargetKind, MonitorCode] = {
     TargetKind.IDENTITY_SERVICE: MonitorCode.IDENTITY_SERVICE_REFUSED_US,
     TargetKind.PLATFORM: MonitorCode.PLATFORM_REFUSED_US,
     TargetKind.CAPTURE: MonitorCode.CAPTURE_REFUSED_US,
+    TargetKind.AGENT: MonitorCode.AGENT_REFUSED_US,
 }
 
 
@@ -1225,4 +1237,478 @@ class RecordPage:
             "reset": self.reset,
             "dropped": self.dropped,
             "records": list(self.records),
+        }
+
+
+# ===========================================================================
+# THE AGENT
+#
+# The third process in this package, under the same `contract_version` as the
+# monitor and the capture process, because a consumer holds one compatibility
+# policy for this package and not three.
+#
+# **IT OPENS NOTHING.** It answers an intercom, reads the lane's last decision
+# through the lane contract, speaks the case, calls a human when the case needs
+# one, and RECORDS what that human authorised. An authorisation is a record of
+# what somebody said; it is never an act. There is no vend route here, there is
+# no vend route on the lane contract this build reads, and the client in this
+# package still cannot build a request that is not a GET.
+# ===========================================================================
+
+
+class AgentCase(StrEnum):
+    """WHY this driver is at the intercom, derived from the lane's own payload.
+
+    CLOSED, and derived rather than asked: the driver is not offered a menu of
+    problems to choose from, because a driver at a barrier does not know which
+    of these happened and a menu would make them guess. `cases.derive()` is a
+    pure function of `GET /v1/lane/state` and `GET /v1/lane/health`, with a test
+    per row of the table in `docs/CONTRACT.md`.
+
+    Every member but `nothing_to_do` ends with a human. That is not a placeholder
+    for cleverness that arrives later: this version has no completion path -- no
+    display code, no SMS, no voice plate read-back -- so a case that did not
+    reach a human would be a driver told to wait for something that is not
+    coming.
+    """
+
+    #: A malfunction is `active` on the lane and it is not one the lane marks
+    #: `never_alarm`. It comes FIRST: a lane that is broken cannot have its last
+    #: decision read as a fact about this vehicle.
+    MALFUNCTION_ACTIVE = "malfunction_active"
+    #: The lane fell back because it obtained no read AT ALL. **Never "wipe your
+    #: plate"** -- the identification service is off, and telling a driver to
+    #: clean a plate that was never looked at is the standing acceptance of this
+    #: project broken in the module's first sentence.
+    IDENTIFICATION_UNAVAILABLE = "identification_unavailable"
+    PLATE_NOT_READ = "plate_not_read"
+    PLATE_UNCLEAR = "plate_unclear"
+    VEHICLE_NOT_RECOGNISED = "vehicle_not_recognised"
+    RULES_UNAVAILABLE = "rules_unavailable"
+    ENTRY_REFUSED = "entry_refused"
+    #: The lane says nothing was there. **This is the case the intercom exists
+    #: for.** The presence gate is unvalidated on real vehicles, and a real car
+    #: it wrongly refuses has no other recourse: there is a driver at the
+    #: barrier and the lane believes the lane is empty.
+    VEHICLE_NOT_DETECTED = "vehicle_not_detected"
+    ENTRY_NOT_CONFIRMED = "entry_not_confirmed"
+    #: The lane named a reason outside the contract's required subset. A lane
+    #: that is not ours has its own vocabulary and will. The contract's answer is
+    #: to ESCALATE, never to map it onto the nearest thing we know.
+    UNRECOGNISED_REASON = "unrecognised_reason"
+    #: The lane did not answer, refused us, or speaks a contract version this
+    #: build cannot read. Also the case for a lane whose payload this build
+    #: cannot parse: a half-read decision about a vehicle is worse than none.
+    LANE_UNAVAILABLE = "lane_unavailable"
+    #: This intercom is declared with no lane. **Not degraded** -- a garage with
+    #: an intercom and no lane is the whole product for that site, and every
+    #: call there is a human case from the first second.
+    STANDALONE = "standalone"
+    #: `allow`, and the transit is confirmed or pending. The button was pressed
+    #: after a normal entry. One message, and the call ends.
+    NOTHING_TO_DO = "nothing_to_do"
+
+
+#: The cases that end with a human. Derived from the one case that does not, so
+#: a case added without an answer to "does this reach a human?" cannot exist.
+HUMAN_CASES: tuple[AgentCase, ...] = tuple(
+    case for case in AgentCase if case is not AgentCase.NOTHING_TO_DO
+)
+
+
+class Authorisation(StrEnum):
+    """What a human told us to do. CLOSED, per-site enabled, and NEVER an act.
+
+    Each member is a RECORD. `OPEN_NOW` records that a human said to open; it
+    opens nothing, because this package has no route that could and the lane
+    contract this build reads has none either. The human is told so, in one
+    fixed sentence, at the moment they key it -- a human who believes a barrier
+    moved when it did not is worse off than one who was never called.
+    """
+
+    OPEN_NOW = "open_now"
+    OPEN_AND_FLAG = "open_and_flag"
+    DO_NOT_OPEN = "do_not_open"
+    HOLD = "hold"
+    TRANSFER = "transfer"
+    CALL_BACK = "call_back"
+
+
+#: WHICH DIGIT selects which authorisation. **Fixed and published, not per
+#: site.** A site enables a subset; it does not renumber the set. The person
+#: keying it is often the same person across several garages at three in the
+#: morning, and a mapping that moved between sites is a wrong barrier decided by
+#: muscle memory. A digit whose authorisation this site has not enabled is not
+#: accepted -- it is re-prompted, and then it is `nothing usable`.
+AUTHORISATION_DIGITS: dict[str, Authorisation] = {
+    "1": Authorisation.OPEN_NOW,
+    "2": Authorisation.OPEN_AND_FLAG,
+    "3": Authorisation.DO_NOT_OPEN,
+    "4": Authorisation.HOLD,
+    "5": Authorisation.TRANSFER,
+    "6": Authorisation.CALL_BACK,
+}
+
+#: The authorisations this version can only RECORD, and about which the human
+#: hears one fixed sentence saying so. Derived from the act table below, which
+#: is empty -- so the day an act exists, this follows it rather than being a
+#: second list somebody has to remember to edit.
+ACTS: dict[Authorisation, str] = {}
+
+CANNOT_ACT: tuple[Authorisation, ...] = (
+    Authorisation.OPEN_NOW,
+    Authorisation.OPEN_AND_FLAG,
+)
+
+
+class AgentCode(StrEnum):
+    """The agent's own malfunctions. CLOSED, every member on every response."""
+
+    #: The UA lost its registration with the site's SIP registrar. **This is the
+    #: lane contract's `intercom_registration_lost`, measured where it can be
+    #: measured.** A lane cannot see whether the agent is registered; the agent
+    #: can, and it says so here. Both documents say this, in the same words, so
+    #: the two surfaces cannot come to disagree about which one knows.
+    SIP_REGISTRATION_LOST = "sip_registration_lost"
+    #: The user agent process did not answer its control socket. The agent is up
+    #: and cannot answer a call: that is the loudest thing it has to say.
+    UA_UNREACHABLE = "ua_unreachable"
+    #: The user agent answered with a version this build was not tested against.
+    #: The `schema_version` rule applied to a process.
+    UA_UNSUPPORTED_VERSION = "ua_unsupported_version"
+    #: A call arrived from a SIP identity no `[intercoms.*]` declares.
+    CALL_FROM_UNDECLARED_INTERCOM = "call_from_undeclared_intercom"
+    #: The human did not answer inside `[escalation] no_answer_seconds`.
+    HUMAN_UNREACHABLE = "human_unreachable"
+    #: A line this site declared has no audio file. The agent refuses to
+    #: register at startup on this, so on a running agent it is how a file that
+    #: has gone missing since is reported rather than played as silence.
+    AUDIO_MISSING = "audio_missing"
+    #: A declared lane could not be read. Per lane, under that lane's name.
+    LANE_UNAVAILABLE = "lane_unavailable"
+
+
+#: WHERE each of the agent's codes gets its answer in this build. One copy, and
+#: the payload is built from it. Every one is `measured`: a code the agent could
+#: not derive would not be one of its own.
+AGENT_SOURCES: dict[AgentCode, Source] = dict.fromkeys(AgentCode, Source.MEASURED)
+
+#: Whether a code may wake a human. Travels on the wire with the code, the way
+#: the lane's and the capture process's do -- a monitor reads this package's
+#: answer rather than holding a second list of its own. Nothing here is
+#: `never_alarm`: every member is a reason a driver at a barrier cannot be
+#: helped.
+AGENT_NEVER_ALARM: dict[AgentCode, bool] = dict.fromkeys(AgentCode, False)
+
+
+class AgentEventKind(StrEnum):
+    """What the agent records. **No plate, ever, on any of them.**
+
+    The agent never reads `GET /v1/lane/events` and never reads a plate from
+    anywhere: `GET /v1/lane/state` carries `read_ref`, not a plate, and this
+    package does not read even that. So there is no plate here to leak, and
+    `AgentEvent` has nowhere to put one.
+    """
+
+    CALL_ANSWERED = "call_answered"
+    CASE_SPOKEN = "case_spoken"
+    HUMAN_CALLED = "human_called"
+    AUTHORISATION_RECEIVED = "authorisation_received"
+    #: The human did not pick up. The driver is told, and this is the record of
+    #: it -- named in the brief's own prose and absent from its list of events,
+    #: which is why it is here: a timer that fires and records nothing is a
+    #: timer nobody can audit.
+    HUMAN_UNREACHABLE = "human_unreachable"
+    #: The human answered and keyed nothing this site accepts.
+    NOTHING_USABLE = "nothing_usable"
+    #: A call from a SIP identity this site does not declare. One fixed message,
+    #: and the call ends.
+    CALL_FROM_UNDECLARED_INTERCOM = "call_from_undeclared_intercom"
+    #: A call arrived while a case was already in progress, and was refused
+    #: WITHOUT being answered -- so the intercom's own call list moves on to the
+    #: human's number, which is the degradation the install requirement exists
+    #: for. One case at a time is a real limit of this version and it is
+    #: published on `GET /v1/agent` as `concurrent_cases`, because the user
+    #: agent's bridge is site-wide: a second case bridged while the first is
+    #: open would put two strangers and two operators in one conversation.
+    CALL_REFUSED_BUSY = "call_refused_busy"
+    CALL_ENDED = "call_ended"
+
+
+@dataclass(frozen=True, slots=True)
+class IntercomDescription:
+    """One declared intercom: its SIP identity, and the lane it belongs to.
+
+    `lane` is `null` for a STANDALONE intercom. That is a mode, not a gap: the
+    agent answers, greets, and calls a human, which is the whole job at a garage
+    with an intercom and no lane.
+    """
+
+    sip_uri: str
+    lane: str | None
+
+    def __post_init__(self) -> None:
+        _text(self.sip_uri, "intercom.sip_uri")
+        if self.lane is not None:
+            _text(self.lane, "intercom.lane")
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class UserAgentDescription:
+    """The external SIP user agent this agent drives, and the version of it.
+
+    Published because it is an INSTALL REQUIREMENT and a consumer of this
+    surface is entitled to see which one is running and whether the agent is
+    talking to it. The control address is not here: it is a local socket, and
+    publishing where a process's control channel lives is publishing a way in.
+    """
+
+    kind: str
+    #: What the UA reported about itself, or `null` before it has answered once.
+    version: str | None
+    #: The versions this build was TESTED against. A UA outside them is refused
+    #: at startup -- the `schema_version` rule, applied to a process.
+    tested_versions: tuple[str, ...]
+    registered: bool | None
+
+    def __post_init__(self) -> None:
+        _text(self.kind, "user_agent.kind")
+        if self.version is not None:
+            _text(self.version, "user_agent.version")
+        if not self.tested_versions:
+            raise ValueError("a user agent with no tested version has not been tested")
+        if self.registered is not None and not isinstance(self.registered, bool):
+            raise ValueError("user_agent.registered must be a bool or null")
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "version": self.version,
+            "tested_versions": list(self.tested_versions),
+            "registered": self.registered,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AgentDescription:
+    """`GET /v1/agent` -- who this agent is, and what it is set to do.
+
+    `can_vend` is here and it is `false`, DERIVED from the act table rather than
+    written down: the agent has no route that opens anything, and the day one
+    exists this answer changes with it instead of being a flag somebody has to
+    remember. It is the same field, in the same words, that the lane contract
+    publishes for the same reason.
+    """
+
+    agent_id: str
+    site_id: str
+    intercoms: tuple[IntercomDescription, ...]
+    user_agent: UserAgentDescription
+    driver_languages: tuple[str, ...]
+    operator_language: str
+    authorisations: tuple[str, ...]
+    event_window_depth: int
+    concurrent_cases: int
+    no_answer_seconds: float
+    nothing_usable_seconds: float
+    hold_reprompt_seconds: float
+    transfer_declared: bool
+    contract_version: int = CONTRACT_VERSION
+
+    def __post_init__(self) -> None:
+        _text(self.agent_id, "agent_id")
+        _text(self.site_id, "site_id")
+        if not self.intercoms:
+            raise ValueError(
+                "an agent with no intercom answers nothing and would publish a working "
+                "surface while doing it"
+            )
+        if not self.driver_languages:
+            raise ValueError("an agent with no driver language plays a driver silence")
+        _text(self.operator_language, "operator_language")
+        if not self.authorisations:
+            raise ValueError(
+                "an agent with no authorisation enabled would call a human who can authorise "
+                "nothing"
+            )
+        for value in self.authorisations:
+            if value not in tuple(a.value for a in Authorisation):
+                raise ValueError(f"{value!r} is not an authorisation in this contract")
+        if isinstance(self.event_window_depth, bool) or not isinstance(
+            self.event_window_depth, int
+        ) or self.event_window_depth <= 0:
+            raise ValueError("event_window_depth must be a positive number of events")
+
+    @property
+    def can_vend(self) -> bool:
+        """Whether this agent can open anything. Derived from the act table."""
+        return bool(ACTS)
+
+    def to_dict(self) -> dict:
+        return {
+            "agent_id": self.agent_id,
+            "site_id": self.site_id,
+            "contract_version": self.contract_version,
+            "can_vend": self.can_vend,
+            "intercoms": [intercom.to_dict() for intercom in self.intercoms],
+            "user_agent": self.user_agent.to_dict(),
+            "languages": {
+                "driver": list(self.driver_languages),
+                "operator": self.operator_language,
+            },
+            "authorisations": list(self.authorisations),
+            "event_window_depth": self.event_window_depth,
+            "concurrent_cases": self.concurrent_cases,
+            "escalation": {
+                "no_answer_seconds": self.no_answer_seconds,
+                "nothing_usable_seconds": self.nothing_usable_seconds,
+                "hold_reprompt_seconds": self.hold_reprompt_seconds,
+                "transfer_declared": self.transfer_declared,
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AgentEntry:
+    """One of the agent's codes, its subject, its state and its source."""
+
+    code: str
+    subject: str
+    state: str
+
+    def __post_init__(self) -> None:
+        if self.code not in tuple(code.value for code in AgentCode):
+            raise ValueError(f"{self.code!r} is not an agent code in this contract")
+        _text(self.subject, "subject")
+        if self.state not in tuple(state.value for state in HealthState):
+            raise ValueError(f"state must be one of {tuple(HealthState)}, got {self.state!r}")
+        # The invariant, copied from the lane contract because it is the same
+        # invariant: `ok` and `active` are claims about a measurement.
+        if self.state != HealthState.UNKNOWN and self.source != Source.MEASURED:
+            raise ValueError(
+                f"{self.code} is {self.source.value} but claims state {self.state!r}"
+            )
+
+    @property
+    def source(self) -> Source:
+        return AGENT_SOURCES[AgentCode(self.code)]
+
+    @property
+    def never_alarm(self) -> bool:
+        return AGENT_NEVER_ALARM[AgentCode(self.code)]
+
+    def to_dict(self) -> dict:
+        return {
+            "code": self.code,
+            "subject": self.subject,
+            "state": self.state,
+            "source": self.source.value,
+            "never_alarm": self.never_alarm,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AgentHealth:
+    """`GET /v1/agent/health` -- every code, every time.
+
+    Entries are in the LANE's shape -- `state`, `source`, `never_alarm` on the
+    wire -- so the monitor reads this with the code that already reads a lane and
+    a capture process. One reader, one passthrough rule, no third dialect.
+    """
+
+    codes: tuple[AgentEntry, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        seen = [(entry.code, entry.subject) for entry in self.codes]
+        if len(seen) != len(set(seen)):
+            raise ValueError("an agent code appears twice for one subject in one payload")
+        missing = {code.value for code in AgentCode} - {code for code, _ in seen}
+        if missing:
+            raise ValueError(
+                f"health payload is missing {sorted(missing)}. Every code ships every time: "
+                "one that is absent reads exactly like one that is fine."
+            )
+
+    def to_dict(self) -> dict:
+        return {
+            "contract_version": CONTRACT_VERSION,
+            "codes": [entry.to_dict() for entry in self.codes],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AgentEvent:
+    """One thing the agent did. **There is no field here for a plate.**
+
+    `intercom` is the SIP identity the call came from and `human` the identity
+    the operator leg was placed to or answered from. Both are addresses a site
+    declared, not people: this surface says which door and which rota, and a
+    consumer that wants to know who was on shift asks the rota.
+    """
+
+    kind: str
+    site_id: str
+    agent_id: str
+    intercom: str
+    lane: str | None
+    case: str | None
+    authorisation: str | None
+    human: str | None
+    at: str
+    #: What the human keyed when the authorisation carries a value -- the number
+    #: for `call_back`, and `null` for every other. It is the one free value on
+    #: this surface and it is DIGITS ONLY, refused otherwise, because a field a
+    #: caller fills is the field a plate ends up in.
+    keyed: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in tuple(kind.value for kind in AgentEventKind):
+            raise ValueError(f"{self.kind!r} is not an agent event kind in this contract")
+        _text(self.site_id, "site_id")
+        _text(self.agent_id, "agent_id")
+        _text(self.intercom, "intercom")
+        _iso_utc(self.at, "at")
+        if self.case is not None and self.case not in tuple(case.value for case in AgentCase):
+            raise ValueError(f"{self.case!r} is not a case in this contract")
+        if self.authorisation is not None and self.authorisation not in tuple(
+            value.value for value in Authorisation
+        ):
+            raise ValueError(f"{self.authorisation!r} is not an authorisation in this contract")
+        if self.keyed is not None and (not self.keyed or not self.keyed.isdigit()):
+            raise ValueError(
+                f"keyed must be digits or null, got {self.keyed!r}. It is the only value on "
+                "this surface a caller supplies, and a field a caller fills is the field a "
+                "plate ends up in."
+            )
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentEventPage:
+    """`GET /v1/agent/events?since=N` -- the same cursor shape as every other.
+
+    Field for field the lane's, the monitor's and the capture process's, so one
+    consumer holds one cursor policy for all of them: the cursor is monotonic
+    within one run and not durable across a restart, `since` ahead of it or
+    behind the oldest event still held sets `reset`, and `dropped` counts what
+    the window evicted.
+    """
+
+    cursor: int
+    reset: bool
+    dropped: int
+    events: tuple[dict, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict:
+        return {
+            "contract_version": CONTRACT_VERSION,
+            "cursor": self.cursor,
+            "reset": self.reset,
+            "dropped": self.dropped,
+            "events": list(self.events),
         }

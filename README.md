@@ -1,7 +1,14 @@
 # Open Parking AI — gate agent
 
-The intercom module. It ships **two processes**, and neither of them can open a
+The intercom module. It ships **three processes**, and none of them can open a
 barrier.
+
+**The gate agent** answers the intercom. It works out which lane the call belongs
+to from the SIP identity that called, reads that lane's last decision through the
+lane contract, says what happened in every language the site declared, and when
+the case needs a person it calls one, stays in both calls, and records the
+authorisation they key. **An authorisation is a record of what somebody said. It
+is never an act.**
 
 **The malfunction monitor** watches whatever a site declares — a lane, an
 identification service, a platform, a capture process — and tells a human what
@@ -12,32 +19,45 @@ time the lane vends, keeps what a per-site retention rule allows, and deletes th
 rest. When a barrier is broken the camera's job changes from deciding to
 recording; this is where the recording goes.
 
-The agent itself — the SIP endpoint that answers a driver at the barrier — joins
-them in this repository later. It is the same module, and these are the halves of
-it that have to be right first: a monitor that is wrong is a monitor nobody
-believes, and a store that is wrong is personal data nobody is deleting.
-
 **The contract is [`docs/CONTRACT.md`](docs/CONTRACT.md).** Everything else here
-is an implementation detail that may be rewritten. Both processes are versioned
-under one `contract_version`.
+is an implementation detail that may be rewritten. All three processes are
+versioned under one `contract_version`.
 
 ```sh
 pip install -e .
+gate-agent agent   --config config/agent.example.toml
 gate-agent monitor --config config/monitor.example.toml
 gate-agent capture --config config/capture.example.toml
 ```
 
+The agent drives an **external SIP user agent** — baresip, its own process,
+over a local control socket. That is an install requirement rather than a
+dependency: this package contains no SIP stack, checks the user agent's version
+at startup, and refuses one it was not tested against.
+
 ## What they will not do
 
-**Neither has opening authority.** They read `GET`s; one sends messages and the
-other writes to its own disk. Nothing here calls a vend, resolves a transit, or
-writes to a lane. There is no client in this package capable of a method other
-than `GET` — swept out of the source, and observed at lanes and cameras that
-record what arrived.
+**None has opening authority.** They read `GET`s; one sends messages, one writes
+to its own disk, and one answers a phone. Nothing here calls a vend, resolves a
+transit, or writes to a lane. There is no client in this package capable of a
+method other than `GET` — swept out of the source, and observed at lanes and
+cameras that record what arrived. A person can key `open now` and what happens is
+an event, a message to the driver, and one fixed sentence to that person saying
+this version cannot operate the barrier.
 
 The one thing that leaves by another method is a **webhook**, which points at a
 paging system and never at a lane. It lives in its own module, that module may
 not import the target client, and the sweep enforces both.
+
+**The agent never guesses which lane a call is about.** The mapping is per-site,
+declared, and refused at startup if an intercom has no lane or a lane has no
+intercom. A call from an identity nobody declared gets one fixed message and
+ends, and no lane is read.
+
+**A driver is never told the wrong thing about why.** The case is derived from
+what the lane published, never asked, and a reason this build does not recognise
+reaches a person rather than being mapped onto the nearest thing we know. A dead
+identification engine is never reported to a driver as a dirty number plate.
 
 **It watches nothing silently.** A monitor with no target declared reports "all
 fine", so it refuses to start and says why. A target it cannot reach is a
