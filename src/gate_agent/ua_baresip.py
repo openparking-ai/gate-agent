@@ -3,7 +3,7 @@
 baresip's `ctrl_tcp` module is a JSON control channel: netstring-framed messages
 in both directions, commands with an optional token echoed on the response, and
 an asynchronous stream of events. This module speaks that and translates it into
-the six verbs and six event kinds of `ua.py`. Nothing above this line knows the
+the seven verbs and seven event kinds of `ua.py`. Nothing above this line knows the
 word "baresip".
 
 **Which baresip, and why it is the one.** Of the user agents that exist as a
@@ -40,11 +40,24 @@ refuses to start, BY NAME:
   * when `config` or `modules` is itself refused, naming `debug_cmd`, because a
     check that quietly did not run is the thing this replaced.
 
-The fourth load-bearing fact is TWO accounts, one per leg -- baresip identifies
-the stream to play into by the RTP CNAME, so two calls on ONE account cannot be
-told apart and a menu meant for the operator plays to the driver. That one is
-the SITE's file rather than the user agent's, and `config.py` refuses the pair
-equal at startup.
+The fourth load-bearing fact is the ACCOUNTS, and this round changed what they
+are. baresip routes an inbound INVITE by the REQUEST-URI's user part
+(`uag_find_msg`, `src/uag.c`), and the event it puts on this socket names the
+account it chose -- `accountaor`, measured on 4.11.0, with and without a
+registrar. So each declared intercom gets an account of its own whose user part
+only that intercom's installer knows, the operator leg keeps one more, and a
+request-URI matching none of them is answered `404 Not Found` by baresip itself
+before this process sees anything. That is the SITE's accounts file rather than
+the user agent's; `config.py` refuses a collision at startup and `accounts()`
+below refuses a declared intercom whose account the user agent is not holding.
+
+**One setting can break that quietly and this build cannot read it back.**
+`sip_cuser_random yes` gives every account's contact user a random suffix, so an
+INVITE aimed at the account's own user part matches nothing and is answered
+`404` -- measured, with the plain configuration as the control. It does not
+appear in what `config` answers on 4.11.0, so it is an install requirement in
+`docs/CONTRACT.md` and not a check. **It fails CLOSED:** the intercom cannot get
+in at all, which is a door that never works rather than a door anybody can open.
 
 **It cannot reach a lane.** This module holds no target, no lane URL and no
 credential: it is given a host and a port that are the UA's, and
@@ -67,7 +80,6 @@ from .ua import (
     UaCall,
     UaEvent,
     UaEventKind,
-    UaLeg,
     UaMisconfigured,
     UaRefused,
     UaUnreachable,
@@ -128,6 +140,13 @@ FORBIDDEN_AUDIO_DRIVER = "aubridge"
 #: `ctrl_tcp` is how this process says anything at all.
 REQUIRED_MODULES: tuple[str, ...] = ("ctrl_tcp", "mixausrc", "mixminus")
 
+#: baresip's own event for an INVITE it refused itself, and the status it
+#: refuses an unknown request-URI with. Both measured on 4.11.0, with a
+#: registrar and without one: `{"class":"sip","type":"SIPSESS_FAILED",
+#: "param":"404 Not Found","from":"<what the caller claimed>"}`.
+SESSION_FAILED = "SIPSESS_FAILED"
+UNKNOWN_ACCOUNT_STATUS = "404"
+
 #: The module that answers `config` and `modules`. Without it the two checks
 #: below cannot run, which is a refusal rather than a check that quietly did not
 #: happen.
@@ -137,10 +156,30 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _VERSION = re.compile(r"(\d+\.\d+\.\d+)")
 _CALL_ID = re.compile(r"call id:\s*([0-9a-fA-F]+)")
 _CNAME = re.compile(r"cname=(\S+)")
+#: One line of `reginfo`:  `0 - sip:agent-<secret>@127.0.0.1:5060  OK  Expires 60s`,
+#: and with no registrar the same line without the state. The USER PART is what
+#: identifies the account; the host is the registrar's when there is one and the
+#: local address when there is not -- measured, both -- which is why nothing
+#: here matches on it.
+#:
+#: **The state is read from its own field and never searched for in the line.**
+#: A dial secret is an arbitrary string, so a user part containing the letters
+#: `ERR` would have made a healthy account read as a lost registration and paged
+#: somebody to a working site. That is the whole shape of this project's
+#: standing error: a check that matched a word instead of a position.
+_REGINFO_LINE = re.compile(
+    r"^\s*\d+\s+-\s+sips?:(?P<user>[^@\s]+)@(?P<host>\S*)\s*(?P<state>\S*)"
+)
 #: One line of `listcalls`:  `[line 1, id 3aee..]  00:00:03   INCOMING            sip:x@y`
 _CALL_LINE = re.compile(
     r"\[line\s+\d+,\s*id\s+(?P<id>[0-9a-fA-F]+)\]\s+\S+\s+(?P<state>[A-Z]+)\s+(?P<peer>.*)$"
 )
+#: `listcalls` groups its calls under the account holding them, one heading per
+#: user agent: `User-Agent: agent-<secret>@127.0.0.1`. Measured on 4.11.0 -- it
+#: is the only place the account of a call that arrived while this socket was
+#: down can be read back, and without it such a call cannot be placed at an
+#: intercom and is released rather than guessed at.
+_CALL_ACCOUNT = re.compile(r"^\s*User-Agent:\s*(?P<user>[^@\s]+)@")
 
 
 class BaresipUa:
@@ -152,7 +191,6 @@ class BaresipUa:
         self,
         host: str,
         port: int,
-        driver_aor: str,
         operator_aor: str,
         timeout: float = DEFAULT_UA_TIMEOUT,
         connect=socket.create_connection,
@@ -160,7 +198,10 @@ class BaresipUa:
         clock=None,
     ) -> None:
         self._address = (host, port)
-        self._aors = {UaLeg.DRIVER: driver_aor, UaLeg.OPERATOR: operator_aor}
+        #: The ONE account this process dials OUT from. There is no driver
+        #: account here any more: the driver's leg is always inbound, and the
+        #: account it arrived at is whichever intercom's it was addressed to.
+        self._operator_aor = operator_aor
         self._timeout = timeout
         self._connect = connect
         self.reconnect_seconds = reconnect_seconds
@@ -271,7 +312,12 @@ class BaresipUa:
         """
         data = _ANSI.sub("", self._command("listcalls"))
         found = []
+        account: str | None = None
         for line in data.splitlines():
+            heading = _CALL_ACCOUNT.match(line)
+            if heading is not None:
+                account = heading.group("user")
+                continue
             match = _CALL_LINE.search(line)
             if match is None:
                 continue
@@ -283,8 +329,30 @@ class BaresipUa:
                     # been answered. `RINGING` is the OUTGOING side of the same
                     # moment and is not one this agent can answer.
                     ringing=match.group("state") == "INCOMING",
+                    account_user=account,
                 )
             )
+        return tuple(found)
+
+    def accounts(self) -> tuple[str, ...]:
+        """The USER PARTS of every local account the user agent is holding.
+
+        Read from `reginfo`, which lists every account whether or not it
+        registers -- measured with a registrar, without one, and with a
+        registration the registrar refused. It is asked ONCE, at startup, so
+        that an intercom whose account the site never added is a refusal naming
+        that intercom rather than a door that is answered `404 Not Found` by
+        baresip and reported nowhere.
+
+        **The answer is never logged and never published.** These user parts
+        carry the dial secrets, and a secret in a log line is a secret.
+        """
+        data = _ANSI.sub("", self._command("reginfo"))
+        found = []
+        for line in data.splitlines():
+            match = _REGINFO_LINE.search(line)
+            if match is not None:
+                found.append(match.group("user"))
         return tuple(found)
 
     def _open(self) -> None:
@@ -358,7 +426,7 @@ class BaresipUa:
             finally:
                 self._sock = None
 
-    # -- the six verbs -----------------------------------------------------
+    # -- the seven verbs ---------------------------------------------------
 
     def version(self) -> str:
         if self._version is None:
@@ -384,41 +452,57 @@ class BaresipUa:
         a perfectly healthy registration would publish `unknown` for as long as
         that registration lasted, and the first thing it ever said about the one
         code it exists to measure would be that it does not know.
+
+        **It reads EVERY account, not one.** There is no single driver account
+        to key on since each intercom has its own, and the event path already
+        worked this way: any `REGISTER_FAIL` set this false whichever account it
+        was for. So: any account the user agent says is in error makes this
+        `False`; otherwise at least one saying `OK` makes it `True`; and an
+        account that has not tried -- the whole of a standalone site, which has
+        no registrar -- leaves it `None`. **`None` is never `False`:** a
+        registration nobody has heard about is not one known to be lost.
         """
         try:
             data = _ANSI.sub("", self._command("reginfo"))
         except UaUnreachable:
             return
+        state: bool | None = None
         for line in data.splitlines():
-            if self._aors[UaLeg.DRIVER] not in line:
+            found = _REGINFO_LINE.search(line)
+            if found is None:
                 continue
-            # `OK`, `ERR` and `zzz` are the user agent's own three words for it,
-            # and the third one means it has not tried yet -- which is `None`
-            # here and never `False`. A registration nobody has heard about is
-            # not one known to be lost.
-            if "OK" in line:
-                self._registered = True
-            elif "ERR" in line:
+            # `OK`, `ERR` and nothing at all are the user agent's own three
+            # answers, measured on 4.11.0 against a registrar that accepts, one
+            # that refuses, and no registrar at all. Read from the field, not
+            # searched for in the line: see the note on the pattern.
+            reported = found.group("state")
+            if reported == "ERR":
                 self._registered = False
-            return
+                return
+            if reported == "OK":
+                state = True
+        self._registered = state
 
     def answer(self, call_id: str) -> None:
         self._command("accept", call_id)
 
-    def dial(self, uri: str, leg: UaLeg = UaLeg.OPERATOR) -> str:
-        """Place a call FROM `leg`'s account, and return the call it created.
+    def dial(self, uri: str) -> str:
+        """Place a call from the OPERATOR account, and return the call it made.
 
-        The account matters and is not cosmetic: it is what `play` targets, so a
-        call placed from the wrong one is a call this process cannot speak to
-        privately afterwards.
+        There is one account to place a call from and one kind of call to place:
+        this agent only ever rings a person. The driver's leg is always inbound,
+        so the parameter that used to choose an account is gone -- with one
+        account per intercom there is no single driver account it could have
+        named, and a call placed from an account that does not exist is a call
+        this process cannot speak to privately afterwards.
         """
-        self._command("uafind", self._aors[leg])
+        self._command("uafind", self._operator_aor)
         data = self._command("dial", uri)
         found = _CALL_ID.search(data)
         if not found:
             raise UaUnreachable(f"the user agent did not name the call it placed: {data!r}")
         call_id = found.group(1)
-        self._accounts[call_id] = self._aors[leg]
+        self._accounts[call_id] = self._operator_aor
         return call_id
 
     def play(self, call_id: str, path: str) -> None:
@@ -586,6 +670,8 @@ class BaresipUa:
                 self._responses.append(message)
 
     def _event(self, message: dict) -> None:
+        if str(message.get("type")) == SESSION_FAILED:
+            return self._session_failed(message)
         kind = EVENT_KINDS.get(str(message.get("type")))
         if kind is None:
             return
@@ -605,6 +691,7 @@ class BaresipUa:
                     peer_uri=message.get("peeruri")
                     if isinstance(message.get("peeruri"), str)
                     else None,
+                    account_user=_user_part(account),
                     digit=str(message.get("param"))
                     if kind is UaEventKind.DTMF and message.get("param") is not None
                     else None,
@@ -613,6 +700,47 @@ class BaresipUa:
         if kind is UaEventKind.CALL_CLOSED and isinstance(call_id, str):
             self._accounts.pop(call_id, None)
             self._cnames.pop(call_id, None)
+
+
+    def _session_failed(self, message: dict) -> None:
+        """An INVITE the user agent refused before this process saw a call.
+
+        Only the `404` is translated, and it is the one that matters: baresip
+        answers it when the request-URI names no account it holds, which is what
+        happens to every caller who does not know an intercom's dial address.
+        The other reasons this event carries -- a call limit, an extension this
+        build does not require, a bad `Via` -- are DROPPED rather than renamed,
+        by the same rule as every unrecognised event type: an event this build
+        cannot place is not one it can act on, and giving it a name would put a
+        guess in the record of what happened.
+        """
+        reason = str(message.get("param") or "")
+        if not reason.startswith(UNKNOWN_ACCOUNT_STATUS):
+            log.info("the user agent refused an inbound call: %s", reason)
+            return
+        with self._lock:
+            self._events.append(
+                UaEvent(
+                    kind=UaEventKind.CALL_TO_UNKNOWN_ACCOUNT,
+                    peer_uri=message.get("from")
+                    if isinstance(message.get("from"), str)
+                    else None,
+                )
+            )
+
+
+def _user_part(aor) -> str | None:
+    """The user part of an address of record, and nothing else of it.
+
+    The host is the registrar's when a site has one and the local address when
+    it has not -- measured, both -- so it is the user part that identifies the
+    account and the user part alone that this package compares.
+    """
+    if not isinstance(aor, str) or "@" not in aor:
+        return None
+    user = aor.split("@", 1)[0]
+    _scheme, _, rest = user.partition(":")
+    return (rest or user).strip() or None
 
 
 def _settings(text: str) -> dict[str, str]:
@@ -636,6 +764,8 @@ __all__ = [
     "INTROSPECTION_MODULE",
     "RECONNECT_FLOOR",
     "REQUIRED_MODULES",
+    "SESSION_FAILED",
     "TESTED_VERSIONS",
+    "UNKNOWN_ACCOUNT_STATUS",
     "BaresipUa",
 ]

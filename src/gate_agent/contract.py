@@ -1383,7 +1383,10 @@ class AgentCode(StrEnum):
     #: The user agent answered with a version this build was not tested against.
     #: The `schema_version` rule applied to a process.
     UA_UNSUPPORTED_VERSION = "ua_unsupported_version"
-    #: A call arrived from a SIP identity no `[intercoms.*]` declares.
+    #: A call arrived at an account no `[intercoms.*]` owns, or the user agent
+    #: refused one outright because it named no account it holds. The subject is
+    #: the AGENT: keying it on the caller would let anybody who can dial the
+    #: agent add a row per invented identity, and the identity is their claim.
     CALL_FROM_UNDECLARED_INTERCOM = "call_from_undeclared_intercom"
     #: The human did not answer inside `[escalation] no_answer_seconds`.
     HUMAN_UNREACHABLE = "human_unreachable"
@@ -1434,8 +1437,11 @@ class AgentEventKind(StrEnum):
     HUMAN_UNREACHABLE = "human_unreachable"
     #: The human answered and keyed nothing this site accepts.
     NOTHING_USABLE = "nothing_usable"
-    #: A call from a SIP identity this site does not declare. One fixed message,
-    #: and the call ends.
+    #: A call this site cannot place: it arrived at an account no declared
+    #: intercom owns, or the user agent itself answered it `404 Not Found`
+    #: because it named no account at all. **Refused WITHOUT being answered**,
+    #: no lane read and none guessed. The record carries what the caller
+    #: claimed to be and nothing else, because a claim is all there was.
     CALL_FROM_UNDECLARED_INTERCOM = "call_from_undeclared_intercom"
     #: A call arrived while a case was already in progress and was refused
     #: WITHOUT being answered, whoever it was from. One case at a time is a real
@@ -1457,7 +1463,13 @@ class AgentEventKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class IntercomDescription:
-    """One declared intercom: its SIP identity, and the lane it belongs to.
+    """One declared intercom: the site's LABEL for it, and the lane it belongs to.
+
+    `sip_uri` is what a site calls that door and what a person reads. It is
+    **not** what identifies a caller: that is the account the call arrived at,
+    whose user part is a secret and therefore appears on no surface at all. A
+    consumer that treated this as an identity would be treating a `From` header
+    as one.
 
     `lane` is `null` for a STANDALONE intercom. That is a mode, not a gap: the
     agent answers, greets, and calls a human, which is the whole job at a garage
@@ -1681,10 +1693,19 @@ class AgentHealth:
 class AgentEvent:
     """One thing the agent did. **There is no field here for a plate.**
 
-    `intercom` is the SIP identity the call came from and `human` the identity
-    the operator leg was placed to or answered from. Both are addresses a site
-    declared, not people: this surface says which door and which rota, and a
-    consumer that wants to know who was on shift asks the rota.
+    `intercom` is the DECLARED name of the door -- the `[intercoms.<sip-uri>]`
+    key -- and `human` the identity the operator leg was placed to or answered
+    from. Both are addresses a site declared, not people: this surface says which
+    door and which rota, and a consumer that wants to know who was on shift asks
+    the rota.
+
+    **`caller_stated_identity` is the one field on this surface that a caller
+    supplies, and it is labelled as a claim in its own name.** It is the `From`
+    header of the call. It is not what identified the intercom -- that is the
+    account the call arrived at, which never appears here because its user part
+    is a secret -- and a consumer that treats it as an identity has been told in
+    the field's name that it is not one. On a refusal it is the whole record of
+    who tried.
     """
 
     kind: str
@@ -1701,6 +1722,10 @@ class AgentEvent:
     #: this surface and it is DIGITS ONLY, refused otherwise, because a field a
     #: caller fills is the field a plate ends up in.
     keyed: str | None = None
+    #: What the caller's `From` header SAID, reduced to `sip:user@host`. A
+    #: CLAIM, never a check: anybody who can send an INVITE can write any value
+    #: here. `null` when the user agent did not report one.
+    caller_stated_identity: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in tuple(kind.value for kind in AgentEventKind):

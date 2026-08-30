@@ -62,6 +62,12 @@ class FakeUa:
     #: fact from `unreachable`, and the difference is whether anybody is paged.
     refuse_play: bool = False
     next_call_id: int = 100
+    #: What `accounts()` answers. `None` means "whatever the configuration
+    #: declares", which `conftest` fills in -- a fake that always answered the
+    #: right thing could not measure the refusal, and one that always answered
+    #: nothing could not measure anything else.
+    held_accounts: tuple[str, ...] | None = None
+    declared_accounts: tuple[str, ...] = ()
 
     def start(self) -> None:
         self.commands.append(("start", ""))
@@ -90,12 +96,12 @@ class FakeUa:
         # hears as a missing first sentence.
         self.established(call_id)
 
-    def dial(self, uri: str, leg: UaLeg = UaLeg.OPERATOR) -> str:
+    def dial(self, uri: str) -> str:
         self._check()
         self.next_call_id += 1
         call_id = f"call-{self.next_call_id}"
         self.dialled.add(call_id)
-        self.commands.append(("dial", f"{leg.value} {uri} -> {call_id}"))
+        self.commands.append(("dial", f"{UaLeg.OPERATOR.value} {uri} -> {call_id}"))
         return call_id
 
     def play(self, call_id: str, path: str) -> None:
@@ -151,10 +157,44 @@ class FakeUa:
 
     # -- what a test drives it with ---------------------------------------
 
-    def incoming(self, peer_uri: str, call_id: str = "call-1") -> None:
+    def incoming(
+        self, peer_uri: str, call_id: str = "call-1", *, account_user: str | None
+    ) -> None:
+        """A call arriving. **`account_user` has no default and that is the point.**
+
+        It is the account the call came in AT, which is the only thing that says
+        which intercom it is. A default here would be a fixture deciding the
+        answer to the question every test using it is asking, and every test
+        that means to exercise the answered path would go on passing if the
+        agent stopped checking the account at all.
+        """
         self.events.append(
-            UaEvent(kind=UaEventKind.CALL_INCOMING, call_id=call_id, peer_uri=peer_uri)
+            UaEvent(
+                kind=UaEventKind.CALL_INCOMING,
+                call_id=call_id,
+                peer_uri=peer_uri,
+                account_user=account_user,
+            )
         )
+
+    def refused_unknown_account(self, peer_uri: str) -> None:
+        """What a user agent reports when it answered an INVITE `404` itself.
+
+        There is no call and there never was one: the request-URI named no
+        account it holds. Measured on baresip 4.11.0 as a `SIPSESS_FAILED`
+        carrying `404 Not Found` and the caller's `From`.
+        """
+        self.events.append(
+            UaEvent(kind=UaEventKind.CALL_TO_UNKNOWN_ACCOUNT, peer_uri=peer_uri)
+        )
+
+    #: The user parts of the accounts this fake is holding. A test that means to
+    #: measure the startup refusal sets this to something that does not cover
+    #: what the configuration declares.
+    def accounts(self) -> tuple[str, ...]:
+        if self.held_accounts is None:
+            return tuple(self.declared_accounts)
+        return tuple(self.held_accounts)
 
     def established(self, call_id: str, media: bool = True) -> None:
         """Answered, and -- unless a test says otherwise -- media up too.

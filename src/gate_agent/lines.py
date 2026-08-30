@@ -48,7 +48,6 @@ DRIVER_LINES: tuple[str, ...] = (
     #: instruction" is not what happened and a driver told it goes on holding.
     "driver.operator_hung_up",
     "driver.hold_reprompt",
-    "driver.undeclared_intercom",
 )
 
 #: The lines the OPERATOR hears, in the operator language only.
@@ -206,10 +205,6 @@ TEXT: dict[str, dict[str, str]] = {
     "driver.hold_reprompt": {
         "en": "Please keep holding. Somebody is dealing with this.",
         "es-ES": "Siga esperando, por favor. Alguien se está ocupando de esto.",
-    },
-    "driver.undeclared_intercom": {
-        "en": "This intercom is not configured. Goodbye.",
-        "es-ES": "Este interfono no está configurado. Adiós.",
     },
     # --- what the operator is told the case is ----------------------------
     # The LANE NAME is not here. It cannot be: a name is a site's value and no

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import agent_config_for, agent_for
+from conftest import INTERCOM_ACCOUNT, agent_config_for, agent_for
 from fake_ua import FakeUa
 from foreign_lane import ForeignLane
 from foreign_lane import make_server as foreign_server
@@ -69,7 +69,7 @@ def busy(tmp_path):
     with serving(foreign_server(lane)) as url:
         ua = FakeUa()
         agent = agent_for(agent_config_for(tmp_path, lane_url=url), ua)
-        ua.incoming(INTERCOM)
+        ua.incoming(INTERCOM, account_user=INTERCOM_ACCOUNT)
         agent.poll()
         yield agent
 
@@ -350,11 +350,13 @@ def test_the_real_adapter_refuses_a_user_agent_version_nobody_tested():
         return lambda _address, timeout=None: Answering(version, **kwargs)
 
     # The control: the version this build WAS tested against starts.
-    good = BaresipUa("127.0.0.1", 1, "sip:a@h", "sip:b@h", connect=connect(TESTED_VERSIONS[0]))
+    good = BaresipUa("127.0.0.1", 1, operator_aor="sip:agent-operator@h",
+                     connect=connect(TESTED_VERSIONS[0]))
     good.start()
     assert good.version() == TESTED_VERSIONS[0]
 
-    bad = BaresipUa("127.0.0.1", 1, "sip:a@h", "sip:b@h", connect=connect("9.9.9"))
+    bad = BaresipUa("127.0.0.1", 1, operator_aor="sip:agent-operator@h",
+                    connect=connect("9.9.9"))
     with pytest.raises(UaUnsupportedVersion) as raised:
         bad.start()
     assert "9.9.9" in str(raised.value)
@@ -420,7 +422,7 @@ def test_the_real_adapter_refuses_a_baresip_configuration_it_cannot_work_on(tmp_
 
     def ua(config=GOOD_CONFIG, modules=GOOD_MODULES, refuse=()):
         return BaresipUa(
-            "127.0.0.1", 1, "sip:a@h", "sip:b@h",
+            "127.0.0.1", 1, operator_aor="sip:agent-operator@h",
             connect=lambda _a, timeout=None: Answering(config, modules, refuse),
         )
 
@@ -483,7 +485,7 @@ def test_human_unreachable_recovers_when_the_person_answers(tmp_path):
     agent = agent_for(
         agent_config_for(tmp_path, standalone=True, no_answer_seconds=30.0), ua, clock=clock
     )
-    ua.incoming(INTERCOM)
+    ua.incoming(INTERCOM, account_user=INTERCOM_ACCOUNT)
     for _ in range(200):
         agent.poll()
         if any(verb == "dial" for verb, _ in ua.commands):
@@ -499,7 +501,7 @@ def test_human_unreachable_recovers_when_the_person_answers(tmp_path):
         if agent.session is None:
             break
         clock.advance(2.0)
-    ua.incoming(INTERCOM, call_id="call-2")
+    ua.incoming(INTERCOM, call_id="call-2", account_user=INTERCOM_ACCOUNT)
     for _ in range(200):
         agent.poll()
         if len([1 for verb, _ in ua.commands if verb == "dial"]) >= 2:
@@ -589,7 +591,7 @@ def test_the_control_socket_is_reopened_with_a_bounded_backoff():
         return sock
 
     ua = BaresipUa(
-        "127.0.0.1", 1, "sip:a@h", "sip:b@h",
+        "127.0.0.1", 1, operator_aor="sip:agent-operator@h",
         connect=connect, reconnect_seconds=4.0, clock=lambda: world["now"][0],
     )
     ua.start()
@@ -685,7 +687,8 @@ def test_a_call_that_arrived_while_the_socket_was_down_is_answered_or_released(t
 
     ua = Reconnecting()
     agent = agent_for(agent_config_for(tmp_path, standalone=True), ua)
-    ua.incoming("sip:door1@10.0.0.9", call_id="driver-1")
+    ua.incoming("sip:door1@10.0.0.9", call_id="driver-1",
+                account_user=INTERCOM_ACCOUNT)
     agent.poll()
     assert agent.session is not None
 
@@ -703,8 +706,14 @@ def test_a_call_that_arrived_while_the_socket_was_down_is_answered_or_released(t
     # It comes back holding a ringing call and an orphaned one.
     ua.down = False
     ua.held = [
-        UaCall(call_id="ringing-9", peer_uri="sip:door1@10.0.0.9", ringing=True),
-        UaCall(call_id="orphan-9", peer_uri="sip:duty@10.0.0.5", ringing=False),
+        # The ACCOUNT comes back with the call. `listcalls` groups its calls
+        # under the account holding them, one heading per user agent -- measured
+        # on baresip 4.11.0 -- and without it a recovered call could not be
+        # placed at an intercom and would have to be released.
+        UaCall(call_id="ringing-9", peer_uri="sip:door1@10.0.0.9", ringing=True,
+               account_user=INTERCOM_ACCOUNT),
+        UaCall(call_id="orphan-9", peer_uri="sip:duty@10.0.0.5", ringing=False,
+               account_user="agent-operator"),
     ]
     agent.poll()
 
@@ -720,3 +729,279 @@ def test_a_call_that_arrived_while_the_socket_was_down_is_answered_or_released(t
     # The orphan is RELEASED. A leg left live is a leg conferenced into the
     # next case, which is blocker 1's harm arriving by another road.
     assert ("hangup", "orphan-9") in ua.commands
+
+
+def test_a_recovered_call_at_an_undeclared_account_is_released_not_answered(tmp_path):
+    """The reconnect path is not a way round the account check.
+
+    A call the user agent was holding when the socket came back goes through the
+    SAME rule as any other, and a ringing one whose account nobody declared is
+    refused rather than answered -- otherwise every guarantee about who gets
+    answered would have a second door with no lock on it.
+    """
+    from conftest import INTERCOM_ACCOUNT, agent_config_for, agent_for
+    from fake_ua import FakeUa
+    from gate_agent.contract import AgentEventKind
+    from gate_agent.ua import UaCall, UaUnreachable
+
+    class Losable(FakeUa):
+        """A socket that goes and comes back holding whatever a test put there."""
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.down = False
+            self.broken = False
+
+        def poll(self):
+            if self.down or self.broken:
+                self.broken = True
+                raise UaUnreachable("the user agent closed its control socket")
+            return super().poll()
+
+        def reconnect(self):
+            if self.down:
+                raise UaUnreachable("still down")
+            self.broken = False
+            return tuple(self.held)
+
+    ua = Losable()
+    agent = agent_for(agent_config_for(tmp_path, standalone=True), ua)
+    ua.down = True
+    agent.poll()
+    ua.down = False
+    ua.held = [
+        UaCall(call_id="ringing-9", peer_uri="sip:door1@10.0.0.9", ringing=True,
+               account_user="agent-nothing-this-site-declares"),
+    ]
+    agent.poll()
+    assert ("answer", "ringing-9") not in ua.commands
+    assert ("hangup", "ringing-9") in ua.commands
+    assert agent.session is None
+    assert [event["kind"] for event in agent.events(0).to_dict()["events"]] == [
+        AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM.value
+    ]
+
+    # THE CONTROL: the same path, the declared account, IS answered -- so the
+    # refusal above is about the account and not about the reconnect.
+    ua.broken = True
+    ua.held = [
+        UaCall(call_id="ringing-10", peer_uri="sip:door1@10.0.0.9", ringing=True,
+               account_user=INTERCOM_ACCOUNT),
+    ]
+    agent.poll()
+    agent.poll()
+    assert ("answer", "ringing-10") in ua.commands
+
+
+def test_the_agent_refuses_to_start_without_an_account_for_a_declared_intercom(tmp_path):
+    """X2'. A door in this file and not in the user agent's is a silent door.
+
+    baresip answers an INVITE naming an account it does not hold with
+    `404 Not Found`, before this process sees anything at all -- so without this
+    check the agent would publish a working surface while one entrance's
+    intercom did nothing, at whatever hour somebody first pressed it.
+
+    **The message names the intercom and never the account**, because the
+    account's user part IS the secret.
+    """
+    from conftest import INTERCOM_ACCOUNT, agent_config_for
+    from fake_ua import FakeUa
+    from gate_agent.agent import Agent
+    from gate_agent.ua import UaMisconfigured
+
+    config = agent_config_for(tmp_path, standalone=True)
+    ua = FakeUa(held_accounts=("agent-operator", "agent-some-other-door"))
+    with pytest.raises(UaMisconfigured) as raised:
+        Agent(config, ua).start()
+    assert "sip:door1@10.0.0.9" in str(raised.value)
+    assert INTERCOM_ACCOUNT not in str(raised.value), "the refusal published the secret"
+
+    # THE CONTROL: the same agent, on a user agent that IS holding the account,
+    # starts -- so the refusal is about the account and not about starting.
+    Agent(config, FakeUa(held_accounts=(INTERCOM_ACCOUNT,))).start()
+
+
+def test_the_adapter_reads_the_accounts_and_the_registrations_off_reginfo(tmp_path):
+    """What `reginfo` actually looks like, in the three states it has.
+
+    Measured on baresip 4.11.0: every account is listed whether or not it
+    registers; `OK` and `ERR` appear only where a registration was attempted;
+    and an account that has not tried -- the whole of a standalone site, which
+    has no registrar -- shows neither. **That third state is `None` and never
+    `False`:** a registration nobody has heard about is not one known to be
+    lost, and publishing the second pages somebody to a working site.
+    """
+    import json as _json
+
+    from gate_agent.ua_baresip import BaresipUa
+
+    ANSI_OK = "\x1b[32mOK \x1b[;m"
+    ANSI_ERR = "\x1b[31mERR\x1b[;m"
+
+    class Answering:
+        def __init__(self, reginfo):
+            self.reginfo, self.pending = reginfo, b""
+
+        def settimeout(self, _t):
+            pass
+
+        def sendall(self, payload):
+            body = _json.loads(payload.split(b":", 1)[1][:-1].decode())
+            data = self.reginfo if body["command"] == "reginfo" else ""
+            answer = _json.dumps(
+                {"response": True, "ok": True, "data": data, "token": body["token"]}
+            ).encode()
+            self.pending += b"%d:%s," % (len(answer), answer)
+
+        def recv(self, _size):
+            out, self.pending = self.pending, b""
+            return out
+
+        def close(self):
+            pass
+
+    def ua(reginfo):
+        made = BaresipUa(
+            "127.0.0.1", 1, operator_aor="sip:agent-operator@h",
+            connect=lambda _a, timeout=None: Answering(reginfo),
+        )
+        return made
+
+    registered = (
+        "\n--- User Agents (3) ---\n"
+        f"0 - sip:agent-aaaa@127.0.0.1:5060 {ANSI_OK}  Expires 60s\n"
+        f"1 - sip:agent-bbbb@127.0.0.1:5060 {ANSI_OK}  Expires 60s\n"
+        f"2 - sip:agent-operator@127.0.0.1:5060 {ANSI_OK}  Expires 60s\n\n"
+    )
+    standalone = (
+        "\n--- User Agents (2) ---\n"
+        "0 - sip:agent-aaaa@127.0.0.1      \n"
+        "1 - sip:agent-operator@127.0.0.1      \n\n"
+    )
+    refused_one = (
+        "\n--- User Agents (2) ---\n"
+        f"0 - sip:agent-aaaa@127.0.0.1:5060 {ANSI_ERR} \n"
+        "1 - sip:agent-bbbb@127.0.0.1      \n\n"
+    )
+
+    one = ua(registered)
+    one._open()
+    assert one.accounts() == ("agent-aaaa", "agent-bbbb", "agent-operator")
+    one._read_registration()
+    assert one.registered() is True
+
+    two = ua(standalone)
+    two._open()
+    assert two.accounts() == ("agent-aaaa", "agent-operator")
+    two._read_registration()
+    assert two.registered() is None, "a site with no registrar was reported as LOST"
+
+    three = ua(refused_one)
+    three._open()
+    assert three.accounts() == ("agent-aaaa", "agent-bbbb")
+    three._read_registration()
+    assert three.registered() is False
+
+    # AND THE STATE COMES FROM ITS OWN FIELD, not from a search of the line. A
+    # dial secret is an arbitrary string: an account whose user part happens to
+    # contain `ERR` is a healthy account, and reading it as a lost registration
+    # would page somebody to a working site. It is this project's standing
+    # error -- a check that matched a word instead of a position -- so it gets a
+    # case of its own.
+    trap = (
+        "\n--- User Agents (2) ---\n"
+        f"0 - sip:agent-zzERRzzOKzz0000@127.0.0.1:5060 {ANSI_OK}  Expires 60s\n"
+        f"1 - sip:agent-operator@127.0.0.1:5060 {ANSI_OK}  Expires 60s\n\n"
+    )
+    four = ua(trap)
+    four._open()
+    assert four.accounts() == ("agent-zzERRzzOKzz0000", "agent-operator")
+    four._read_registration()
+    assert four.registered() is True, "a secret containing `ERR` read as a lost registration"
+
+
+def test_listcalls_says_which_account_holds_each_call(tmp_path):
+    """The account has to survive a lost control socket, or a recovered call
+    cannot be placed at an intercom and has to be released.
+
+    `listcalls` groups its calls under the account holding them, one heading per
+    user agent -- measured on baresip 4.11.0 with two accounts registered and a
+    call ringing at the second.
+    """
+    import json as _json
+
+    from gate_agent.ua_baresip import BaresipUa
+
+    LISTCALLS = (
+        "\nUser-Agent: agent-aaaa@127.0.0.1\n"
+        "--- Active calls (0) ---\n\n"
+        "\nUser-Agent: agent-bbbb@127.0.0.1\n"
+        "--- Active calls (1) ---\n"
+        "> [line 1, id 86bd03e1b6b94f51]  0:00:00   INCOMING             sip:door1@10.0.0.9\n"
+    )
+
+    class Answering:
+        def __init__(self):
+            self.pending = b""
+
+        def settimeout(self, _t):
+            pass
+
+        def sendall(self, payload):
+            body = _json.loads(payload.split(b":", 1)[1][:-1].decode())
+            data = LISTCALLS if body["command"] == "listcalls" else ""
+            answer = _json.dumps(
+                {"response": True, "ok": True, "data": data, "token": body["token"]}
+            ).encode()
+            self.pending += b"%d:%s," % (len(answer), answer)
+
+        def recv(self, _size):
+            out, self.pending = self.pending, b""
+            return out
+
+        def close(self):
+            pass
+
+    made = BaresipUa(
+        "127.0.0.1", 1, operator_aor="sip:agent-operator@h",
+        connect=lambda _a, timeout=None: Answering(),
+    )
+    made._open()
+    held = made.calls()
+    assert len(held) == 1
+    assert held[0].call_id == "86bd03e1b6b94f51"
+    assert held[0].ringing is True
+    assert held[0].account_user == "agent-bbbb", "the call was placed at the wrong account"
+
+
+def test_the_adapter_turns_a_404_into_an_event_and_leaves_the_rest_alone(tmp_path):
+    """What baresip puts on the socket when it refuses an INVITE itself.
+
+    Measured on 4.11.0, with a registrar and without one: an INVITE naming no
+    account it holds is answered `404 Not Found` and reported as
+    `SIPSESS_FAILED` carrying the caller's `From`. The OTHER reasons that event
+    carries -- a call limit, a bad `Via` -- are DROPPED rather than renamed, by
+    the same rule as every unrecognised event type.
+    """
+    from gate_agent.ua import UaEventKind
+    from gate_agent.ua_baresip import BaresipUa
+
+    made = BaresipUa("127.0.0.1", 1, operator_aor="sip:agent-operator@h")
+    made._event({
+        "event": True, "class": "sip", "type": "SIPSESS_FAILED",
+        "param": "404 Not Found", "from": "sip:scanner@10.9.9.9",
+        "contact": "<sip:caller@10.9.9.9:5060>",
+    })
+    events = tuple(made._events)
+    made._events.clear()
+    assert [one.kind for one in events] == [UaEventKind.CALL_TO_UNKNOWN_ACCOUNT]
+    assert events[0].peer_uri == "sip:scanner@10.9.9.9"
+    assert events[0].call_id is None
+
+    # The rest are dropped. A call limit is not an unknown account, and giving
+    # it that name would put a guess in the record of what happened.
+    made._event({
+        "event": True, "class": "sip", "type": "SIPSESS_FAILED",
+        "param": "486 Max Calls", "from": "sip:door1@10.0.0.9",
+    })
+    assert tuple(made._events) == ()

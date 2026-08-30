@@ -12,6 +12,14 @@ this package cannot build a request that is not a `GET`. `OPEN_NOW` ends in an
 event, two audio messages, and nothing else -- and one of those messages is the
 person being told, in the same breath, that this version cannot move a barrier.
 
+**WHICH INTERCOM A CALL IS FROM IS THE ADDRESS IT DIALLED, NEVER WHO IT SAYS IT
+IS.** Each declared intercom has an account of its own on the user agent, whose
+user part is a secret only that intercom's installer knows, and a call is that
+intercom if and only if it arrived AT that account. The caller's `From` is
+recorded as `caller_stated_identity` -- a claim, so labelled -- and nothing is
+decided by it. A caller who can write any `From` it likes reaches nothing,
+because the secret never travels in a header: it is the number dialled.
+
 **The case is derived, never asked.** `cases.derive()` is a pure function of what
 the lane published. The driver is not offered a menu of problems, because a
 driver at a barrier does not know which of them happened.
@@ -64,7 +72,14 @@ from .contract import (
     UserAgentDescription,
 )
 from .lines import audio_name
-from .ua import UaEvent, UaEventKind, UaLeg, UaRefused, UaUnreachable
+from .ua import (
+    UaEvent,
+    UaEventKind,
+    UaLeg,
+    UaMisconfigured,
+    UaRefused,
+    UaUnreachable,
+)
 
 log = logging.getLogger(__name__)
 
@@ -196,7 +211,11 @@ class Agent:
             lane.name: client_factory(lane.url, lane.token, lane.timeout_seconds)
             for lane in config.lanes
         }
-        self._by_uri = {intercom.sip_uri: intercom for intercom in config.intercoms}
+        #: Keyed on the account a call ARRIVES AT, which is what identifies the
+        #: intercom. Never on the `From`: that is a string the caller writes.
+        self._by_account = {
+            intercom.account_user: intercom for intercom in config.intercoms
+        }
         self.session: Session | None = None
         self._durations: dict[Path, float] = {}
         self._states: dict[tuple[str, str], str] = {}
@@ -222,9 +241,45 @@ class Agent:
         for leg in UaLeg:
             self._code(AgentCode.AUDIO_PLAYBACK_FAILED, leg.value, HealthState.OK)
         self.ua.start()
+        self._check_accounts()
         self._ua_version = self.ua.version()
         self._code(AgentCode.UA_UNREACHABLE, self.config.agent_id, HealthState.OK)
         self._code(AgentCode.UA_UNSUPPORTED_VERSION, self.config.agent_id, HealthState.OK)
+
+    def _check_accounts(self) -> None:
+        """Every declared intercom's account must be one the user agent holds.
+
+        Without this, a door whose account the site never added to the user
+        agent's own configuration is answered `404 Not Found` by baresip, before
+        this process sees anything -- so the agent would publish a working
+        surface while one entrance's intercom did nothing at all, at whatever
+        hour somebody first pressed it. Asked once, at startup, against the
+        running user agent rather than against a file this package does not own.
+
+        **The message names the INTERCOM and never the account.** The account's
+        user part IS the secret.
+
+        `accounts()` is asked unconditionally rather than through a `getattr`
+        that would skip when a user agent has not got it. A check that can be
+        absent is a check that will one day be absent on the day it mattered,
+        and this one is the whole of who gets answered.
+        """
+        held = set(self.ua.accounts())
+        missing = sorted(
+            intercom.sip_uri
+            for intercom in self.config.intercoms
+            if intercom.account_user not in held
+        )
+        if missing:
+            raise UaMisconfigured(
+                "the user agent holds no account for "
+                + ", ".join(repr(one) for one in missing)
+                + ". Each declared intercom is identified by the account it dials, so an "
+                "account the user agent has not been given is a door whose every call is "
+                "answered `404 Not Found` and reported nowhere. Add the account named by "
+                "that intercom's dial_secret_file to the user agent's own configuration. "
+                "Refusing to start."
+            )
 
     def _measure_audio(self) -> None:
         """Read every file this configuration can reach for, and time it.
@@ -345,6 +400,7 @@ class Agent:
                         kind=UaEventKind.CALL_INCOMING,
                         call_id=call.call_id,
                         peer_uri=call.peer_uri,
+                        account_user=call.account_user,
                     )
                 )
                 continue
@@ -364,13 +420,24 @@ class Agent:
             if registered is None
             else (HealthState.OK if registered else HealthState.ACTIVE)
         )
-        self._code(
-            AgentCode.SIP_REGISTRATION_LOST, self.config.user_agent.driver_aor, state
-        )
+        # The subject is the AGENT rather than one account. It holds one per
+        # declared intercom now, and their user parts are the dial secrets --
+        # publishing them as health subjects would put every one of them on
+        # `GET /v1/agent/health`. What the code says is what the user agent
+        # answers: any account it reports in error makes this `active`.
+        self._code(AgentCode.SIP_REGISTRATION_LOST, self.config.agent_id, state)
 
     def _handle(self, event: UaEvent) -> None:
         if event.kind is UaEventKind.CALL_INCOMING:
             return self._incoming(event)
+        if event.kind is UaEventKind.CALL_TO_UNKNOWN_ACCOUNT:
+            # The USER AGENT refused it -- an INVITE to an address no account of
+            # its holds, which is what every caller who does not know an
+            # intercom's dial address gets. There is no call to hang up and
+            # never was one. It is recorded because the alternative is that the
+            # commonest unwanted caller leaves no trace at all, and a site that
+            # is being scanned should be able to see it.
+            return self._undeclared(_bare_uri(event.peer_uri))
         session = self.session
         if session is None or event.call_id is None:
             return
@@ -409,50 +476,47 @@ class Agent:
     def _incoming(self, event: UaEvent) -> None:
         """A new inbound call. **The live case is checked BEFORE the identity.**
 
-        The order is the whole of this method. `concurrent_cases` is 1 because
-        the user agent's bridge is site-wide, so the limit has to hold against
-        EVERY caller -- and being undeclared is the DEFAULT state of every
-        caller on the network, not a rare one. Checking the identity first made
-        the limit apply only to callers the site had declared: a stranger
+        The order is the first half of this method. `concurrent_cases` is 1
+        because the user agent's bridge is site-wide, so the limit has to hold
+        against EVERY caller -- and being undeclared is the DEFAULT state of
+        every caller on the network, not a rare one. Checking the identity first
+        made the limit apply only to callers the site had declared: a stranger
         dialling mid-case was answered, given a session, and conferenced into a
         live bridge, and the fixed sentence it was told ended with `hangup_all`,
         which cut off the real driver and the real operator.
 
-        So: a live case refuses every new call, unanswered, without looking at
-        who it is. Neither refusal assigns `session`, plays anything, or sends
-        `conference`.
+        **The identity is the account the call ARRIVED AT**, which is the second
+        half. Each intercom dials an address only its installer knows, so a call
+        at that account is that intercom. The `From` is recorded as a CLAIM and
+        decides nothing: it used to be the whole of the mapping, and a fourth
+        user agent asserting a declared door's address of record was answered as
+        that lane, had a person rung at three in the morning, and wrote a
+        complete `authorisation_received` naming a barrier nobody was standing
+        at.
+
+        Neither refusal assigns `session`, plays anything, or sends `conference`.
         """
-        uri = _bare_uri(event.peer_uri)
+        claimed = _bare_uri(event.peer_uri)
         if self.session is not None:
-            # NOT answered, whoever it is. The refusal carries the caller's
-            # identity so a site can see who was turned away, and reading that
-            # identity is the only thing done with it.
-            self._record(AgentEventKind.CALL_REFUSED_BUSY, intercom=uri or "unknown")
+            # NOT answered, whoever it is. The refusal carries the identity the
+            # caller CLAIMED so a site can see who was turned away, and reading
+            # it is the only thing done with it.
+            self._record(
+                AgentEventKind.CALL_REFUSED_BUSY,
+                caller_stated_identity=claimed or None,
+            )
             if event.call_id:
                 self.ua.hangup(event.call_id)
             return
-        intercom = self._by_uri.get(uri)
+        intercom = self._by_account.get(event.account_user or "")
         if intercom is None:
-            # ONE fixed message and the call ends. The agent never guesses a
-            # lane: a guess here is a guess about which barrier somebody is
-            # standing at.
-            self._code(
-                AgentCode.CALL_FROM_UNDECLARED_INTERCOM,
-                uri or "unknown",
-                HealthState.ACTIVE,
-            )
-            self._record(AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM, intercom=uri or "unknown")
+            # NOT answered either. A call at an account no intercom declares is
+            # a caller this site has no way to place, and answering it would
+            # mean speaking to somebody about a barrier the agent would have to
+            # guess at.
+            self._undeclared(claimed)
             if event.call_id:
-                self.ua.answer(event.call_id)
-                session = Session(
-                    intercom=Intercom(sip_uri=uri or "unknown", lane=None, name_audio=Path()),
-                    driver_call=event.call_id,
-                    started=self._clock(),
-                    state=State.CLOSING,
-                    languages=self.config.driver_languages,
-                )
-                self.session = session
-                self._say(session, UaLeg.DRIVER, "driver.undeclared_intercom")
+                self.ua.hangup(event.call_id)
             return
         if event.call_id is None:
             return
@@ -465,10 +529,10 @@ class Agent:
         )
         self.session = session
         self._code(
-            AgentCode.CALL_FROM_UNDECLARED_INTERCOM, uri or "unknown", HealthState.OK
+            AgentCode.CALL_FROM_UNDECLARED_INTERCOM, self.config.agent_id, HealthState.OK
         )
         self._record(AgentEventKind.CALL_ANSWERED, intercom=intercom.sip_uri,
-                     lane=intercom.lane)
+                     lane=intercom.lane, caller_stated_identity=claimed or None)
         session.case = derive(
             self._read_lane(intercom),
             now=datetime.now(UTC),
@@ -486,6 +550,25 @@ class Agent:
         else:
             session.state = State.SPEAKING_CASE
         session.deadline = None
+
+    def _undeclared(self, claimed: str) -> None:
+        """A caller this site cannot place: one code, one event, and no lane.
+
+        The subject of the code is the AGENT and not the caller. A caller-keyed
+        subject let anybody who could dial the agent add rows to its health
+        surface for ever, one per identity they invented -- and the identity
+        they invented is a claim, so the surface would have been filling with
+        the attacker's own strings.
+        """
+        self._code(
+            AgentCode.CALL_FROM_UNDECLARED_INTERCOM,
+            self.config.agent_id,
+            HealthState.ACTIVE,
+        )
+        self._record(
+            AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM,
+            caller_stated_identity=claimed or None,
+        )
 
     def _read_lane(self, intercom: Intercom) -> LaneReading:
         """The lane's last decision and health, through the contract, GET only.
@@ -551,9 +634,7 @@ class Agent:
         session.state = State.CALLING_HUMAN
         session.deadline = self._clock() + self.config.no_answer_seconds
         try:
-            session.operator_call = self.ua.dial(
-                self.config.human_sip_uri, UaLeg.OPERATOR
-            )
+            session.operator_call = self.ua.dial(self.config.human_sip_uri)
         except UaUnreachable as exc:
             log.error("could not call the human: %s", exc)
             self._human_unreachable(session)
@@ -946,6 +1027,7 @@ class Agent:
             human=fields.get("human"),
             at=self._now(),
             keyed=fields.get("keyed"),
+            caller_stated_identity=fields.get("caller_stated_identity"),
         )
         if len(self._log) == self._log.maxlen:
             self._dropped += 1
@@ -1029,14 +1111,14 @@ class Agent:
 
 
 def _bare_uri(peer: str | None) -> str:
-    """A SIP identity, without a display name, parameters or a port.
+    """The identity a caller CLAIMED, without a display name, parameters or port.
 
-    An intercom's `From` header is not stable to the character: a unit may send
-    `"Door 1" <sip:door1@10.0.0.9:5060>;tag=…` on one call and
-    `sip:door1@10.0.0.9` on the next, and a mapping keyed on the whole string
-    would answer one of them `this intercom is not configured`. Reduced by
-    SHAPE, once, here -- so a site declares `sip:door1@10.0.0.9` and the
-    declaration means the same thing every time.
+    Nothing is decided by it -- the account the call arrived at is what says
+    which intercom it is -- but it is what goes on the record as
+    `caller_stated_identity`, and a `From` is not stable to the character: a
+    unit sends `"Door 1" <sip:door1@10.0.0.9:5060>;tag=…` on one call and
+    `sip:door1@10.0.0.9` on the next, and two spellings of one claim would read
+    as two callers. Reduced by SHAPE, once, here.
     """
     if not peer:
         return ""

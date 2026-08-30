@@ -1360,13 +1360,14 @@ Tested version: **baresip 4.11.0** (BSD-3-Clause). Debian and Ubuntu package
 older releases that do not carry the two modules this needs, so it is built from
 source at that tag on the target and on the CI runner.
 
-Five things on the baresip side are load-bearing, and all five are configuration
-rather than code. **Three of them are now CHECKED, at startup, by reading the
-configuration back out of the running process** — `ctrl_tcp` answers `config`
-with the loaded settings and `modules` with the loaded module list, both from
-baresip's `debug_cmd` module, which is why that module is in the required list.
-The agent refuses to start on any of them, naming the setting. Reproduce:
-`pytest -k baresip_configuration`.
+Seven things on the baresip side are load-bearing, and every one of them is
+configuration rather than code. **Four of them are now CHECKED, at startup, by
+reading the running process back** — `ctrl_tcp` answers `config` with the loaded
+settings, `modules` with the loaded module list, both from baresip's `debug_cmd`
+module (which is why that module is in the required list), and `reginfo` with
+every account it holds. The agent refuses to start on any of them, naming the
+setting or the intercom. Reproduce: `pytest -k baresip_configuration` and
+`pytest -k account`.
 
 | | checked at startup? | |
 |---|---|---|
@@ -1374,6 +1375,8 @@ The agent refuses to start on any of them, naming the setting. Reproduce:
 | `call_hold_other_calls no` | **yes**, read from `config` | baresip's default holds every other call when a new one is established, which would put the driver on hold the moment the agent calls the operator. |
 | an audio device that is **not** `aubridge` | **yes**, `audio_source` and `audio_player` read from `config` | baresip's own module documentation says what it is, verbatim: it "can be used to connect two audio devices together, so that all output to AUPLAY device is bridged as the input to a AUSRC device". That is every call bridged to every other one whether the agent asked or not. **What it then does to this agent is NOT MEASURED and no number here depends on it** — an earlier sentence claimed the operator heard the driver before `conference` was sent, and an independent session could not reproduce it. The refusal does not rest on that claim; it rests on what the module is. |
 | modules `ctrl_tcp`, `mixausrc`, `mixminus` (and `aufile`, `account`, `menu`, `debug_cmd`) | **yes** for the first three, read from `modules` | `mixausrc` is what plays one file into ONE leg; `mixminus` is what the bridge is; `debug_cmd` is what answers the two commands this check is made of. Without them the agent can answer a call and do nothing else. |
+| one account per declared intercom, named by its `dial_secret_file` | **yes**, read from `reginfo` at startup | It is what says which intercom a call is from. A missing one is refused by name — the intercom's name, never the secret's. |
+| `sip_cuser_random` **unset** | no — baresip 4.11.0 does not report it on `config` (measured; `filter_registrar` is in that output and this is not) | With it on, every account's contact user gets a random suffix and an INVITE aimed at the account's own user part is answered `404 Not Found` — measured, with the plain configuration as the control. **It fails CLOSED:** the intercom cannot get in at all, so this is a door that never works and never a door somebody else can open. |
 | **nothing else attached to that control socket** | no — it is not a setting | baresip's `ctrl_tcp` accepts exactly ONE client. A second connection — a console, a script, a monitoring tool — takes the agent's away. **The agent now REOPENS it:** see below. |
 
 ### The control socket is reopened, and how long that takes is a setting
@@ -1399,31 +1402,77 @@ by the same rule any new call gets: one still **ringing** is answered, and
 anything else is released rather than left live to be conferenced into the next
 case.
 
-**Two accounts, one per leg.** baresip identifies the audio stream to play into
-by the local account's address of record, so two calls on one account cannot be
-told apart — and the menu meant for the person on the phone would play to the
-driver at the barrier. `[user_agent] driver_aor` and `operator_aor` are declared
-and startup refuses them equal.
+**One account per leg, and the legs are on different ones.** baresip identifies
+the audio stream to play into by the local account, so two calls on one account
+cannot be told apart — and the menu meant for the person on the phone would play
+to the driver at the barrier. The driver's leg sits on whichever intercom
+account the call arrived at (below); `[user_agent] operator_aor` is the one this
+agent dials OUT from, declared, and startup refuses it if it collides with any
+intercom's.
 
-## Which lane a call belongs to
+## Which intercom a call is from
+
+**IT IS THE ADDRESS THE CALLER DIALLED. IT IS NOT WHO THE CALLER SAYS IT IS.**
+
+Each declared intercom gets an account of its own on the user agent, whose user
+part is a long random string the site generates once:
+`[intercoms.<sip-uri>] dial_secret_file` names a file holding it — a FILE, no
+default, and refused if anybody but its owner can read it, exactly like every
+other credential this package takes. The installer does three things once:
+writes the secret, adds `<sip:agent-<secret>@<the agent's host>>` to the user
+agent's own `accounts` file, and programs that same address into the door
+station as the number it calls. **A call is that intercom if and only if it
+arrived AT that account.**
+
+Why this and not the `From` header: baresip routes an inbound INVITE by the
+REQUEST-URI's user part and reports the account it chose on the control socket
+(measured on 4.11.0, with a registrar and without one), and the secret therefore
+never travels in a header a caller writes. It is the number dialled. A caller
+who asserts a declared door's own address of record — which used to be answered
+as that lane, ring a person, and write a complete authorisation record naming a
+barrier nobody was standing at — now reaches an account it cannot name, and the
+user agent answers it `404 Not Found` before this agent sees anything.
+
+**What this does NOT do, stated plainly because it is what an integrator needs
+to decide with.** A secret in a device's configuration is only as private as
+that device: anybody who can read the door station's own configuration can call
+as that door. That is a different exposure from a `From` header, which anybody
+on the same network can write without touching anything at all, but it is not
+nothing — and **nothing here measures it.** It is also not a secure channel:
+this is UDP SIP on the site's own network unless the site puts TLS under it, and
+an attacker who can READ the intercom's traffic can read the address it dials.
+What the mechanism removes is the attacker who can only SEND.
 
 `[intercoms.<sip-uri>] lane = "<lane name>"`, **per site, no default**, and
-startup refuses an intercom with no lane or a declared lane with no intercom.
-The SIP identity of the caller is the only thing that says which barrier
-somebody is standing at, and an agent that guessed would be guessing that.
+startup refuses an intercom with no lane or a declared lane with no intercom. An
+agent that guessed which lane would be guessing which barrier somebody is
+standing at.
 
-A call from a SIP identity no `[intercoms.*]` declares is answered with **one
-fixed message** — "this intercom is not configured" — and ended. It is an event
-(`call_from_undeclared_intercom`) and a code of the same name. **No lane is read
-and none is guessed.**
+**The table key is a LABEL.** It is what appears on events, on the read surface
+and in front of a person; it is what the `From` header is compared against for
+the record; and **nothing is routed on it.** It is recorded as
+`caller_stated_identity`, reduced by shape rather than character for character —
+a door station sends `"Door 1" <sip:door1@10.0.0.9:5060>;tag=…` on one call and
+the bare URI on the next, and two spellings of one claim would read as two
+callers.
 
-**That is what happens when the agent is not already on a case.** The identity is
+A call at an account no `[intercoms.*]` owns is **refused without being
+answered**. So is one the user agent refused itself. Both are an event
+(`call_from_undeclared_intercom`) and a code of the same name, carrying what the
+caller claimed to be and nothing else, because a claim is all there was. **No
+lane is read and none is guessed**, and nothing is played: this version has no
+sentence for a caller it cannot place, because answering one means speaking to
+somebody about a barrier it would have to guess at.
+
+**That is what happens when the agent is not already on a case.** The account is
 looked at only then — see "One case at a time" below: a live case refuses every
 new call, whoever it is from, before anybody's identity is read.
 
-The identity is matched by SHAPE, not character for character: a door station
-sends `"Door 1" <sip:door1@10.0.0.9:5060>;tag=…` on one call and the bare URI on
-the next, and a site declares `sip:door1@10.0.0.9` once.
+**Startup refuses an intercom whose account the user agent is not holding**,
+naming that intercom and never the secret. Without it, a door the installer
+added to this file and forgot to add to the user agent's would be answered
+`404 Not Found` by baresip and reported nowhere, while this agent published a
+working surface.
 
 **`lane = "none"` is STANDALONE**, and it is a mode rather than a degraded
 configuration: a garage with an intercom and no lane is the whole product for
@@ -1804,10 +1853,10 @@ has been taken at it.
 
 | code | subject | what it means |
 |---|---|---|
-| `sip_registration_lost` | the driver-leg account | **This is the lane contract's `intercom_registration_lost`, measured where it can be measured.** A lane cannot see whether the agent is registered; the agent can. Both documents say so, in the same words. `unknown` until the UA has said something — a registration nobody has heard about is not one known to be lost, and publishing the second pages somebody to a working site |
+| `sip_registration_lost` | this agent | **This is the lane contract's `intercom_registration_lost`, measured where it can be measured.** A lane cannot see whether the agent is registered; the agent can. Both documents say so, in the same words. The subject is the agent rather than an account: it holds one account per intercom now and their user parts are the dial secrets, so naming them here would publish every one of them. Any account the user agent reports in error makes this `active`. `unknown` until the UA has said something — including the whole of a standalone site, which has no registrar to register with — because a registration nobody has heard about is not one known to be lost, and publishing the second pages somebody to a working site |
 | `ua_unreachable` | this agent | the user agent's control socket did not answer. The agent is up and cannot answer a call |
 | `ua_unsupported_version` | this agent | the UA is a version this build was not tested against |
-| `call_from_undeclared_intercom` | the SIP identity that called | per identity. It does **not** recover under a running process, and that is not an oversight: the only repair is to declare that intercom, which is a configuration change and therefore a restart, and after a restart the code is `unknown` until a call arrives. A window that cleared it on a timer would be a number nobody measured |
+| `call_from_undeclared_intercom` | this agent | a call arrived at an account no `[intercoms.*]` owns, or the user agent refused one outright because it named no account it holds. **The subject is the agent and not the caller**: the caller's identity is a string the caller wrote, so keying the code on it would let anybody who can dial this agent add a row per identity they invented. It clears when a call at a DECLARED account is answered — which is a measurement, not a timer — and is `unknown` until either happens |
 | `human_unreachable` | the escalation address | the person did not answer inside `no_answer_seconds`. **It recovers**: the next call they answer clears it, because a code that could only ever go one way is a latch that reads like a state |
 | `audio_missing` | the line, or the file | a file the agent reaches for is not there. Startup refuses on this, so on a running agent it is a file that has gone missing since |
 | `lane_unavailable` | the lane's name | per declared lane |
@@ -1836,7 +1885,8 @@ cannot be helped.
       "authorisation": null,
       "human": null,
       "at": "2026-08-30T14:00:00+00:00",
-      "keyed": null
+      "keyed": null,
+      "caller_stated_identity": "sip:door1@10.0.0.9"
     }
   ]
 }
@@ -1855,7 +1905,16 @@ fills is the field a plate ends up in.
 
 `intercom` and `human` are addresses a site declared, not people: this surface
 says which door and which rota, and whoever wants to know who was on shift asks
-the rota.
+the rota. `intercom` is the site's own LABEL for the door — the
+`[intercoms.<sip-uri>]` key — and on a refusal it is this agent's id, because
+there is no door to name.
+
+**`caller_stated_identity` is a CLAIM and its name says so.** It is the `From`
+header of the call, reduced to `sip:user@host`. Anybody who can send an INVITE
+can write any value in it, so nothing is decided by it: what identified the
+intercom is the ACCOUNT the call arrived at, which never appears on this surface
+because its user part is a secret. On a refusal it is the whole record of who
+tried, and it is worth exactly what a stranger's word is worth.
 
 ## Running it
 
