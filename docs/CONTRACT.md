@@ -1648,8 +1648,8 @@ has been taken at it.
 | `sip_registration_lost` | the driver-leg account | **This is the lane contract's `intercom_registration_lost`, measured where it can be measured.** A lane cannot see whether the agent is registered; the agent can. Both documents say so, in the same words. `unknown` until the UA has said something — a registration nobody has heard about is not one known to be lost, and publishing the second pages somebody to a working site |
 | `ua_unreachable` | this agent | the user agent's control socket did not answer. The agent is up and cannot answer a call |
 | `ua_unsupported_version` | this agent | the UA is a version this build was not tested against |
-| `call_from_undeclared_intercom` | the SIP identity that called | per identity |
-| `human_unreachable` | the escalation address | the person did not answer inside `no_answer_seconds` |
+| `call_from_undeclared_intercom` | the SIP identity that called | per identity. It does **not** recover under a running process, and that is not an oversight: the only repair is to declare that intercom, which is a configuration change and therefore a restart, and after a restart the code is `unknown` until a call arrives. A window that cleared it on a timer would be a number nobody measured |
+| `human_unreachable` | the escalation address | the person did not answer inside `no_answer_seconds`. **It recovers**: the next call they answer clears it, because a code that could only ever go one way is a latch that reads like a state |
 | `audio_missing` | the line, or the file | a file the agent reaches for is not there. Startup refuses on this, so on a running agent it is a file that has gone missing since |
 | `lane_unavailable` | the lane's name | per declared lane |
 
