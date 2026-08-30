@@ -69,10 +69,79 @@ BREAKS = [
     },
     {
         "name": "an_undeclared_intercom_is_guessed",
-        "why": "a call from an undeclared identity is given the first declared lane",
+        "why": "a call at an undeclared account is given the first declared lane",
         "file": "src/gate_agent/agent.py",
-        "from": "        intercom = self._by_uri.get(uri)",
-        "to": "        intercom = self._by_uri.get(uri) or next(iter(self._by_uri.values()), None)",
+        "from": "        intercom = self._by_account.get(event.account_user or \"\")",
+        "to": "        intercom = self._by_account.get(event.account_user or \"\") or next(\n"
+              "            iter(self._by_account.values()), None\n"
+              "        )",
+    },
+    {
+        # X2'. THE control for the whole round: routing by the `From` header is
+        # exactly what was there before, and it is what let a fourth user agent
+        # assert a declared door's address of record and have a complete
+        # `authorisation_received` written naming a barrier nobody was at.
+        "name": "routing_by_the_from_header",
+        "why": "the caller's own `From` decides which intercom it is, so the forged record returns",
+        "file": "src/gate_agent/agent.py",
+        "from": "        intercom = self._by_account.get(event.account_user or \"\")",
+        "to": "        intercom = next(\n"
+              "            (one for one in self.config.intercoms if one.sip_uri == claimed),\n"
+              "            None,\n"
+              "        )",
+    },
+    {
+        # And the other half: an account that identifies nothing, because every
+        # call is placed at the same intercom whatever it arrived at.
+        "name": "the_account_is_ignored",
+        "why": "every caller is answered as the first declared intercom",
+        "file": "src/gate_agent/agent.py",
+        "from": "        intercom = self._by_account.get(event.account_user or \"\")",
+        "to": "        intercom = next(iter(self._by_account.values()), None)",
+    },
+    {
+        "name": "a_dial_secret_may_be_world_readable",
+        "why": "an intercom's identity is readable by every account on the box",
+        "file": "src/gate_agent/config.py",
+        "from": "    if mode & SECRET_FORBIDDEN_MODE:",
+        "to": "    if False:",
+    },
+    {
+        "name": "a_dial_secret_may_be_short_enough_to_type",
+        "why": "the one case that needs no measurement stops being refused",
+        "file": "src/gate_agent/config.py",
+        "from": "    if len(secret) < MINIMUM_DIAL_SECRET:",
+        "to": "    if False:",
+    },
+    {
+        "name": "two_intercoms_may_share_a_secret",
+        "why": "two doors have one identity, so a person is sent to the wrong barrier",
+        "file": "src/gate_agent/config.py",
+        "from": "        if account_user in accounts:",
+        "to": "        if False:",
+    },
+    {
+        "name": "a_declared_intercom_needs_no_account",
+        "why": "a door the user agent never got is answered `404` and reported nowhere",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if missing:",
+        "to": "        if False:",
+    },
+    {
+        "name": "the_dial_secret_is_published",
+        "why": "the account -- which is the secret -- goes onto the read surface",
+        "file": "src/gate_agent/agent.py",
+        "from": "                IntercomDescription(sip_uri=intercom.sip_uri, lane=intercom.lane)",
+        "to": "                IntercomDescription(sip_uri=intercom.account_user, "
+              "lane=intercom.lane)",
+    },
+    {
+        "name": "the_intercom_repr_shows_the_secret",
+        "why": "every log line and traceback touching a configuration carries it",
+        "file": "src/gate_agent/config.py",
+        "from": "            f\"name_audio={self.name_audio!r}, account_user=<not shown>)\"",
+        "to": "            f\"name_audio={self.name_audio!r}, "
+              "account_user={self.account_user!r})\"",
     },
     {
         "name": "an_unrecognised_reason_is_mapped",
@@ -255,8 +324,8 @@ BREAKS = [
         "name": "a_sentence_changed_without_its_audio",
         "why": "a line is edited and the file that plays still says the old thing",
         "file": "src/gate_agent/lines.py",
-        "from": '"en": "This intercom is not configured. Goodbye.",',
-        "to": '"en": "This door is out of service. Goodbye.",',
+        "from": '"en": "Please keep holding. Somebody is dealing with this.",',
+        "to": '"en": "Please hold on. Somebody is dealing with this.",',
     },
     {
         "name": "an_intercom_needs_no_lane",
@@ -280,11 +349,15 @@ BREAKS = [
         "to": "    if False:",
     },
     {
+        # Re-proved in its new form. There is no `driver_aor` any more, so the
+        # guarantee it carried -- the two legs are never on one account -- is
+        # now the refusal of an operator account that collides with an
+        # intercom's.
         "name": "one_account_for_both_legs",
         "why": "the two calls cannot be told apart, so the menu plays to the driver",
         "file": "src/gate_agent/config.py",
-        "from": '    if aors["driver_aor"] == aors["operator_aor"]:',
-        "to": "    if False:",
+        "from": "        if account_user == operator_user:",
+        "to": "        if False:",
     },
     {
         "name": "a_sip_uri_may_carry_a_password",
@@ -312,11 +385,11 @@ BREAKS = [
         "name": "the_identity_is_checked_before_the_live_case",
         "why": "an undeclared caller mid-case is answered and conferenced into the bridge",
         "file": "src/gate_agent/agent.py",
-        "from": "        uri = _bare_uri(event.peer_uri)\n"
+        "from": "        claimed = _bare_uri(event.peer_uri)\n"
                 "        if self.session is not None:",
-        "to": "        uri = _bare_uri(event.peer_uri)\n"
-              "        if self.session is not None and _bare_uri(event.peer_uri) "
-              "in self._by_uri:",
+        "to": "        claimed = _bare_uri(event.peer_uri)\n"
+              "        if self.session is not None and (event.account_user or \"\") "
+              "in self._by_account:",
     },
     {
         "name": "a_stale_decision_is_acted_on",

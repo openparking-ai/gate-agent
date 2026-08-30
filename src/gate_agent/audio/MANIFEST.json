@@ -313,18 +313,6 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "en/driver.undeclared_intercom.wav": {
-      "line": "driver.undeclared_intercom",
-      "language": "en",
-      "text": "This intercom is not configured. Goodbye.",
-      "text_provenance": "en",
-      "sha256": "e52f306cdd78abdd4e9559d8c433dd1413ae9bc08765deb2b954d458e551d165",
-      "bytes": 54334,
-      "sample_rate": 8000,
-      "voice": "en-us",
-      "words_per_minute": 150,
-      "licence": "espeak-ng-formant"
-    },
     "en/menu.call_back.wav": {
       "line": "menu.call_back",
       "language": "en",
@@ -884,18 +872,6 @@
       "text_provenance": "es-ES",
       "sha256": "08b58f80dc82602e92b45d48e7d2d6f5991113f05db2bbddac85a55d07a0e8e0",
       "bytes": 115990,
-      "sample_rate": 8000,
-      "voice": "es",
-      "words_per_minute": 150,
-      "licence": "espeak-ng-formant"
-    },
-    "es-ES/driver.undeclared_intercom.wav": {
-      "line": "driver.undeclared_intercom",
-      "language": "es-ES",
-      "text": "Este interfono no está configurado. Adiós.",
-      "text_provenance": "es-ES",
-      "sha256": "23d96e50d691b2bf5353caa060200a2e3d8921e48c81c6973d996b9e05a40355",
-      "bytes": 58368,
       "sample_rate": 8000,
       "voice": "es",
       "words_per_minute": 150,

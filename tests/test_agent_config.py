@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import wav
+from conftest import DIAL_SECRET, secret_file, wav
 from gate_agent.config import AgentConfig, ConfigError
 
 BASE = """
@@ -23,7 +23,6 @@ id = "agent-1"
 site_id = "site-1"
 
 [user_agent]
-driver_aor = "sip:agent@10.0.0.20"
 operator_aor = "sip:agent-operator@10.0.0.20"
 
 [lanes.entry]
@@ -32,6 +31,7 @@ url = "http://127.0.0.1:8090"
 [intercoms."sip:door1@10.0.0.9"]
 lane = "entry"
 name_audio = "NAME_AUDIO"
+dial_secret_file = "DIAL_SECRET_FILE"
 
 [languages]
 driver = ["en"]
@@ -49,6 +49,9 @@ human_sip_uri = "sip:duty@10.0.0.5"
 def written(tmp_path, text: str = BASE, **replace):
     name_audio = wav(tmp_path / "door1.wav")
     text = text.replace("NAME_AUDIO", str(name_audio))
+    text = text.replace(
+        "DIAL_SECRET_FILE", str(secret_file(tmp_path / "door1.dial-secret"))
+    )
     for old, new in replace.items():
         text = text.replace(old.replace("__", " "), new)
     path = tmp_path / "agent.toml"
@@ -209,18 +212,23 @@ def test_no_human_to_call_is_refused(tmp_path):
 
 def test_one_account_for_both_legs_is_refused(tmp_path):
     """Two calls on one account cannot be told apart by the user agent, so the
-    menu meant for the person on the phone plays to the driver."""
+    menu meant for the person on the phone plays to the driver.
+
+    The old shape of this was `driver_aor == operator_aor`. There is no driver
+    account any more -- each intercom has its own -- so the same guarantee is
+    re-proved in its new form: the outbound account may not be an intercom's.
+    """
     refused(
         tmp_path,
         BASE.replace('operator_aor = "sip:agent-operator@10.0.0.20"',
-                     'operator_aor = "sip:agent@10.0.0.20"'),
-        "are the same address",
+                     f'operator_aor = "sip:agent-{DIAL_SECRET}@10.0.0.20"'),
+        "the same as [user_agent].operator_aor",
     )
 
 
 def test_a_missing_account_is_refused(tmp_path):
-    refused(tmp_path, BASE.replace('driver_aor = "sip:agent@10.0.0.20"\n', ""),
-            "does not declare driver_aor")
+    refused(tmp_path, BASE.replace('operator_aor = "sip:agent-operator@10.0.0.20"\n', ""),
+            "does not declare operator_aor")
 
 
 def test_a_credential_as_a_value_is_refused_anywhere_in_the_file(tmp_path):
@@ -346,3 +354,128 @@ name_audio_max_seconds = 2.0
         ("[speech]", "name_audio_max_seconds"),
     ):
         refused(tmp_path, BASE + f"\n{table}\n{key} = -1\n", key)
+
+
+# ---------------------------------------------------------------------------
+# X2': the intercom is identified by the address it dialled
+# ---------------------------------------------------------------------------
+
+
+def test_an_intercom_with_no_dial_secret_is_refused(tmp_path):
+    """There is no default and there cannot be one.
+
+    The secret IS the identity. Without it the only thing left to route on is
+    the `From` header, and a `From` header is a string the caller writes -- the
+    exact defect this round exists to remove. A defaulted one would be a
+    published address every installation shares.
+    """
+    refused(tmp_path, BASE.replace("dial_secret_file = \"DIAL_SECRET_FILE\"\n", ""),
+            "does not declare dial_secret_file")
+
+
+def test_a_dial_secret_by_value_is_refused(tmp_path):
+    """The same rule as every other credential in this file: a path, never a value.
+
+    A value here is that secret in this file, in every backup of it, and in
+    everything anybody pastes it into.
+    """
+    refused(
+        tmp_path,
+        BASE.replace('dial_secret_file = "DIAL_SECRET_FILE"',
+                     'dial_secret = "test-only-dial-secret-0000"'),
+        "would hold a credential",
+    )
+
+
+def test_a_world_readable_dial_secret_is_refused(tmp_path):
+    """Anybody who can read the file can call as that door.
+
+    That is a person dispatched to a barrier nobody is standing at, from any
+    account on the box.
+    """
+    path = secret_file(tmp_path / "loose.dial-secret")
+    path.chmod(0o644)
+    with pytest.raises(ConfigError) as raised:
+        AgentConfig.from_file(
+            written(tmp_path, BASE.replace("DIAL_SECRET_FILE", str(path)))
+        )
+    assert "readable by more than its owner" in str(raised.value)
+
+    # THE CONTROL: the same file at 0600 is accepted, so the refusal is about
+    # the permissions and not about the path.
+    path.chmod(0o600)
+    assert AgentConfig.from_file(
+        written(tmp_path, BASE.replace("DIAL_SECRET_FILE", str(path)))
+    ).intercoms[0].account_user.startswith("agent-")
+
+
+def test_a_dial_secret_short_enough_to_have_been_typed_is_refused(tmp_path):
+    """The floor is a choice this package made, and the message says so.
+
+    What makes an address unguessable is that it was generated at RANDOM, and
+    nothing here can see that. What this refuses is the case that needs no
+    measurement.
+    """
+    from gate_agent.config import MINIMUM_DIAL_SECRET
+
+    path = secret_file(tmp_path / "short.dial-secret", "a" * (MINIMUM_DIAL_SECRET - 1))
+    with pytest.raises(ConfigError) as raised:
+        AgentConfig.from_file(
+            written(tmp_path, BASE.replace("DIAL_SECRET_FILE", str(path)))
+        )
+    assert f"shorter than {MINIMUM_DIAL_SECRET}" in str(raised.value)
+
+    # THE CONTROL: one character longer is accepted.
+    path = secret_file(tmp_path / "long.dial-secret", "a" * MINIMUM_DIAL_SECRET)
+    assert AgentConfig.from_file(
+        written(tmp_path, BASE.replace("DIAL_SECRET_FILE", str(path)))
+    ).intercoms[0].account_user == "agent-" + "a" * MINIMUM_DIAL_SECRET
+
+
+def test_a_dial_secret_that_is_not_a_sip_user_part_is_refused(tmp_path):
+    """A `;` starts a parameter and an `@` ends the user part.
+
+    An address that means something else is an intercom that can never call in,
+    which is a door that silently does nothing.
+    """
+    for bad in ("secret;with-a-parameter", "secret@with-a-host", "secret with a space"):
+        path = secret_file(tmp_path / "odd.dial-secret", bad)
+        with pytest.raises(ConfigError) as raised:
+            AgentConfig.from_file(
+                written(tmp_path, BASE.replace("DIAL_SECRET_FILE", str(path)))
+            )
+        assert "not letters, digits" in str(raised.value), bad
+
+
+def test_an_empty_dial_secret_file_is_refused(tmp_path):
+    """A truncated file is not "no secret configured"."""
+    path = secret_file(tmp_path / "empty.dial-secret", "")
+    with pytest.raises(ConfigError) as raised:
+        AgentConfig.from_file(
+            written(tmp_path, BASE.replace("DIAL_SECRET_FILE", str(path)))
+        )
+    assert "holds no token" in str(raised.value)
+
+
+def test_two_intercoms_sharing_a_dial_secret_are_refused(tmp_path):
+    """The secret IS the identity, so two doors sharing one have one identity.
+
+    Every call at either would be answered as whichever this agent read first,
+    and the lane a person is told about would not be the lane they are at.
+    """
+    second = secret_file(tmp_path / "door2.dial-secret", DIAL_SECRET)
+    text = BASE + f"""
+[intercoms."sip:door2@10.0.0.10"]
+lane = "none"
+name_audio = "NAME_AUDIO"
+dial_secret_file = "{second}"
+"""
+    refused(tmp_path, text, "have the same dial_secret")
+
+    # THE CONTROL: a DIFFERENT secret at the same second door is accepted.
+    other = secret_file(tmp_path / "door2b.dial-secret", "test-only-dial-secret-2222")
+    config = AgentConfig.from_file(
+        written(tmp_path, text.replace(str(second), str(other)))
+    )
+    assert len(config.intercoms) == 2
+    assert len({one.account_user for one in config.intercoms}) == 2

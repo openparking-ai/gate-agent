@@ -24,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from conftest import agent_config_for, agent_for
+from conftest import INTERCOM_ACCOUNT, agent_config_for, agent_for
 from fake_ua import FakeUa
 from foreign_lane import ForeignLane, decided_at
 from foreign_lane import make_server as foreign_server
@@ -125,7 +125,7 @@ def case_of(tmp_path, lane, url, peer=INTERCOM):
     """Answer one call at `url` and return the case the driver was told about."""
     ua = FakeUa()
     agent = agent_for(agent_config_for(tmp_path, lane_url=url), ua)
-    ua.incoming(peer)
+    ua.incoming(peer, account_user=INTERCOM_ACCOUNT)
     agent.poll()
     assert agent.session is not None, "the call was not answered at all"
     return agent.session.case, agent, ua
@@ -255,7 +255,7 @@ def test_a_lane_that_cannot_be_reached_is_lane_unavailable(tmp_path):
     """No server at all. The lane cannot be asked, and the driver is told so."""
     ua = FakeUa()
     agent = agent_for(agent_config_for(tmp_path, lane_url="http://127.0.0.1:1"), ua)
-    ua.incoming(INTERCOM)
+    ua.incoming(INTERCOM, account_user=INTERCOM_ACCOUNT)
     agent.poll()
     assert agent.session.case is AgentCase.LANE_UNAVAILABLE
 
@@ -276,7 +276,7 @@ def test_a_lane_on_an_unreadable_version_is_lane_unavailable(tmp_path, lane, mon
 def test_a_standalone_intercom_is_a_human_case_from_the_first_second(tmp_path):
     ua = FakeUa()
     agent = agent_for(agent_config_for(tmp_path, standalone=True), ua)
-    ua.incoming(INTERCOM)
+    ua.incoming(INTERCOM, account_user=INTERCOM_ACCOUNT)
     agent.poll()
     assert agent.session.case is AgentCase.STANDALONE
 

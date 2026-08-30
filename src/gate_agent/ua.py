@@ -7,14 +7,23 @@ seen. So the agent drives an EXTERNAL user agent -- its own process, its own
 package, driven over a LOCAL control socket -- and holds nothing but the
 dialogue state and the records.
 
-This module is the seam, and it is deliberately six verbs wide:
+This module is the seam, and it is deliberately seven verbs wide:
 
     version / registered   who the UA is and whether it is registered
+    accounts               which local accounts the UA holds
     answer / dial / hangup which calls exist
     calls                  which calls the UA is holding RIGHT NOW
     play                   one audio file into ONE CALL, named by its id
     bridge                 both calls hear each other, from this moment
     poll                   what happened, as this package's own event set
+
+**`accounts` is here because the LOCAL ACCOUNT a call arrived at is what says
+which intercom it is.** Not the `From` header: a `From` is a string the caller
+writes. Each declared intercom is given its own account, with a user part only
+that intercom's installer knows, so an inbound call is that intercom if and only
+if it arrived AT that account. `accounts` is how the agent refuses to start when
+one of those accounts is not there -- which would otherwise be a door whose calls
+are answered `404 Not Found` at three in the morning and nowhere else.
 
 **`calls` is here because a control socket can be LOST.** Everything else on
 this seam is a report of something that happened while the agent was listening;
@@ -88,10 +97,13 @@ class UaUnsupportedVersion(Exception):
 class UaLeg(StrEnum):
     """Which side of the case a call is. Two, and there is never a third.
 
-    A user agent identifies the stream it plays into by the local account, not
-    by the call, so the two legs are placed on two accounts -- which is also how
-    baresip's own back-to-back module does it. `agent.py` never learns that;
-    it asks for a leg.
+    The two legs sit on DIFFERENT local accounts. The driver's is whichever
+    intercom account the call arrived at -- one per declared intercom -- and the
+    operator's is the one account this agent dials out from, declared as
+    `[user_agent] operator_aor`. Startup refuses an operator account that
+    collides with an intercom's, because two calls on one account cannot be told
+    apart and the menu meant for the person on the phone would play to the
+    driver at the barrier.
     """
 
     DRIVER = "driver"
@@ -121,6 +133,14 @@ class UaEventKind(StrEnum):
     DTMF = "dtmf"
     REGISTERED = "registered"
     REGISTRATION_LOST = "registration_lost"
+    #: An INVITE the USER AGENT ITSELF refused, because its request-URI named no
+    #: account the user agent holds. **There is no call**: it was answered
+    #: `404 Not Found` before this process saw anything, which is the ordinary
+    #: fate of a caller who does not know an intercom's dial address. It is on
+    #: the seam because the alternative is that the commonest kind of unwanted
+    #: caller leaves no trace at all. It carries `peer_uri` -- what that caller
+    #: claimed to be -- and nothing else, because there is nothing else.
+    CALL_TO_UNKNOWN_ACCOUNT = "call_to_unknown_account"
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,16 +155,29 @@ class UaCall:
     call_id: str
     peer_uri: str | None
     ringing: bool
+    #: The USER PART of the local account this call arrived at, as the user
+    #: agent reports it after the fact. `None` when the user agent did not say.
+    #: It is the same question `UaEvent.account_user` answers and it is asked
+    #: separately because the events for a call that arrived while the socket
+    #: was down went to nobody -- and without it a recovered call cannot be
+    #: placed at an intercom, so it is refused rather than guessed at.
+    account_user: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class UaEvent:
     kind: UaEventKind
     call_id: str | None = None
-    #: The SIP identity at the other end. For an incoming call this is the
-    #: INTERCOM, and it is the only thing that says which lane the call is
-    #: about -- see `[intercoms.*]`.
+    #: The SIP identity the OTHER END CLAIMED -- its `From` header. **It decides
+    #: nothing.** A `From` is a string the caller writes, so it is recorded as
+    #: `caller_stated_identity` and never routed on; what says which intercom a
+    #: call is is `account_user` below.
     peer_uri: str | None = None
+    #: The USER PART of the LOCAL account this call arrived at. This is the
+    #: identification: each declared intercom has an account of its own whose
+    #: user part only that intercom's installer knows, so a call at that account
+    #: is that intercom and a caller who cannot dial it reaches nothing.
+    account_user: str | None = None
     digit: str | None = None
 
 

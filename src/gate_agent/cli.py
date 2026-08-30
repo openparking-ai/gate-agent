@@ -141,7 +141,6 @@ def cmd_agent(args) -> int:
     ua = BaresipUa(
         host=config.user_agent.host,
         port=config.user_agent.port,
-        driver_aor=config.user_agent.driver_aor,
         operator_aor=config.user_agent.operator_aor,
         timeout=config.user_agent.timeout_seconds,
         reconnect_seconds=config.user_agent.reconnect_seconds,

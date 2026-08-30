@@ -4,7 +4,7 @@ The same three questions the monitor's sweep asks, asked of the agent, because
 this is the process that has a person on a phone saying "open the gate" and a
 record of them saying it.
 
-  1. **Could it?** The seam it drives has six verbs and none of them opens
+  1. **Could it?** The seam it drives has seven verbs and none of them opens
      anything; the source of `agent.py` is walked for every call it makes on the
      user agent and the set must be exactly those six. A seventh, added quietly,
      goes red here.
@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 import gate_agent
-from conftest import agent_config_for, agent_for
+from conftest import INTERCOM_ACCOUNT, agent_config_for, agent_for
 from fake_ua import ActingUa, FakeUa
 from foreign_lane import ForeignLane
 from foreign_lane import make_server as foreign_server
@@ -39,12 +39,15 @@ from serving import serving
 PACKAGE = Path(gate_agent.__file__).resolve().parent
 INTERCOM = "sip:door1@10.0.0.9"
 
-#: The whole seam. Six verbs and two accessors, and NONE of them opens anything.
+#: The whole seam. Seven verbs and two accessors, and NONE of them opens
+#: anything. `accounts` is the one this round added: it asks which local
+#: accounts the user agent holds, which is what says which intercom a call is
+#: from, and it can no more open a barrier than `version` can.
 #: Written here rather than derived from the class, because the point is to
 #: notice a verb being ADDED -- an expectation derived from the thing under test
 #: cannot.
 SEAM = {
-    "start", "version", "registered", "poll",
+    "start", "version", "registered", "poll", "accounts",
     "answer", "dial", "play", "stop_playing", "bridge", "hangup", "hangup_all",
 }
 
@@ -159,7 +162,7 @@ def open_now(tmp_path, url, user_agent):
 
     clock = FakeClock()
     agent = agent_for(agent_config_for(tmp_path, lane_url=url), user_agent, clock=clock)
-    user_agent.incoming(INTERCOM)
+    user_agent.incoming(INTERCOM, account_user=INTERCOM_ACCOUNT)
     for _ in range(200):
         agent.poll()
         if any(verb == "dial" for verb, _ in user_agent.commands):

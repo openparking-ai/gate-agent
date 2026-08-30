@@ -4,11 +4,15 @@ The intercom module. It ships **three processes**, and none of them can open a
 barrier.
 
 **The gate agent** answers the intercom. It works out which lane the call belongs
-to from the SIP identity that called, reads that lane's last decision through the
-lane contract, says what happened in every language the site declared, and when
-the case needs a person it calls one, stays in both calls, and records the
-authorisation they key. **An authorisation is a record of what somebody said. It
-is never an act.**
+to **from the address the caller dialled** — each intercom is given an account of
+its own whose user part only that site knows, so a call is that intercom if and
+only if it arrived at that account. The caller's `From` header is recorded as a
+claim and decides nothing: it is a string anybody can write, and the secret is
+never in it — it is the number dialled. It then reads that lane's last decision
+through the lane contract, says what happened in every language the site
+declared, and when the case needs a person it calls one, stays in both calls, and
+records the authorisation they key. **An authorisation is a record of what
+somebody said. It is never an act.**
 
 **The malfunction monitor** watches whatever a site declares — a lane, an
 identification service, a platform, a capture process — and tells a human what
@@ -50,9 +54,12 @@ paging system and never at a lane. It lives in its own module, that module may
 not import the target client, and the sweep enforces both.
 
 **The agent never guesses which lane a call is about.** The mapping is per-site,
-declared, and refused at startup if an intercom has no lane or a lane has no
-intercom. A call from an identity nobody declared gets one fixed message and
-ends, and no lane is read.
+declared, and refused at startup if an intercom has no lane, a lane has no
+intercom, or the user agent is not holding an intercom's account. A call at an
+account nobody declared is refused **without being answered**, and no lane is
+read. What that does NOT protect against is stated with the mechanism in the
+contract: a secret in a device's configuration is only as private as that
+device, and nothing here measures that.
 
 **A driver is never told the wrong thing about why.** The case is derived from
 what the lane published, never asked, and a reason this build does not recognise

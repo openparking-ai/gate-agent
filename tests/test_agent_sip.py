@@ -33,7 +33,7 @@ import time
 import pytest
 
 import real_sip
-from conftest import agent_config_for, wav
+from conftest import INTERCOM_ACCOUNT, agent_config_for, wav
 from gate_agent.agent import Agent
 from gate_agent.config import AgentConfig, Intercom, UserAgentSettings
 from gate_agent.contract import AgentEventKind, Authorisation, HealthState
@@ -61,10 +61,12 @@ def world(tmp_path_factory):
         "agent",
         accounts=[
             # The AOR's host is the REGISTRAR, which is where baresip sends the
-            # REGISTER. Two accounts, one per leg, because the user agent
-            # identifies the stream to play into by the local account.
-            f"<sip:agent@127.0.0.1:{registrar.port}>;regint=60;audio_codecs=pcmu"
-            ";answermode=manual",
+            # REGISTER. ONE ACCOUNT PER DECLARED INTERCOM, whose user part is
+            # the dial secret -- that is what says which intercom a call is
+            # from -- plus one more the agent dials OUT from, because the user
+            # agent identifies the stream to play into by the local account.
+            f"<sip:{INTERCOM_ACCOUNT}@127.0.0.1:{registrar.port}>;regint=60"
+            ";audio_codecs=pcmu;answermode=manual",
             f"<sip:agent-op@127.0.0.1:{registrar.port}>;regint=0;audio_codecs=pcmu"
             ";answermode=manual",
         ],
@@ -92,12 +94,23 @@ def world(tmp_path_factory):
         "stranger",
         accounts=["<sip:nobody@127.0.0.1>;regint=0;audio_codecs=pcmu;answermode=manual"],
     )
-    for one in (ours, intercom, person, stranger):
+    # THE FORGER. A FIFTH user agent whose account asserts the DECLARED
+    # intercom's own address of record -- the L3's blocker-2 probe, which under
+    # the old mapping was answered as that lane, rang a person, and wrote a
+    # complete `authorisation_received` naming a barrier nobody was at. It is a
+    # separate process from the real door on purpose: the whole question is
+    # whether saying you are `door1` is enough.
+    forger = Instance(
+        root,
+        "forger",
+        accounts=["<sip:door1@127.0.0.1>;regint=0;audio_codecs=pcmu;answermode=manual"],
+    )
+    for one in (ours, intercom, person, stranger, forger):
         one.start()
     try:
-        yield root, registrar, ours, intercom, person, stranger
+        yield root, registrar, ours, intercom, person, stranger, forger
     finally:
-        for one in (stranger, person, intercom, ours):
+        for one in (forger, stranger, person, intercom, ours):
             one.stop()
         registrar.stop()
 
@@ -147,11 +160,10 @@ class Ctrl:
 
 def agent_on(world, tmp_path, **kwargs):
     """The real `Agent`, driving the real baresip over its control socket."""
-    root, registrar, ours, _intercom, _person, _stranger = world
+    root, registrar, ours, _intercom, _person, _stranger, _forger = world
     ua = BaresipUa(
         host="127.0.0.1",
         port=ours.ctrl_port,
-        driver_aor=f"sip:agent@127.0.0.1:{registrar.port}",
         operator_aor=f"sip:agent-op@127.0.0.1:{registrar.port}",
     )
     base = agent_config_for(tmp_path, standalone=True, **kwargs)
@@ -163,6 +175,7 @@ def agent_on(world, tmp_path, **kwargs):
                 sip_uri="sip:door1@127.0.0.1",
                 lane=None,
                 name_audio=wav(tmp_path / "site" / "door1.wav", seconds=0.4),
+                account_user=INTERCOM_ACCOUNT,
             ),
         ),
         lanes=(),
@@ -170,7 +183,6 @@ def agent_on(world, tmp_path, **kwargs):
             kind="baresip",
             host="127.0.0.1",
             port=ours.ctrl_port,
-            driver_aor=f"sip:agent@127.0.0.1:{registrar.port}",
             operator_aor=f"sip:agent-op@127.0.0.1:{registrar.port}",
         ),
         driver_languages=("en",),
@@ -224,7 +236,7 @@ def test_it_registers_and_the_health_surface_follows_it(world, tmp_path):
     lane cannot see whether an agent is registered. The control is a registrar
     that starts REFUSING, and the code going `active` from it.
     """
-    _root, registrar, ours, _intercom, _person, _stranger = world
+    _root, registrar, ours, _intercom, _person, _stranger, _forger = world
     agent, ua = agent_on(world, tmp_path)
     try:
         pump(agent, lambda: ua.registered() is True, seconds=30)
@@ -281,12 +293,12 @@ def test_a_whole_case_over_real_sip(world, tmp_path):
     and the agent's event log -- rather than against the agent's description of
     itself.
     """
-    _root, _registrar, ours, intercom, person, _stranger = world
+    _root, _registrar, ours, intercom, person, _stranger, _forger = world
     agent, ua = agent_on(world, tmp_path)
     caller = Ctrl(intercom.ctrl_port)
     callee = Ctrl(person.ctrl_port)
     try:
-        answer = caller.command("dial", f"sip:agent@127.0.0.1:{ours.sip_port}")
+        answer = caller.command("dial", f"sip:{INTERCOM_ACCOUNT}@127.0.0.1:{ours.sip_port}")
         assert answer["ok"], answer
         pump(agent, lambda: agent.session is not None, seconds=20)
         assert agent.session.intercom.sip_uri == "sip:door1@127.0.0.1"
@@ -349,14 +361,23 @@ def test_a_whole_case_over_real_sip(world, tmp_path):
             ua.close()
 
 
-def test_a_call_from_an_undeclared_intercom_is_answered_once_and_ended(world, tmp_path):
-    """Over real SIP: one message, and the call is gone. No lane, no guess."""
-    _root, _registrar, ours, _intercom, person, _stranger = world
+def test_a_call_to_an_address_that_is_not_an_account_is_refused_by_the_user_agent(
+    world, tmp_path
+):
+    """X2'. A caller who does not know an intercom's dial address reaches nothing.
+
+    baresip routes an inbound INVITE by the REQUEST-URI's user part and answers
+    one naming no account it holds with `404 Not Found`, before this process
+    sees anything -- measured here through the real thing rather than claimed.
+    The agent hears about it on the control socket and records it, because the
+    alternative is that the commonest unwanted caller leaves no trace at all.
+    """
+    _root, _registrar, ours, _intercom, person, _stranger, _forger = world
     agent, ua = agent_on(world, tmp_path)
-    # The PERSON's user agent stands in for a stranger here: it is a SIP
-    # identity this site does not declare, which is exactly the case.
     stranger = Ctrl(person.ctrl_port)
     try:
+        # The address this agent USED to answer on. It is not an account any
+        # more, so it is exactly what a caller who guessed would try.
         stranger.command("dial", f"sip:agent@127.0.0.1:{ours.sip_port}")
         pump(
             agent,
@@ -366,14 +387,100 @@ def test_a_call_from_an_undeclared_intercom_is_answered_once_and_ended(world, tm
             ),
             seconds=20,
         )
-        pump(agent, lambda: agent.session is None, seconds=40)
-        assert not any(
-            event["kind"] == AgentEventKind.HUMAN_CALLED.value
-            for event in agent.events(0).to_dict()["events"]
-        )
+        settle(agent, 2.0)
+        # NOT answered, no session, no person called, and no lane read.
+        assert agent.session is None
+        kinds = [event["kind"] for event in agent.events(0).to_dict()["events"]]
+        assert AgentEventKind.CALL_ANSWERED.value not in kinds
+        assert AgentEventKind.HUMAN_CALLED.value not in kinds
+        # The record carries what the caller claimed and nothing else.
+        refusal = [
+            event for event in agent.events(0).to_dict()["events"]
+            if event["kind"] == AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM.value
+        ][0]
+        assert refusal["caller_stated_identity"] == "sip:duty@127.0.0.1"
+        assert refusal["lane"] is None
+
+        # THE POSITIVE CONTROL, same run, same user agent: the SAME caller at
+        # the DECLARED account is answered. Without it, "refused" would be
+        # satisfied by an agent that answers nothing.
+        stranger.command("dial", f"sip:{INTERCOM_ACCOUNT}@127.0.0.1:{ours.sip_port}")
+        pump(agent, lambda: agent.session is not None, seconds=20)
+        assert agent.session.intercom.sip_uri == "sip:door1@127.0.0.1"
     finally:
         ua.hangup_all()
         stranger.close()
+        ua.close()
+
+
+def test_a_fourth_baresip_asserting_the_declared_identity_reaches_nothing(world, tmp_path):
+    """**THE L3'S BLOCKER-2 PROBE, RE-RUN.** A forged `From` is worth nothing now.
+
+    A separate user agent, its own process on its own port, whose account simply
+    ASSERTS the declared intercom's address of record -- which is all it took.
+    Under the old mapping it was answered as that lane, briefed with that lane's
+    name, had the person's phone rung, and wrote a complete
+    `authorisation_received` naming a barrier nobody was standing at.
+
+    It still claims to be `sip:door1@127.0.0.1`. What it cannot do is dial the
+    address that door dials, and that is the whole of the difference.
+
+    **It dials an account the user agent really is holding** -- the one the agent
+    places its outbound calls from, whose address is no secret -- rather than a
+    user part matching nothing. That is deliberate: an INVITE naming nothing is
+    refused by baresip before this process sees it, so a probe built that way
+    would pass under ANY routing rule and measure the agent not at all. This one
+    reaches `Agent._incoming` with a real account and a forged `From`, which is
+    the only place the question can be asked.
+
+    The control is `routing_by_the_from_header` in
+    `scripts/agent_fail_control.py`, and it is run against THIS test by hand
+    because the fail-control script runs `-m "not sip"`: restore the `From`
+    mapping and the forged record comes back.
+    """
+    _root, registrar, ours, _intercom, person, _stranger, forger = world
+    agent, ua = agent_on(world, tmp_path)
+    attacker = Ctrl(forger.ctrl_port)
+    watching = Ctrl(person.ctrl_port)
+    try:
+        before = watching.command("listcalls")["data"]
+        attacker.command("dial", f"sip:agent-op@127.0.0.1:{ours.sip_port}")
+        pump(
+            agent,
+            lambda: any(
+                event["kind"] == AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM.value
+                for event in agent.events(0).to_dict()["events"]
+            ),
+            seconds=20,
+        )
+        settle(agent, 3.0)
+
+        # NOT ANSWERED AS THAT LANE. No session, no case, no lane.
+        assert agent.session is None, "the forged identity was answered"
+        kinds = [event["kind"] for event in agent.events(0).to_dict()["events"]]
+        assert AgentEventKind.CALL_ANSWERED.value not in kinds
+        assert AgentEventKind.CASE_SPOKEN.value not in kinds
+        assert AgentEventKind.AUTHORISATION_RECEIVED.value not in kinds
+
+        # NO PERSON CALLED -- asserted at the PERSON's own user agent, not ours.
+        assert AgentEventKind.HUMAN_CALLED.value not in kinds
+        assert watching.command("listcalls")["data"] == before, (
+            "the person's phone rang for a caller nobody declared"
+        )
+
+        # And what the record says is that somebody CLAIMED to be door1, which
+        # is the truthful thing to say about a string a caller wrote.
+        refusal = [
+            event for event in agent.events(0).to_dict()["events"]
+            if event["kind"] == AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM.value
+        ][0]
+        assert refusal["caller_stated_identity"] == "sip:door1@127.0.0.1"
+        assert refusal["lane"] is None
+        assert refusal["intercom"] == agent.config.agent_id
+    finally:
+        ua.hangup_all()
+        attacker.close()
+        watching.close()
         ua.close()
 
 
@@ -392,13 +499,13 @@ def test_a_stranger_calling_mid_case_never_hears_the_driver(world, tmp_path):
     recording, the real legs the intercom and the person still hold, and the
     authorisation the real case reaches afterwards.
     """
-    _root, _registrar, ours, intercom, person, stranger = world
+    _root, _registrar, ours, intercom, person, stranger, _forger = world
     agent, ua = agent_on(world, tmp_path)
     caller = Ctrl(intercom.ctrl_port)
     callee = Ctrl(person.ctrl_port)
     intruder = Ctrl(stranger.ctrl_port)
     try:
-        caller.command("dial", f"sip:agent@127.0.0.1:{ours.sip_port}")
+        caller.command("dial", f"sip:{INTERCOM_ACCOUNT}@127.0.0.1:{ours.sip_port}")
         pump(agent, lambda: agent.session is not None, seconds=20)
 
         def ringing(ctrl) -> str | None:
@@ -413,7 +520,7 @@ def test_a_stranger_calling_mid_case_never_hears_the_driver(world, tmp_path):
         settle(agent, 2.0)
 
         # THE STRANGER DIALS, mid-case.
-        intruder.command("dial", f"sip:agent@127.0.0.1:{ours.sip_port}")
+        intruder.command("dial", f"sip:{INTERCOM_ACCOUNT}@127.0.0.1:{ours.sip_port}")
         pump(
             agent,
             lambda: any(
@@ -436,7 +543,7 @@ def test_a_stranger_calling_mid_case_never_hears_the_driver(world, tmp_path):
             if event["kind"] == AgentEventKind.CALL_REFUSED_BUSY.value
         ]
         assert len(refused) == 1
-        assert refused[0]["intercom"] == "sip:nobody@127.0.0.1"
+        assert refused[0]["caller_stated_identity"] == "sip:nobody@127.0.0.1"
 
         # AND THE REAL CASE STILL REACHES ITS AUTHORISATION.
         callee.command("sndcode", "1")
@@ -502,7 +609,6 @@ def test_the_agent_refuses_to_start_against_an_aubridge_baresip(world, tmp_path)
         ua = BaresipUa(
             host="127.0.0.1",
             port=misconfigured.ctrl_port,
-            driver_aor="sip:agent@127.0.0.1",
             operator_aor="sip:agent-op@127.0.0.1",
         )
         try:
@@ -518,7 +624,7 @@ def test_the_agent_refuses_to_start_against_an_aubridge_baresip(world, tmp_path)
     # THE CONTROL: the same real binary, the same code, set up the way the
     # contract says -- and it starts. Without this the refusal above could be an
     # agent that refuses every baresip there is.
-    _root, _registrar, _ours, _intercom, _person, _stranger = world
+    _root, _registrar, _ours, _intercom, _person, _stranger, _forger = world
     agent, ua = agent_on(world, tmp_path)
     try:
         assert ua.version() in TESTED_VERSIONS
@@ -536,7 +642,7 @@ def test_the_control_socket_comes_back_and_the_next_call_is_answered(world, tmp_
     happened on any ordinary restart of that process, and the only repair was a
     human restarting the agent.
     """
-    _root, _registrar, ours, intercom, _person, _stranger = world
+    _root, _registrar, ours, intercom, _person, _stranger, _forger = world
     agent, ua = agent_on(world, tmp_path)
     caller = Ctrl(intercom.ctrl_port)
     try:
@@ -562,7 +668,7 @@ def test_the_control_socket_comes_back_and_the_next_call_is_answered(world, tmp_
 
         # A NEW CALL IS ANSWERED, which is the fact that matters: the agent used
         # to be alive, registered, and unable to answer anything ever again.
-        caller.command("dial", f"sip:agent@127.0.0.1:{ours.sip_port}")
+        caller.command("dial", f"sip:{INTERCOM_ACCOUNT}@127.0.0.1:{ours.sip_port}")
         pump(agent, lambda: agent.session is not None, seconds=30)
         assert agent.session.intercom.sip_uri == "sip:door1@127.0.0.1"
     finally:

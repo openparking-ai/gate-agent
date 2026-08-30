@@ -156,6 +156,7 @@ CREDENTIAL_VALUE_KEYS = {
     "password": "password_file",
     "secret": "token_file",
     "api_key": "token_file",
+    "dial_secret": "dial_secret_file",
 }
 
 
@@ -924,29 +925,80 @@ DEFAULT_NAME_AUDIO_MAX_SECONDS = 10.0
 
 
 
-@dataclass(frozen=True, slots=True)
+#: What every intercom's own user agent account is called, before its secret.
+#: A fixed prefix rather than a setting: it is not what makes the address hard
+#: to guess -- the secret is -- and a second spelling would be a second thing an
+#: installer can get wrong on a line nobody can test from the office.
+ACCOUNT_USER_PREFIX = "agent-"
+
+#: The shortest dial secret this build will start on. **A FLOOR THIS REPOSITORY
+#: CHOSE, NOT A MEASUREMENT.** Nothing here measures how long a SIP scanner
+#: takes to walk a user-part space, and nothing here can measure the only
+#: property that actually matters -- that the secret was generated at RANDOM,
+#: which is the installer's act and is not visible from a file's contents. What
+#: this refuses is the case that needs no measurement: a "secret" short enough
+#: to be typed from memory, which is the shape one arrives at by hand.
+MINIMUM_DIAL_SECRET = 16
+
+#: The characters a dial secret may be made of. The unreserved set of a SIP user
+#: part: anything outside it either has to be escaped or means something else in
+#: an address -- a `;` starts a parameter, an `@` ends the user part -- and an
+#: address that means something else is an intercom that can never call in.
+DIAL_SECRET_SHAPE = re.compile(r"\A[A-Za-z0-9._~-]+\Z")
+
+#: The permission bits a file holding a dial secret may not have. The secret IS
+#: the intercom's identity, so a world- or group-readable one is an identity
+#: every account on the box can assert.
+SECRET_FORBIDDEN_MODE = 0o077
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class Intercom:
-    """One declared intercom: a SIP identity, a lane, and a name to say.
+    """One declared intercom: how it is identified, its lane, and a name to say.
+
+    **`account_user` is the identification and `sip_uri` is not.** A call is
+    this intercom when it arrives AT this account -- a user part only this
+    intercom's installer knows, programmed into the unit as the address it
+    dials. `sip_uri` is the label a site gives the door: it is what appears on
+    events and on the read surface, it is what a person reads, and nothing is
+    ever routed on it, because it comes from a `From` header and a `From` header
+    is a string the caller writes.
 
     `lane` is `None` for a standalone intercom. `name_audio` is the file the
     OPERATOR hears first, and it is the site's: no sentence in this repository
     can say the name of a door, and a human dispatched to a garage without being
     told which barrier has been told half of what they need.
+
+    **It has a `__repr__` of its own and that is not cosmetic.** The generated
+    one puts `account_user` -- which is the secret -- into every log line, every
+    traceback and every test failure that touches a configuration.
     """
 
     sip_uri: str
     lane: str | None
     name_audio: Path
+    account_user: str
+
+    def __repr__(self) -> str:
+        return (
+            f"Intercom(sip_uri={self.sip_uri!r}, lane={self.lane!r}, "
+            f"name_audio={self.name_audio!r}, account_user=<not shown>)"
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class UserAgentSettings:
-    """Where the external user agent is, and which accounts hold which leg."""
+    """Where the external user agent is, and the ONE account it dials out from.
+
+    There is no driver account here. Each declared intercom has an account of
+    its own -- see `[intercoms.<uri>] dial_secret_file` -- and the driver's leg
+    is whichever of them the call arrived at, so the only account this file
+    still names is the one the agent places its outbound call to a person from.
+    """
 
     kind: str
     host: str
     port: int
-    driver_aor: str
     operator_aor: str
     timeout_seconds: float = DEFAULT_UA_TIMEOUT
     reconnect_seconds: float = DEFAULT_RECONNECT_SECONDS
@@ -1012,7 +1064,14 @@ class AgentConfig:
             DEFAULT_NAME_AUDIO_MAX_SECONDS,
         )
         lanes = _agent_lanes(_table(raw, "lanes", required=False), relative_to)
-        intercoms = _intercoms(_table(raw, "intercoms", required=False), lanes, relative_to)
+        # The user agent is read FIRST because the intercoms are checked against
+        # it: an intercom whose account collides with the one the agent dials
+        # out from would put both legs of a case on one account.
+        user_agent = _user_agent(_table(raw, "user_agent"))
+        intercoms = _intercoms(
+            _table(raw, "intercoms", required=False), lanes, relative_to,
+            operator_aor=user_agent.operator_aor,
+        )
         driver_languages, operator_language = _languages(_table(raw, "languages"))
         _refuse_missing_lines(driver_languages, operator_language, audio_directory)
         escalation = _table(raw, "escalation")
@@ -1035,7 +1094,7 @@ class AgentConfig:
             site_id=str(agent["site_id"]),
             intercoms=intercoms,
             lanes=lanes,
-            user_agent=_user_agent(_table(raw, "user_agent")),
+            user_agent=user_agent,
             driver_languages=driver_languages,
             operator_language=operator_language,
             authorisations=authorisations,
@@ -1135,24 +1194,46 @@ def _agent_lanes(raw: dict, relative_to: Path | None) -> tuple[Target, ...]:
     return tuple(lanes)
 
 
-def _intercoms(raw: dict, lanes: tuple[Target, ...], relative_to: Path | None):
-    """`[intercoms.<sip-uri>]`, and the four refusals an intercom can earn.
+def _intercoms(
+    raw: dict,
+    lanes: tuple[Target, ...],
+    relative_to: Path | None,
+    operator_aor: str,
+):
+    """`[intercoms.<sip-uri>]`, and every refusal an intercom can earn.
 
-    The mapping is the whole of A2: a call arrives with a SIP identity, and that
-    identity is the only thing that says which barrier it is about. There is no
-    default and no guess -- an agent that guessed which lane a call belonged to
-    would be guessing which barrier a person is standing at.
+    The mapping says which barrier a call is about, and there is no default and
+    no guess -- an agent that guessed would be guessing which barrier a person
+    is standing at.
+
+    **What identifies the caller is `dial_secret_file`, not the table key.** The
+    key is the label the site gives the door. The secret is the user part of an
+    account the agent holds and that intercom dials: the site programs
+    `sip:agent-<secret>@<the agent's host>` into the unit once, at installation,
+    and from then on a call is that intercom if and only if it arrived at that
+    account. A caller who writes any `From` it likes still reaches nothing,
+    because the secret is not in a header it can write -- it is the number
+    dialled.
+
+    **What this does NOT do**, stated here because it is the sentence an
+    integrator needs: a secret in a device's configuration is only as private as
+    that device. Anyone who can read the intercom's own configuration can call
+    as it. That is a different exposure from a `From` header, which anyone on
+    the network can write without touching anything, but it is not nothing, and
+    nothing here measures it.
     """
     if not raw:
         raise ConfigError(
-            "no intercom is declared. An agent with no [intercoms.<sip-uri>] answers every "
-            "call with `this intercom is not configured` while publishing a working "
-            "surface, which is the shape of every quiet failure this package exists to "
-            "prevent."
+            "no intercom is declared. An agent with no [intercoms.<sip-uri>] holds no "
+            "account any intercom can dial, so every call at every door is refused while "
+            "its surface publishes a working agent -- which is the shape of every quiet "
+            "failure this package exists to prevent."
         )
     names = {lane.name for lane in lanes}
     intercoms = []
     claimed: set[str] = set()
+    accounts: dict[str, str] = {}
+    operator_user = _sip_user(operator_aor)
     for sip_uri in sorted(raw):
         table = raw[sip_uri]
         if not isinstance(table, dict):
@@ -1190,10 +1271,29 @@ def _intercoms(raw: dict, lanes: tuple[Target, ...], relative_to: Path | None):
                 "played to a person on every call from this intercom; a missing one is "
                 "silence at the moment they are being told where they are needed."
             )
+        account_user = ACCOUNT_USER_PREFIX + _dial_secret(
+            table.get("dial_secret_file"), sip_uri, relative_to
+        )
+        if account_user in accounts:
+            raise ConfigError(
+                f"[intercoms.{sip_uri!r}] and [intercoms.{accounts[account_user]!r}] have "
+                "the same dial_secret. The secret IS the identity: with one shared between "
+                "two doors, every call at either is answered as whichever of them this "
+                "agent happened to read first, and the lane a person is told about is not "
+                "the lane they are standing at."
+            )
+        if account_user == operator_user:
+            raise ConfigError(
+                f"[intercoms.{sip_uri!r}]'s dial_secret makes its account the same as "
+                "[user_agent].operator_aor. Two calls on one account cannot be told apart "
+                "by the user agent, so the menu meant for the person on the phone would be "
+                "played to the driver at the barrier."
+            )
+        accounts[account_user] = sip_uri
         if lane != STANDALONE:
             claimed.add(lane)
         intercoms.append(Intercom(sip_uri=sip_uri, lane=None if lane == STANDALONE else lane,
-                                  name_audio=path))
+                                  name_audio=path, account_user=account_user))
     orphans = sorted(names - claimed)
     if orphans:
         raise ConfigError(
@@ -1204,6 +1304,68 @@ def _intercoms(raw: dict, lanes: tuple[Target, ...], relative_to: Path | None):
             "was mistyped, in which case every call at that door is refused."
         )
     return tuple(intercoms)
+
+
+def _sip_user(uri: str) -> str:
+    """The user part of a SIP URI, for comparing one account against another."""
+    text = uri.strip()
+    if "@" not in text:
+        return ""
+    user = text.split("@", 1)[0]
+    _scheme, _, rest = user.partition(":")
+    return (rest or user).strip()
+
+
+def _dial_secret(value, sip_uri: str, relative_to: Path | None) -> str:
+    """`[intercoms.<uri>] dial_secret_file`. A FILE, declared, no default.
+
+    The same rules as every other credential in this file -- a path and never a
+    value, because a value here is a value in every backup of this file and in
+    everything anyone pastes it into -- and one more: the file may not be
+    readable by anybody but its owner. A dial secret IS the intercom's identity,
+    so a world-readable one is an identity every account on the box can assert.
+    """
+    where = f"[intercoms.{sip_uri!r}].dial_secret_file"
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}] does not declare dial_secret_file. There is no "
+            "default and there cannot be one: it is the user part of the account this "
+            "intercom dials, and it is the only thing that says a call is from this door "
+            "rather than from anyone on the network who can write a `From` header. Write "
+            "the path to a file holding a long random string, and program "
+            f"`sip:{ACCOUNT_USER_PREFIX}<that string>@<this agent's host>` into the unit."
+        )
+    path = _resolve(value.strip(), relative_to)
+    try:
+        mode = path.stat().st_mode
+    except OSError as exc:
+        raise ConfigError(f"{where}: could not read {path}: {exc}") from exc
+    if mode & SECRET_FORBIDDEN_MODE:
+        raise ConfigError(
+            f"{where}: {path} is readable by more than its owner "
+            f"({mode & 0o777:04o}). This file holds the identity of an intercom: anybody "
+            "who can read it can call this agent as that door and have a person dispatched "
+            "to a barrier nobody is standing at. `chmod 600` it."
+        )
+    secret = _read_token(str(path), where, None)
+    if len(secret) < MINIMUM_DIAL_SECRET:
+        raise ConfigError(
+            f"{where}: the secret in {path} is {len(secret)} characters. This build refuses "
+            f"anything shorter than {MINIMUM_DIAL_SECRET}. That floor is a choice this "
+            "package made and not a measurement -- what actually makes an address "
+            "unguessable is that it was generated at RANDOM, which nothing here can see. "
+            "What it refuses is the one case needing no measurement: a secret short enough "
+            "to have been typed rather than generated."
+        )
+    if not DIAL_SECRET_SHAPE.match(secret):
+        raise ConfigError(
+            f"{where}: the secret in {path} has characters that are not letters, digits, "
+            "or `.`, `_`, `~` or `-`. Anything else either has to be escaped in a SIP "
+            "address or means something else in one -- a `;` starts a parameter and an `@` "
+            "ends the user part -- and an address that means something else is an intercom "
+            "that can never call in."
+        )
+    return secret
 
 
 def _languages(raw: dict) -> tuple[tuple[str, ...], str]:
@@ -1326,7 +1488,7 @@ def _refuse_sip_credential(uri: str, where: str) -> None:
 
 
 def _user_agent(raw: dict) -> UserAgentSettings:
-    """`[user_agent]`. The two accounts are DECLARED; the socket has defaults."""
+    """`[user_agent]`. The outbound account is DECLARED; the socket has defaults."""
     kind = raw.get("kind", "baresip")
     if kind != "baresip":
         raise ConfigError(
@@ -1334,24 +1496,16 @@ def _user_agent(raw: dict) -> UserAgentSettings:
             f"{', '.join(TESTED_VERSIONS)} and nothing else, and it checks the version it "
             "finds rather than trusting this key."
         )
-    aors = {}
-    for key in ("driver_aor", "operator_aor"):
-        value = raw.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise ConfigError(
-                f"[user_agent] does not declare {key}. The user agent identifies the call to "
-                "play audio into by the local account, so the two legs are two accounts -- "
-                "and with one, the menu meant for the person on the phone plays to the "
-                "driver at the barrier instead."
-            )
-        _refuse_sip_credential(value, f"[user_agent].{key}")
-        aors[key] = value.strip()
-    if aors["driver_aor"] == aors["operator_aor"]:
+    operator = raw.get("operator_aor")
+    if not isinstance(operator, str) or not operator.strip():
         raise ConfigError(
-            "[user_agent].driver_aor and operator_aor are the same address. Two calls on one "
-            "account cannot be told apart by the user agent, so every private message would "
-            "be played to whichever leg it happened to pick."
+            "[user_agent] does not declare operator_aor. It is the account the agent places "
+            "its call to a person FROM, and it has to be its own: the user agent identifies "
+            "the call to play audio into by the local account, so with the driver's leg on "
+            "the same one the menu meant for the person on the phone plays to the driver at "
+            "the barrier instead."
         )
+    _refuse_sip_credential(operator, "[user_agent].operator_aor")
     port = raw.get("port", DEFAULT_UA_PORT)
     if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
         raise ConfigError(f"[user_agent].port must be a port number, got {port!r}")
@@ -1359,8 +1513,7 @@ def _user_agent(raw: dict) -> UserAgentSettings:
         kind=kind,
         host=str(raw.get("host", DEFAULT_UA_HOST)),
         port=port,
-        driver_aor=aors["driver_aor"],
-        operator_aor=aors["operator_aor"],
+        operator_aor=operator.strip(),
         timeout_seconds=_positive(
             raw.get("timeout_seconds"), "[user_agent].timeout_seconds", DEFAULT_UA_TIMEOUT
         ),
