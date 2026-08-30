@@ -454,6 +454,11 @@ class Agent:
         """
         session.state = State.BRIEFING
         session.deadline = None
+        # The person answered, so they are reachable. **It RECOVERS**: a code
+        # that could only ever go one way would be a latch that reads like a
+        # state -- `active` for the life of the process however long ago the
+        # rota was fixed, with no recovery for a monitor to report.
+        self._code(AgentCode.HUMAN_UNREACHABLE, self.config.human_sip_uri, HealthState.OK)
         self._play(session, UaLeg.OPERATOR, session.intercom.name_audio)
         case = session.case or AgentCase.UNRECOGNISED_REASON
         self._say(session, UaLeg.OPERATOR, f"operator_case.{case.value}", operator=True)

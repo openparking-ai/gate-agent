@@ -205,6 +205,14 @@ BREAKS = [
         "to": "        if False:",
     },
     {
+        "name": "human_unreachable_is_a_latch",
+        "why": "the code stays active for the life of the process after one missed call",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._code(AgentCode.HUMAN_UNREACHABLE, self.config.human_sip_uri,"
+                " HealthState.OK)",
+        "to": "        pass",
+    },
+    {
         "name": "an_orphaned_operator_leg",
         "why": "a driver hangs up and the person is left live, to be bridged into the next case",
         "file": "src/gate_agent/agent.py",

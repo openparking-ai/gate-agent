@@ -334,3 +334,53 @@ def test_the_real_adapter_refuses_a_user_agent_version_nobody_tested():
     with pytest.raises(UaUnsupportedVersion) as raised:
         bad.start()
     assert "9.9.9" in str(raised.value)
+
+
+def test_human_unreachable_recovers_when_the_person_answers(tmp_path):
+    """A code that could only ever go one way is a latch that reads like a state.
+
+    `active` for the life of the process however long ago the rota was fixed,
+    with no recovery for a monitor to report — which is the shape the lane
+    contract already names and refuses.
+    """
+    from conftest import FakeClock
+    from fake_ua import FakeUa
+
+    def state_of(agent):
+        return [
+            one
+            for one in agent.health().to_dict()["codes"]
+            if one["code"] == "human_unreachable"
+        ][0]["state"]
+
+    clock = FakeClock()
+    ua = FakeUa()
+    agent = agent_for(
+        agent_config_for(tmp_path, standalone=True, no_answer_seconds=30.0), ua, clock=clock
+    )
+    ua.incoming(INTERCOM)
+    for _ in range(200):
+        agent.poll()
+        if any(verb == "dial" for verb, _ in ua.commands):
+            break
+        clock.advance(2.0)
+    clock.advance(31)
+    agent.poll()
+    assert state_of(agent) == HealthState.ACTIVE.value
+
+    # And the next call they DO answer clears it.
+    for _ in range(200):
+        agent.poll()
+        if agent.session is None:
+            break
+        clock.advance(2.0)
+    ua.incoming(INTERCOM, call_id="call-2")
+    for _ in range(200):
+        agent.poll()
+        if len([1 for verb, _ in ua.commands if verb == "dial"]) >= 2:
+            break
+        clock.advance(2.0)
+    operator = [arg for verb, arg in ua.commands if verb == "dial"][-1].split("-> ")[1]
+    ua.established(operator)
+    agent.poll()
+    assert state_of(agent) == HealthState.OK.value
