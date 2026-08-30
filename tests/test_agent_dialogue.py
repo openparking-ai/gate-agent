@@ -422,3 +422,79 @@ def test_a_second_call_during_a_case_is_not_answered(tmp_path, lane):
     assert [arg for verb, arg in ua.commands if verb == "answer"] == answered
     assert ("hangup", "call-2") in ua.commands
     assert AgentEventKind.CALL_REFUSED_BUSY.value in kinds(agent)
+
+
+# ---------------------------------------------------------------------------
+# The language, per call
+# ---------------------------------------------------------------------------
+
+
+def test_a_mid_call_switch_changes_the_next_sentence_and_every_one_after(tmp_path, lane):
+    """Gokhan: *"if the customer starts speaking in Spanish, no English, it
+    should start Spanish from there."*
+
+    What NOTICES they did is a later step -- hearing a language is ASR. What is
+    here is the state that step will set, and it is per call: after the switch,
+    every sentence is in that language and only that language.
+    """
+    _served, url = lane
+    agent, ua, clock = running(tmp_path, url, driver_languages=("en", "es"))
+    ua.incoming(INTERCOM)
+    pump(agent, clock, lambda: len(files(ua, "driver")) >= 2)
+    assert {name.split("/")[0] for name in files(ua, "driver")} == {"en", "es"}
+
+    agent.set_language("call-1", "es")
+    before = len(files(ua, "driver"))
+    pump(agent, clock, lambda: any(verb == "dial" for verb, _ in ua.commands))
+    operator = [arg for verb, arg in ua.commands if verb == "dial"][0].split("-> ")[1]
+    ua.established(operator)
+    pump(agent, clock, lambda: ua.bridged_at is not None)
+    ua.dtmf(operator, "1")
+    agent.poll()
+    pump(agent, clock, lambda: said(ua, "authorisation.open_now"))
+    after = files(ua, "driver")[before:]
+    assert after, "nothing more was said, so this asserts nothing"
+    assert {name.split("/")[0] for name in after} == {"es"}, after
+
+
+def test_a_language_this_site_did_not_declare_is_refused(tmp_path, lane):
+    """The control on the switch, and the reason it is a function and not a field.
+
+    A switch that silently did nothing would leave a driver being spoken to in a
+    language they have just said they do not have -- and this package would have
+    no words for the one they asked for either.
+    """
+    _served, url = lane
+    agent, ua, clock = running(tmp_path, url, driver_languages=("en",))
+    ua.incoming(INTERCOM)
+    agent.poll()
+    with pytest.raises(ValueError) as raised:
+        agent.set_language("call-1", "es")
+    assert "not a language this site declared" in str(raised.value)
+    with pytest.raises(ValueError):
+        agent.set_language("call-1", "kl")
+    # The control: the declared one IS accepted, so the refusal is about the
+    # language and not about the function refusing everything.
+    agent.set_language("call-1", "en")
+    with pytest.raises(ValueError):
+        agent.set_language("no-such-call", "en")
+
+
+def test_without_a_switch_every_declared_language_keeps_playing(tmp_path, lane):
+    """The other control: the switch is what narrows it, not the passage of time."""
+    _served, url = lane
+    agent, ua, clock = running(tmp_path, url, driver_languages=("en", "es"))
+    ua.incoming(INTERCOM)
+    pump(agent, clock, lambda: any(verb == "dial" for verb, _ in ua.commands))
+    operator = [arg for verb, arg in ua.commands if verb == "dial"][0].split("-> ")[1]
+    ua.established(operator)
+    pump(agent, clock, lambda: ua.bridged_at is not None)
+    ua.dtmf(operator, "3")
+    agent.poll()
+    pump(
+        agent,
+        clock,
+        lambda: len([1 for name in files(ua, "driver") if "do_not_open" in name]) >= 2,
+    )
+    spoken = [name for name in files(ua, "driver") if "authorisation.do_not_open" in name]
+    assert {name.split("/")[0] for name in spoken} == {"en", "es"}, spoken
