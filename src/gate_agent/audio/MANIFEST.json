@@ -1,6 +1,19 @@
 {
   "generated_by": "scripts/build_audio.py",
   "tool_version": "eSpeak NG text-to-speech: 1.52.0",
+  "text_provenance": {
+    "en": {
+      "written_by": "The Claude Code session that built this module, 2026-08-30, commit 5084a76 on openparking-ai/gate-agent.",
+      "from": "Nothing. English is the SOURCE: every line was written here first and every other language is a translation of it.",
+      "reviewed_by": "No professional editor and no native-speaker review. The words are held to what plays only by the sha256 rows below."
+    },
+    "es-ES": {
+      "written_by": "The same session and the same commit as the English. It is a MACHINE TRANSLATION in the ordinary sense -- written by the model that wrote the English, not by a translator and not by a translation service.",
+      "from": "The English line of the same key, in `gate_agent.lines.TEXT`.",
+      "reviewed_by": "No native speaker and no professional translator. It was read line by line against its English source by an independent review session on 2026-08-30, which found every line a faithful rendering in a consistent `usted` register -- that is a check on FAITHFULNESS, not a sign-off on register or regional fit.",
+      "register": "Castilian. `matrícula`, `aparcamiento`, `almohadilla`, `Pulse`. This is why the key is `es-ES` and not `es`: at a garage in Texas or Bogotá several of those words are wrong, and a generic tag would have chosen a register for that site's drivers without telling anybody."
+    }
+  },
   "licences": {
     "espeak-ng-formant": {
       "tool": "espeak-ng",
@@ -16,6 +29,7 @@
       "line": "authorisation.call_back",
       "language": "en",
       "text": "A person will call you back.",
+      "text_provenance": "en",
       "sha256": "1ea0bbcaf1a3672045fd67113d96a54ced0f3d8bb980197438a728e77f9e4f27",
       "bytes": 32560,
       "sample_rate": 8000,
@@ -27,6 +41,7 @@
       "line": "authorisation.do_not_open",
       "language": "en",
       "text": "A person has decided not to open the barrier.",
+      "text_provenance": "en",
       "sha256": "5426a22f12a5c2c1988f0e1038ea9198be71eea5a1902ebebbf588d5e29bff67",
       "bytes": 50206,
       "sample_rate": 8000,
@@ -38,6 +53,7 @@
       "line": "authorisation.hold",
       "language": "en",
       "text": "Please hold. Somebody is dealing with this.",
+      "text_provenance": "en",
       "sha256": "08b1ee959b996503e194dc6bcf009eef44e5ca52538bda244764391fad96f2ac",
       "bytes": 54222,
       "sample_rate": 8000,
@@ -49,6 +65,7 @@
       "line": "authorisation.open_and_flag",
       "language": "en",
       "text": "A person has authorised your entry and made a note of it. This system cannot open the barrier itself, so please wait for them.",
+      "text_provenance": "en",
       "sha256": "3a8d2a783d87502b9a578ab6586cdfefd41e2cbb93e988381e763b572ae55224",
       "bytes": 137696,
       "sample_rate": 8000,
@@ -60,6 +77,7 @@
       "line": "authorisation.open_now",
       "language": "en",
       "text": "A person has authorised your entry. This system cannot open the barrier itself, so please wait for them.",
+      "text_provenance": "en",
       "sha256": "bf45254608c8734f97672012ac378517eb3eba5d8d34ba53fe453381c4d91628",
       "bytes": 117518,
       "sample_rate": 8000,
@@ -71,6 +89,7 @@
       "line": "authorisation.transfer",
       "language": "en",
       "text": "I am putting you through to somebody else.",
+      "text_provenance": "en",
       "sha256": "e29d9c5007f8becb5b193597f7573b395678f3de993b28435e26aebe2d6a8fe4",
       "bytes": 39642,
       "sample_rate": 8000,
@@ -82,6 +101,7 @@
       "line": "case.entry_not_confirmed",
       "language": "en",
       "text": "We could not confirm that you drove through. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "d0a6a438e9874ca775e240e407f83c66f7ee8dbbff3e8f3c9f44d5d53b7444e4",
       "bytes": 77274,
       "sample_rate": 8000,
@@ -93,6 +113,7 @@
       "line": "case.entry_refused",
       "language": "en",
       "text": "This vehicle was not admitted. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "2f45de4cdbe97fa68adabb38c5fe2d4749050212d63328dfbe308e6420d24b49",
       "bytes": 68014,
       "sample_rate": 8000,
@@ -104,6 +125,7 @@
       "line": "case.identification_unavailable",
       "language": "en",
       "text": "Our vehicle identification is not working right now. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "63a0e4e5637a0b7f82febdb2a96d83cceb17f33c4c73da60d1eda8e30b444ca9",
       "bytes": 93892,
       "sample_rate": 8000,
@@ -115,6 +137,7 @@
       "line": "case.lane_unavailable",
       "language": "en",
       "text": "We cannot reach this entrance right now. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "d2ac54be26efcd9c5a8657b084b49e6f968886b2d5847c07981e73aa7777b0b1",
       "bytes": 78822,
       "sample_rate": 8000,
@@ -126,6 +149,7 @@
       "line": "case.malfunction_active",
       "language": "en",
       "text": "There is a fault at this entrance. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "b2d9e9a4a7db81d1e127316b7eec0d7e22db0f370f5e763deead7196ed172ce6",
       "bytes": 69910,
       "sample_rate": 8000,
@@ -137,6 +161,7 @@
       "line": "case.nothing_to_do",
       "language": "en",
       "text": "This entrance has nothing outstanding for you. Goodbye.",
+      "text_provenance": "en",
       "sha256": "6bd4765d347cd1654de40b763158fc50cb9ed68bd9ef637973816cce59bbb6be",
       "bytes": 63456,
       "sample_rate": 8000,
@@ -148,6 +173,7 @@
       "line": "case.plate_not_read",
       "language": "en",
       "text": "We could not read your number plate. If something is covering it, please clear it. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "2d53f1fc0b582a64f0c3f3daa2c45f379b5c8ae7fde70e6d99730235a72a29f0",
       "bytes": 123484,
       "sample_rate": 8000,
@@ -159,6 +185,7 @@
       "line": "case.plate_unclear",
       "language": "en",
       "text": "We could not read your number plate clearly. If something is covering it, please clear it. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "486fcc7fb002c80a1354ec07b1339b47ebf42cc9565e96ccf0a6bf65aec67849",
       "bytes": 131236,
       "sample_rate": 8000,
@@ -170,8 +197,21 @@
       "line": "case.rules_unavailable",
       "language": "en",
       "text": "We cannot check this entrance's rules right now. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "4328a5dcd12cc9493bf8b87639f86d32f75bb46042ab440518406691f84aa0a0",
       "bytes": 87684,
+      "sample_rate": 8000,
+      "voice": "en-us",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "en/case.stale_decision.wav": {
+      "line": "case.stale_decision",
+      "language": "en",
+      "text": "The last thing this entrance recorded is too old to be about you. I am connecting you to a person.",
+      "text_provenance": "en",
+      "sha256": "e645666df73dc7bd3af43c4590a60173f39c9d80f1ce4e38bbb15a0d50d465a1",
+      "bytes": 101244,
       "sample_rate": 8000,
       "voice": "en-us",
       "words_per_minute": 150,
@@ -181,6 +221,7 @@
       "line": "case.standalone",
       "language": "en",
       "text": "You are through to the parking intercom. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "ed965fe3cbf5c4d0be3be3dba47a651c9b62a2d0c964db6260552567218ad77a",
       "bytes": 72676,
       "sample_rate": 8000,
@@ -192,6 +233,7 @@
       "line": "case.unrecognised_reason",
       "language": "en",
       "text": "We cannot tell what happened here. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "7c89de1899738a254b3bd972f53963613962999d4b208083a2cd06762352a77c",
       "bytes": 74688,
       "sample_rate": 8000,
@@ -203,6 +245,7 @@
       "line": "case.vehicle_not_detected",
       "language": "en",
       "text": "The entrance did not detect a vehicle. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "3571c287488e2b197be897f4e8c578a6b96b2e46bab4e3f0264752141a373cdf",
       "bytes": 76528,
       "sample_rate": 8000,
@@ -214,6 +257,7 @@
       "line": "case.vehicle_not_recognised",
       "language": "en",
       "text": "We do not recognise this vehicle. I am connecting you to a person.",
+      "text_provenance": "en",
       "sha256": "49024b5aeb32df9a1446619852015a75b579aafccd6d030d0046d02626eaed59",
       "bytes": 71368,
       "sample_rate": 8000,
@@ -225,6 +269,7 @@
       "line": "driver.hold_reprompt",
       "language": "en",
       "text": "Please keep holding. Somebody is dealing with this.",
+      "text_provenance": "en",
       "sha256": "ae28ad1f730ddb3177288f65ba72555341dbecb55cfedd688d6f6095bf110d2a",
       "bytes": 62092,
       "sample_rate": 8000,
@@ -236,6 +281,7 @@
       "line": "driver.human_unreachable",
       "language": "en",
       "text": "Nobody answered. Please try this intercom again, or use the help number at this entrance.",
+      "text_provenance": "en",
       "sha256": "5b4b605a2760669d02b096748894b880a08e5c066d1e2407d475effe2140a70f",
       "bytes": 104958,
       "sample_rate": 8000,
@@ -247,8 +293,21 @@
       "line": "driver.nothing_usable",
       "language": "en",
       "text": "I could not take an instruction. Please try this intercom again.",
+      "text_provenance": "en",
       "sha256": "35917379ec0467706a1680fe22ef77564e0ab8ecc02669c31755d47cd5695e9f",
       "bytes": 76198,
+      "sample_rate": 8000,
+      "voice": "en-us",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "en/driver.operator_hung_up.wav": {
+      "line": "driver.operator_hung_up",
+      "language": "en",
+      "text": "The call to the person ended before they gave an instruction. Please try this intercom again.",
+      "text_provenance": "en",
+      "sha256": "d2c783864d1edc9b92241aa1989e30821667da5ac47f57edddc1b10b3839ea30",
+      "bytes": 99612,
       "sample_rate": 8000,
       "voice": "en-us",
       "words_per_minute": 150,
@@ -258,6 +317,7 @@
       "line": "driver.undeclared_intercom",
       "language": "en",
       "text": "This intercom is not configured. Goodbye.",
+      "text_provenance": "en",
       "sha256": "e52f306cdd78abdd4e9559d8c433dd1413ae9bc08765deb2b954d458e551d165",
       "bytes": 54334,
       "sample_rate": 8000,
@@ -269,6 +329,7 @@
       "line": "menu.call_back",
       "language": "en",
       "text": "Press 6 to record a call-back number.",
+      "text_provenance": "en",
       "sha256": "e05fdf7378ab1e391e5c68ca948a2d21b7d6c27c5569f8f1506b1a5890aa1184",
       "bytes": 48022,
       "sample_rate": 8000,
@@ -280,6 +341,7 @@
       "line": "menu.do_not_open",
       "language": "en",
       "text": "Press 3 to refuse.",
+      "text_provenance": "en",
       "sha256": "c04dd1af6b645f5d07f11ccf687756120b80fe95d440072daae01ab4c9764b15",
       "bytes": 28470,
       "sample_rate": 8000,
@@ -291,6 +353,7 @@
       "line": "menu.hold",
       "language": "en",
       "text": "Press 4 to hold.",
+      "text_provenance": "en",
       "sha256": "7e52458250341bea4db01a7978b5e10676bb708bba5590b1404273f9d8a1f533",
       "bytes": 27530,
       "sample_rate": 8000,
@@ -302,6 +365,7 @@
       "line": "menu.open_and_flag",
       "language": "en",
       "text": "Press 2 to authorise opening and flag it.",
+      "text_provenance": "en",
       "sha256": "7f22a3d1ddc1bc3ca9c423fa31432d1f36fe95d4ad4aca9e1642b1c0a1249593",
       "bytes": 50560,
       "sample_rate": 8000,
@@ -313,6 +377,7 @@
       "line": "menu.open_now",
       "language": "en",
       "text": "Press 1 to authorise opening.",
+      "text_provenance": "en",
       "sha256": "26ea94b2d1dfcb8717496971f4ce03a11471ab899bf6b6ef1dd6714d66189d58",
       "bytes": 37506,
       "sample_rate": 8000,
@@ -324,6 +389,7 @@
       "line": "menu.transfer",
       "language": "en",
       "text": "Press 5 to transfer.",
+      "text_provenance": "en",
       "sha256": "55372d0f98c70b6339434a46d2c7713df768bd07b45e1873e91579a5fdb924b8",
       "bytes": 32536,
       "sample_rate": 8000,
@@ -335,6 +401,7 @@
       "line": "operator.cannot_open",
       "language": "en",
       "text": "Recorded. This version cannot operate the barrier.",
+      "text_provenance": "en",
       "sha256": "e391d5d91095a1a7a76bb49218155e482c4625c134a797a54afac351760dbb25",
       "bytes": 60136,
       "sample_rate": 8000,
@@ -346,6 +413,7 @@
       "line": "operator.menu_callback_number",
       "language": "en",
       "text": "Key the call-back number, then hash.",
+      "text_provenance": "en",
       "sha256": "d766336612bd3ba6d7a290b3db91cc722647aed01705ad52e9e28d7c297455ee",
       "bytes": 47006,
       "sample_rate": 8000,
@@ -357,6 +425,7 @@
       "line": "operator.menu_repeat",
       "language": "en",
       "text": "I did not get that. Please try again.",
+      "text_provenance": "en",
       "sha256": "02b0d152ad46727aa493fbe5bc2471f05d37f211e179317f292806bc564ab8fa",
       "bytes": 51778,
       "sample_rate": 8000,
@@ -368,6 +437,7 @@
       "line": "operator_case.entry_not_confirmed",
       "language": "en",
       "text": "The entry was not confirmed.",
+      "text_provenance": "en",
       "sha256": "ccc928fbae05749aeb90478d43c39ce8552533f791f42712f152de7e9c19948c",
       "bytes": 34566,
       "sample_rate": 8000,
@@ -379,6 +449,7 @@
       "line": "operator_case.entry_refused",
       "language": "en",
       "text": "Entry was refused.",
+      "text_provenance": "en",
       "sha256": "65bbdbe43b5e13e2fa4240e56cb112d3d8a423089451ace7eb528b5d495367f4",
       "bytes": 26608,
       "sample_rate": 8000,
@@ -390,6 +461,7 @@
       "line": "operator_case.identification_unavailable",
       "language": "en",
       "text": "Vehicle identification is unavailable.",
+      "text_provenance": "en",
       "sha256": "8cb3d98607c29688ebd46ae2a8539a0a288fee381941a7f8c22810f7c0344025",
       "bytes": 44974,
       "sample_rate": 8000,
@@ -401,6 +473,7 @@
       "line": "operator_case.lane_unavailable",
       "language": "en",
       "text": "The lane could not be reached.",
+      "text_provenance": "en",
       "sha256": "55531d0d1cf30547ace9c45556a11902fa739356fc3308211329f61194749989",
       "bytes": 31432,
       "sample_rate": 8000,
@@ -412,6 +485,7 @@
       "line": "operator_case.malfunction_active",
       "language": "en",
       "text": "A fault is active at this lane.",
+      "text_provenance": "en",
       "sha256": "f2cca428bb94f81a70d94b1ada2fc51333fcfbdd32387b568270bc9e5479cdb0",
       "bytes": 37314,
       "sample_rate": 8000,
@@ -423,6 +497,7 @@
       "line": "operator_case.nothing_to_do",
       "language": "en",
       "text": "Nothing was outstanding at this lane.",
+      "text_provenance": "en",
       "sha256": "b2a417a0d96ce91505716ecb896b08a288fd85c94623778c7625311195c8f112",
       "bytes": 40734,
       "sample_rate": 8000,
@@ -434,6 +509,7 @@
       "line": "operator_case.plate_not_read",
       "language": "en",
       "text": "The number plate was not read.",
+      "text_provenance": "en",
       "sha256": "a0cf87cb3c77f03013c8b57b992cf124641d94ea1f1d91996c5be626035573a6",
       "bytes": 35376,
       "sample_rate": 8000,
@@ -445,6 +521,7 @@
       "line": "operator_case.plate_unclear",
       "language": "en",
       "text": "The number plate was unclear.",
+      "text_provenance": "en",
       "sha256": "8f0fba96ac66b50b31486b0785744e178118c2807ba4276113a81b8d81cd6905",
       "bytes": 35228,
       "sample_rate": 8000,
@@ -456,8 +533,21 @@
       "line": "operator_case.rules_unavailable",
       "language": "en",
       "text": "The entrance rules could not be checked.",
+      "text_provenance": "en",
       "sha256": "6636388a3514d4f48429b5d091a11b783b590f8bc298740ecb977ae9b2f5c3ce",
       "bytes": 41174,
+      "sample_rate": 8000,
+      "voice": "en-us",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "en/operator_case.stale_decision.wav": {
+      "line": "operator_case.stale_decision",
+      "language": "en",
+      "text": "The lane's last decision is older than this site allows.",
+      "text_provenance": "en",
+      "sha256": "cd4c248cc8511dd3173fbeae647e15b893fff714a61f601bf79555a9c4a8ad39",
+      "bytes": 57964,
       "sample_rate": 8000,
       "voice": "en-us",
       "words_per_minute": 150,
@@ -467,6 +557,7 @@
       "line": "operator_case.standalone",
       "language": "en",
       "text": "This intercom has no lane.",
+      "text_provenance": "en",
       "sha256": "de8ea364e28dbcda53a8de2c6b6f053ad7f0fee1cc86106e6cf1d80b13468573",
       "bytes": 35518,
       "sample_rate": 8000,
@@ -478,6 +569,7 @@
       "line": "operator_case.unrecognised_reason",
       "language": "en",
       "text": "The lane gave a reason this system does not recognise.",
+      "text_provenance": "en",
       "sha256": "751aa6079bda94a81a56a9898cb007b8886d83d9c05e024d97f76e3fedb72c0d",
       "bytes": 56844,
       "sample_rate": 8000,
@@ -489,6 +581,7 @@
       "line": "operator_case.vehicle_not_detected",
       "language": "en",
       "text": "The lane detected no vehicle.",
+      "text_provenance": "en",
       "sha256": "256a8ebb27db65988573c30283a4d473cf4363c1aa1f661e4da793426d416e2a",
       "bytes": 36908,
       "sample_rate": 8000,
@@ -500,6 +593,7 @@
       "line": "operator_case.vehicle_not_recognised",
       "language": "en",
       "text": "The vehicle was not recognised.",
+      "text_provenance": "en",
       "sha256": "569926a9ac01aba85d8b59b460c746d91bfa8cec8e51d0cb9ef5a0bbfc3b890e",
       "bytes": 36610,
       "sample_rate": 8000,
@@ -507,10 +601,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/authorisation.call_back.wav": {
+    "es-ES/authorisation.call_back.wav": {
       "line": "authorisation.call_back",
-      "language": "es",
+      "language": "es-ES",
       "text": "Una persona le devolverá la llamada.",
+      "text_provenance": "es-ES",
       "sha256": "388f0f53b583be6c1eb9e6484119506ba091558364e8164ca1250f218794dbfd",
       "bytes": 40878,
       "sample_rate": 8000,
@@ -518,10 +613,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/authorisation.do_not_open.wav": {
+    "es-ES/authorisation.do_not_open.wav": {
       "line": "authorisation.do_not_open",
-      "language": "es",
+      "language": "es-ES",
       "text": "Una persona ha decidido no abrir la barrera.",
+      "text_provenance": "es-ES",
       "sha256": "657e4e5f5f0ec1f92a5229005a6e8e0158276ac4fe4fcabe43891fb8b0d3c082",
       "bytes": 47820,
       "sample_rate": 8000,
@@ -529,10 +625,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/authorisation.hold.wav": {
+    "es-ES/authorisation.hold.wav": {
       "line": "authorisation.hold",
-      "language": "es",
+      "language": "es-ES",
       "text": "Espere, por favor. Alguien se está ocupando de esto.",
+      "text_provenance": "es-ES",
       "sha256": "78cbf05ffacf6aa67531fb36e24ed5ee684841a004315e557866c8c47c50897a",
       "bytes": 67960,
       "sample_rate": 8000,
@@ -540,10 +637,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/authorisation.open_and_flag.wav": {
+    "es-ES/authorisation.open_and_flag.wav": {
       "line": "authorisation.open_and_flag",
-      "language": "es",
+      "language": "es-ES",
       "text": "Una persona ha autorizado su entrada y lo ha anotado. Este sistema no puede abrir la barrera por sí mismo; espere a que lo hagan.",
+      "text_provenance": "es-ES",
       "sha256": "5b8dd5bb448a14e3e75bf9a8cc7a671d3df86b58ac83fa556e98e763c79b50c4",
       "bytes": 134996,
       "sample_rate": 8000,
@@ -551,10 +649,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/authorisation.open_now.wav": {
+    "es-ES/authorisation.open_now.wav": {
       "line": "authorisation.open_now",
-      "language": "es",
+      "language": "es-ES",
       "text": "Una persona ha autorizado su entrada. Este sistema no puede abrir la barrera por sí mismo; espere a que lo hagan.",
+      "text_provenance": "es-ES",
       "sha256": "1a8c5f2b34c9a7775ad8db213a149be2da35e472d59ef98bf10a59656a0fa378",
       "bytes": 122254,
       "sample_rate": 8000,
@@ -562,10 +661,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/authorisation.transfer.wav": {
+    "es-ES/authorisation.transfer.wav": {
       "line": "authorisation.transfer",
-      "language": "es",
+      "language": "es-ES",
       "text": "Le paso con otra persona.",
+      "text_provenance": "es-ES",
       "sha256": "ec9469fff600eb76ba6b6cbb55cedc7a8f9ff47236ae6c449557c00da8df7e72",
       "bytes": 30488,
       "sample_rate": 8000,
@@ -573,10 +673,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.entry_not_confirmed.wav": {
+    "es-ES/case.entry_not_confirmed.wav": {
       "line": "case.entry_not_confirmed",
-      "language": "es",
+      "language": "es-ES",
       "text": "No hemos podido confirmar que haya pasado. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "d352979b6328e12bcb0d233cf3db5f93fd9ee5fc02ef156599f37f31df77c4d3",
       "bytes": 77998,
       "sample_rate": 8000,
@@ -584,10 +685,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.entry_refused.wav": {
+    "es-ES/case.entry_refused.wav": {
       "line": "case.entry_refused",
-      "language": "es",
+      "language": "es-ES",
       "text": "Este vehículo no ha sido admitido. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "39d17b05757c20e081a44eb50b99f205dc85d9d8b3fbee031ca7c72072867ac5",
       "bytes": 70244,
       "sample_rate": 8000,
@@ -595,10 +697,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.identification_unavailable.wav": {
+    "es-ES/case.identification_unavailable.wav": {
       "line": "case.identification_unavailable",
-      "language": "es",
+      "language": "es-ES",
       "text": "Nuestra identificación de vehículos no funciona ahora mismo. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "23f45f8c2fac346782dce36aeff600db72babecc648d7007a307c706b9c9e072",
       "bytes": 95464,
       "sample_rate": 8000,
@@ -606,10 +709,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.lane_unavailable.wav": {
+    "es-ES/case.lane_unavailable.wav": {
       "line": "case.lane_unavailable",
-      "language": "es",
+      "language": "es-ES",
       "text": "No podemos comunicar con esta entrada ahora mismo. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "3162c0c3f2c8b8e0acba2701698530f8a94b6d4abac3a7ef6749da0ef87ae429",
       "bytes": 84280,
       "sample_rate": 8000,
@@ -617,10 +721,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.malfunction_active.wav": {
+    "es-ES/case.malfunction_active.wav": {
       "line": "case.malfunction_active",
-      "language": "es",
+      "language": "es-ES",
       "text": "Hay una avería en esta entrada. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "cae4a3e7d4000fe9d2f643131dbbbc0985fbf62e8195f9cc78df90e8ec9d81de",
       "bytes": 63290,
       "sample_rate": 8000,
@@ -628,10 +733,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.nothing_to_do.wav": {
+    "es-ES/case.nothing_to_do.wav": {
       "line": "case.nothing_to_do",
-      "language": "es",
+      "language": "es-ES",
       "text": "Esta entrada no tiene nada pendiente para usted. Adiós.",
+      "text_provenance": "es-ES",
       "sha256": "7079656862636f7ec6e03691ea8453918f0db23233e23ce5f4a868ff52251717",
       "bytes": 66836,
       "sample_rate": 8000,
@@ -639,10 +745,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.plate_not_read.wav": {
+    "es-ES/case.plate_not_read.wav": {
       "line": "case.plate_not_read",
-      "language": "es",
+      "language": "es-ES",
       "text": "No hemos podido leer su matrícula. Si algo la tapa, despéjela por favor. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "025bb3d679b8e515a9c9c615c9cda3348d2764049fa0f1aad6a849f5364dd696",
       "bytes": 118002,
       "sample_rate": 8000,
@@ -650,10 +757,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.plate_unclear.wav": {
+    "es-ES/case.plate_unclear.wav": {
       "line": "case.plate_unclear",
-      "language": "es",
+      "language": "es-ES",
       "text": "No hemos podido leer su matrícula con claridad. Si algo la tapa, despéjela por favor. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "53082b34d09d5e02ba0dce6b9708d9f4e18ab728e982a33b069274f7c625621a",
       "bytes": 131092,
       "sample_rate": 8000,
@@ -661,10 +769,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.rules_unavailable.wav": {
+    "es-ES/case.rules_unavailable.wav": {
       "line": "case.rules_unavailable",
-      "language": "es",
+      "language": "es-ES",
       "text": "No podemos comprobar las normas de esta entrada ahora mismo. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "eddfe16764dc453b052204ee256e14cea316fecae8937f2cf4dd73b6ffa1373c",
       "bytes": 92070,
       "sample_rate": 8000,
@@ -672,10 +781,23 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.standalone.wav": {
+    "es-ES/case.stale_decision.wav": {
+      "line": "case.stale_decision",
+      "language": "es-ES",
+      "text": "Lo último que registró esta entrada es demasiado antiguo para referirse a usted. Le paso con una persona.",
+      "text_provenance": "es-ES",
+      "sha256": "bbf14ebc01426c24d82b44ebb1a3f962b5a53443ac5433e0960dbe98b5630ae4",
+      "bytes": 114754,
+      "sample_rate": 8000,
+      "voice": "es",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "es-ES/case.standalone.wav": {
       "line": "case.standalone",
-      "language": "es",
+      "language": "es-ES",
       "text": "Ha llamado al interfono del aparcamiento. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "d546f62bbeb1a6e99aec5a28d119c9ad7f890bf6e5a212bf315190c005bd1661",
       "bytes": 75922,
       "sample_rate": 8000,
@@ -683,10 +805,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.unrecognised_reason.wav": {
+    "es-ES/case.unrecognised_reason.wav": {
       "line": "case.unrecognised_reason",
-      "language": "es",
+      "language": "es-ES",
       "text": "No sabemos qué ha ocurrido aquí. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "71f17120c72f7221eadf4038ba32978fff716438ea494c9c98892067f6875993",
       "bytes": 67446,
       "sample_rate": 8000,
@@ -694,10 +817,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.vehicle_not_detected.wav": {
+    "es-ES/case.vehicle_not_detected.wav": {
       "line": "case.vehicle_not_detected",
-      "language": "es",
+      "language": "es-ES",
       "text": "La entrada no ha detectado ningún vehículo. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "59ad006d428691ef790f84941b5f7ec1bf054bea113a19e56d19d126ae866848",
       "bytes": 78342,
       "sample_rate": 8000,
@@ -705,10 +829,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/case.vehicle_not_recognised.wav": {
+    "es-ES/case.vehicle_not_recognised.wav": {
       "line": "case.vehicle_not_recognised",
-      "language": "es",
+      "language": "es-ES",
       "text": "No reconocemos este vehículo. Le paso con una persona.",
+      "text_provenance": "es-ES",
       "sha256": "cf2d7f238b3dc4df023084e1bf458fcbfc09254f6f40ee6aae85904f44448e32",
       "bytes": 66750,
       "sample_rate": 8000,
@@ -716,10 +841,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/driver.hold_reprompt.wav": {
+    "es-ES/driver.hold_reprompt.wav": {
       "line": "driver.hold_reprompt",
-      "language": "es",
+      "language": "es-ES",
       "text": "Siga esperando, por favor. Alguien se está ocupando de esto.",
+      "text_provenance": "es-ES",
       "sha256": "d8a13e2024c9bbe7b77bc5bd88d98853b7ce64adea464f00abde77a857a93d23",
       "bytes": 76310,
       "sample_rate": 8000,
@@ -727,10 +853,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/driver.human_unreachable.wav": {
+    "es-ES/driver.human_unreachable.wav": {
       "line": "driver.human_unreachable",
-      "language": "es",
+      "language": "es-ES",
       "text": "No ha contestado nadie. Vuelva a llamar por este interfono o use el número de ayuda de esta entrada.",
+      "text_provenance": "es-ES",
       "sha256": "1512a2f36e09ea194c4e3a07e504c25c6599d7b5b4e396b2dd94f3b4079ad058",
       "bytes": 108534,
       "sample_rate": 8000,
@@ -738,10 +865,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/driver.nothing_usable.wav": {
+    "es-ES/driver.nothing_usable.wav": {
       "line": "driver.nothing_usable",
-      "language": "es",
+      "language": "es-ES",
       "text": "No he podido recoger una instrucción. Vuelva a llamar por este interfono.",
+      "text_provenance": "es-ES",
       "sha256": "51edcbd69919ce8ca455bcfdc3bff1e67a7968c43ed3033031aff6a3428d5bf2",
       "bytes": 85200,
       "sample_rate": 8000,
@@ -749,10 +877,23 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/driver.undeclared_intercom.wav": {
+    "es-ES/driver.operator_hung_up.wav": {
+      "line": "driver.operator_hung_up",
+      "language": "es-ES",
+      "text": "La llamada con la persona ha terminado antes de que diera una instrucción. Vuelva a llamar por este interfono.",
+      "text_provenance": "es-ES",
+      "sha256": "08b58f80dc82602e92b45d48e7d2d6f5991113f05db2bbddac85a55d07a0e8e0",
+      "bytes": 115990,
+      "sample_rate": 8000,
+      "voice": "es",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "es-ES/driver.undeclared_intercom.wav": {
       "line": "driver.undeclared_intercom",
-      "language": "es",
+      "language": "es-ES",
       "text": "Este interfono no está configurado. Adiós.",
+      "text_provenance": "es-ES",
       "sha256": "23d96e50d691b2bf5353caa060200a2e3d8921e48c81c6973d996b9e05a40355",
       "bytes": 58368,
       "sample_rate": 8000,
@@ -760,10 +901,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/menu.call_back.wav": {
+    "es-ES/menu.call_back.wav": {
       "line": "menu.call_back",
-      "language": "es",
+      "language": "es-ES",
       "text": "Pulse 6 para registrar un número de devolución de llamada.",
+      "text_provenance": "es-ES",
       "sha256": "c3a996cccd697732cbb5dc67d476b2d36accdd48d0bdf6fbc82bf34575fa63fb",
       "bytes": 67064,
       "sample_rate": 8000,
@@ -771,10 +913,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/menu.do_not_open.wav": {
+    "es-ES/menu.do_not_open.wav": {
       "line": "menu.do_not_open",
-      "language": "es",
+      "language": "es-ES",
       "text": "Pulse 3 para denegar.",
+      "text_provenance": "es-ES",
       "sha256": "fa06da0921654deefae139ceecd5e7e2eccc92a7946fecf270bae9249726e4c3",
       "bytes": 30748,
       "sample_rate": 8000,
@@ -782,10 +925,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/menu.hold.wav": {
+    "es-ES/menu.hold.wav": {
       "line": "menu.hold",
-      "language": "es",
+      "language": "es-ES",
       "text": "Pulse 4 para esperar.",
+      "text_provenance": "es-ES",
       "sha256": "ad1b857047fe1e495299c2a7b8f4ae58b01b40fbad157cb3564fd972a008a8fd",
       "bytes": 32158,
       "sample_rate": 8000,
@@ -793,10 +937,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/menu.open_and_flag.wav": {
+    "es-ES/menu.open_and_flag.wav": {
       "line": "menu.open_and_flag",
-      "language": "es",
+      "language": "es-ES",
       "text": "Pulse 2 para autorizar la apertura y marcarla.",
+      "text_provenance": "es-ES",
       "sha256": "334c5f597a49c95d204185b5324a9576e5b5c33b5ba53bea7c3fdb8866d2f8db",
       "bytes": 52912,
       "sample_rate": 8000,
@@ -804,10 +949,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/menu.open_now.wav": {
+    "es-ES/menu.open_now.wav": {
       "line": "menu.open_now",
-      "language": "es",
+      "language": "es-ES",
       "text": "Pulse 1 para autorizar la apertura.",
+      "text_provenance": "es-ES",
       "sha256": "ae52bfacf836cd85a5d43428152bd639243965cc8d3ee9c82d31ae2688ab5c7d",
       "bytes": 42396,
       "sample_rate": 8000,
@@ -815,10 +961,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/menu.transfer.wav": {
+    "es-ES/menu.transfer.wav": {
       "line": "menu.transfer",
-      "language": "es",
+      "language": "es-ES",
       "text": "Pulse 5 para transferir.",
+      "text_provenance": "es-ES",
       "sha256": "b177dd6479eb07b66e2b6f9afc6dc5769bd736bab847fdb6e67d791b9ad4ba2f",
       "bytes": 35198,
       "sample_rate": 8000,
@@ -826,10 +973,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator.cannot_open.wav": {
+    "es-ES/operator.cannot_open.wav": {
       "line": "operator.cannot_open",
-      "language": "es",
+      "language": "es-ES",
       "text": "Registrado. Esta versión no puede accionar la barrera.",
+      "text_provenance": "es-ES",
       "sha256": "92367656d1b88a734840bc7cde32cc5ad1528fae48fc6577332e22562653b88d",
       "bytes": 66600,
       "sample_rate": 8000,
@@ -837,10 +985,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator.menu_callback_number.wav": {
+    "es-ES/operator.menu_callback_number.wav": {
       "line": "operator.menu_callback_number",
-      "language": "es",
+      "language": "es-ES",
       "text": "Marque el número de devolución de llamada y luego almohadilla.",
+      "text_provenance": "es-ES",
       "sha256": "8db217e8d8b11caa790a72e7cf0d9e72a5356edfc9ec78a7e9937b5fbc1f4d09",
       "bytes": 65174,
       "sample_rate": 8000,
@@ -848,10 +997,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator.menu_repeat.wav": {
+    "es-ES/operator.menu_repeat.wav": {
       "line": "operator.menu_repeat",
-      "language": "es",
+      "language": "es-ES",
       "text": "No lo he recogido. Inténtelo de nuevo.",
+      "text_provenance": "es-ES",
       "sha256": "a60e34cb80b5fa192d6cb61871259de4f708794932ca08e853736f73848a4225",
       "bytes": 50330,
       "sample_rate": 8000,
@@ -859,10 +1009,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.entry_not_confirmed.wav": {
+    "es-ES/operator_case.entry_not_confirmed.wav": {
       "line": "operator_case.entry_not_confirmed",
-      "language": "es",
+      "language": "es-ES",
       "text": "No se ha confirmado la entrada.",
+      "text_provenance": "es-ES",
       "sha256": "f7ca214ac442ee6ff6a149d054383f6767f2edd6fc9f863946d16556817dc960",
       "bytes": 36030,
       "sample_rate": 8000,
@@ -870,10 +1021,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.entry_refused.wav": {
+    "es-ES/operator_case.entry_refused.wav": {
       "line": "operator_case.entry_refused",
-      "language": "es",
+      "language": "es-ES",
       "text": "Se ha denegado la entrada.",
+      "text_provenance": "es-ES",
       "sha256": "fd7c3ba35d866cae6505c3baa74154508f495ffee243138f66c39659eedaa924",
       "bytes": 30670,
       "sample_rate": 8000,
@@ -881,10 +1033,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.identification_unavailable.wav": {
+    "es-ES/operator_case.identification_unavailable.wav": {
       "line": "operator_case.identification_unavailable",
-      "language": "es",
+      "language": "es-ES",
       "text": "La identificación de vehículos no está disponible.",
+      "text_provenance": "es-ES",
       "sha256": "cef70c17d429fbd7a089fb4446fbad5e427ab54098166e0fb99544c06735d8c5",
       "bytes": 58040,
       "sample_rate": 8000,
@@ -892,10 +1045,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.lane_unavailable.wav": {
+    "es-ES/operator_case.lane_unavailable.wav": {
       "line": "operator_case.lane_unavailable",
-      "language": "es",
+      "language": "es-ES",
       "text": "No se ha podido contactar con el carril.",
+      "text_provenance": "es-ES",
       "sha256": "86616916677bed64ed96f2a67d055514a57a6e415af34e070d23c78505bded6e",
       "bytes": 47516,
       "sample_rate": 8000,
@@ -903,10 +1057,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.malfunction_active.wav": {
+    "es-ES/operator_case.malfunction_active.wav": {
       "line": "operator_case.malfunction_active",
-      "language": "es",
+      "language": "es-ES",
       "text": "Hay una avería activa en este carril.",
+      "text_provenance": "es-ES",
       "sha256": "c679e6ba2b28d17551c3bd7982baf5fdfa8602291e86db87dda3c2efef103898",
       "bytes": 41882,
       "sample_rate": 8000,
@@ -914,10 +1069,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.nothing_to_do.wav": {
+    "es-ES/operator_case.nothing_to_do.wav": {
       "line": "operator_case.nothing_to_do",
-      "language": "es",
+      "language": "es-ES",
       "text": "No había nada pendiente en este carril.",
+      "text_provenance": "es-ES",
       "sha256": "605d2e98908e2a965f875ad4973c227362cd13f0fb37f93a2b4c73c9335f8856",
       "bytes": 44396,
       "sample_rate": 8000,
@@ -925,10 +1081,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.plate_not_read.wav": {
+    "es-ES/operator_case.plate_not_read.wav": {
       "line": "operator_case.plate_not_read",
-      "language": "es",
+      "language": "es-ES",
       "text": "No se ha leído la matrícula.",
+      "text_provenance": "es-ES",
       "sha256": "e8a19f353f920eb11ab6dad0c210e313a0dc779408f5cad18f57933ebf6a3978",
       "bytes": 32358,
       "sample_rate": 8000,
@@ -936,10 +1093,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.plate_unclear.wav": {
+    "es-ES/operator_case.plate_unclear.wav": {
       "line": "operator_case.plate_unclear",
-      "language": "es",
+      "language": "es-ES",
       "text": "La matrícula no estaba clara.",
+      "text_provenance": "es-ES",
       "sha256": "3ce060b6197d4aa5466c602b6278a87181f42e7dca9b06ae84357a7ec293acfd",
       "bytes": 34198,
       "sample_rate": 8000,
@@ -947,10 +1105,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.rules_unavailable.wav": {
+    "es-ES/operator_case.rules_unavailable.wav": {
       "line": "operator_case.rules_unavailable",
-      "language": "es",
+      "language": "es-ES",
       "text": "No se han podido comprobar las normas de la entrada.",
+      "text_provenance": "es-ES",
       "sha256": "fa02c11ba7d67f9c94a43efce11da2dca53139860acb0b1b797b54824577c26e",
       "bytes": 54744,
       "sample_rate": 8000,
@@ -958,10 +1117,23 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.standalone.wav": {
+    "es-ES/operator_case.stale_decision.wav": {
+      "line": "operator_case.stale_decision",
+      "language": "es-ES",
+      "text": "La última decisión del carril es más antigua de lo que permite esta instalación.",
+      "text_provenance": "es-ES",
+      "sha256": "dffdd44d6283e5bdad254948ccdceee443c23beeaa211858d32a22d987c4646b",
+      "bytes": 84412,
+      "sample_rate": 8000,
+      "voice": "es",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "es-ES/operator_case.standalone.wav": {
       "line": "operator_case.standalone",
-      "language": "es",
+      "language": "es-ES",
       "text": "Este interfono no tiene carril.",
+      "text_provenance": "es-ES",
       "sha256": "109cbfbd944e752766b4d12a83e0c57e1760cc270fd07becb83b4b957f2850f7",
       "bytes": 39376,
       "sample_rate": 8000,
@@ -969,10 +1141,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.unrecognised_reason.wav": {
+    "es-ES/operator_case.unrecognised_reason.wav": {
       "line": "operator_case.unrecognised_reason",
-      "language": "es",
+      "language": "es-ES",
       "text": "El carril ha dado un motivo que este sistema no reconoce.",
+      "text_provenance": "es-ES",
       "sha256": "44bf6e20c7ee6b7536f3172ac453513654c92d8a24e50e46b9c52617ee466a9b",
       "bytes": 62060,
       "sample_rate": 8000,
@@ -980,10 +1153,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.vehicle_not_detected.wav": {
+    "es-ES/operator_case.vehicle_not_detected.wav": {
       "line": "operator_case.vehicle_not_detected",
-      "language": "es",
+      "language": "es-ES",
       "text": "El carril no ha detectado ningún vehículo.",
+      "text_provenance": "es-ES",
       "sha256": "cff118512389c45e7ceb6e8acb70084a337bddc5df42f7fe6960b8d1f88efd0a",
       "bytes": 49126,
       "sample_rate": 8000,
@@ -991,10 +1165,11 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es/operator_case.vehicle_not_recognised.wav": {
+    "es-ES/operator_case.vehicle_not_recognised.wav": {
       "line": "operator_case.vehicle_not_recognised",
-      "language": "es",
+      "language": "es-ES",
       "text": "El vehículo no ha sido reconocido.",
+      "text_provenance": "es-ES",
       "sha256": "4c1749dcab781ee441df93e573222b91b51eaf8836994a76afbce8e046ee744c",
       "bytes": 40952,
       "sample_rate": 8000,

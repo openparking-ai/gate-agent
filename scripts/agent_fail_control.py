@@ -54,8 +54,8 @@ BREAKS = [
         "name": "the_socket_module_can_see_a_lane",
         "why": "the module allowed to open a socket gains the target client",
         "file": "src/gate_agent/ua_baresip.py",
-        "from": "from .ua import UaEvent",
-        "to": "from .client import ReadOnlyClient  # noqa: F401\nfrom .ua import UaEvent",
+        "from": "from .ua import (\n    UaCall,",
+        "to": "from .client import ReadOnlyClient  # noqa: F401\nfrom .ua import (\n    UaCall,",
     },
     {
         "name": "a_socket_outside_the_adapter",
@@ -199,7 +199,7 @@ BREAKS = [
     },
     {
         "name": "a_second_call_is_answered",
-        "why": "a call arriving during a case is answered, and the fall-through is taken away",
+        "why": "a call arriving during a case is answered instead of refused unanswered",
         "file": "src/gate_agent/agent.py",
         "from": "        if self.session is not None:",
         "to": "        if False:",
@@ -307,12 +307,189 @@ BREAKS = [
         "from": "    assert_bind_allowed(host, port, token)",
         "to": "    pass",
     },
+    # ---- THE ROUND-5 CUT. One break per blocker, and per one-liner. ----
+    {
+        "name": "the_identity_is_checked_before_the_live_case",
+        "why": "an undeclared caller mid-case is answered and conferenced into the bridge",
+        "file": "src/gate_agent/agent.py",
+        "from": "        uri = _bare_uri(event.peer_uri)\n"
+                "        if self.session is not None:",
+        "to": "        uri = _bare_uri(event.peer_uri)\n"
+              "        if self.session is not None and _bare_uri(event.peer_uri) "
+              "in self._by_uri:",
+    },
+    {
+        "name": "a_stale_decision_is_acted_on",
+        "why": "an hour-old decision is spoken as though it were about this driver",
+        "file": "src/gate_agent/cases.py",
+        "from": "        if age > max_age_seconds:\n"
+                "            return AgentCase.STALE_DECISION",
+        "to": "        if False:\n            return AgentCase.STALE_DECISION",
+    },
+    {
+        "name": "a_decision_with_no_moment_is_fresh",
+        "why": "a decision whose age cannot be read is treated as though it were new",
+        "file": "src/gate_agent/cases.py",
+        "from": "        if age is None:\n"
+                "            # A decision with no readable moment on it. The catch-all, for the\n"
+                "            # same reason as every other answer this build will not interpret.\n"
+                "            return AgentCase.UNRECOGNISED_REASON",
+        "to": "        if age is None:\n            age = 0.0",
+    },
+    {
+        "name": "a_naive_lane_timestamp_is_followed",
+        "why": "a moment with no timezone is compared against an aware one anyway",
+        "file": "src/gate_agent/cases.py",
+        "from": "    if moment.tzinfo is None:\n        return None",
+        "to": "    if moment.tzinfo is None:\n        moment = moment.replace(tzinfo=now.tzinfo)",
+    },
+    {
+        "name": "a_line_is_retried_for_ever",
+        "why": "a user agent that refuses every file leaves a driver in permanent silence",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if started is None or now - started <= self.config.line_timeout_seconds:\n"
+                "            return",
+        "to": "        if True:\n            return",
+    },
+    {
+        "name": "a_failed_line_raises_no_code",
+        "why": "the leg that cannot be spoken to is not named on the health surface",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._code(AgentCode.AUDIO_PLAYBACK_FAILED, leg.value, "
+                "HealthState.ACTIVE)\n        session.speech[leg].clear()",
+        "to": "        session.speech[leg].clear()",
+    },
+    {
+        "name": "a_case_nobody_could_be_told_holds_the_call_open",
+        "why": "neither leg can be spoken to and the driver's call is never released",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._not_spoken(session)\n\n    def _not_spoken",
+        "to": "        return\n\n    def _not_spoken",
+    },
+    {
+        "name": "a_torn_down_case_is_still_bridged",
+        "why": "the case ended mid-poll and the rest of the same poll bridges it anyway",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if self.session is not session:",
+        "to": "        if False:",
+    },
+    {
+        "name": "case_spoken_is_written_when_it_is_queued",
+        "why": "the record says a driver was told their case at the moment it was queued",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._say(session, UaLeg.DRIVER, f\"case.{session.case.value}\")",
+        "to": "        self._spoken(session)\n"
+              "        self._say(session, UaLeg.DRIVER, f\"case.{session.case.value}\")",
+    },
+    {
+        "name": "the_baresip_configuration_is_not_checked",
+        "why": "the agent starts against an aubridge baresip, as the false sentence claimed",
+        "file": "src/gate_agent/ua_baresip.py",
+        "from": "        self._check_configuration()",
+        "to": "        pass",
+    },
+    {
+        "name": "a_missing_baresip_module_is_not_named",
+        "why": "a baresip with no mixminus starts, and the bridge silently does not exist",
+        "file": "src/gate_agent/ua_baresip.py",
+        "from": "        missing = [one for one in REQUIRED_MODULES if one not in loaded_modules]",
+        "to": "        missing = []",
+    },
+    {
+        "name": "the_control_socket_is_never_reopened",
+        "why": "a lost socket is a permanent outage and a human has to restart the agent",
+        "file": "src/gate_agent/agent.py",
+        "from": "        reconnect = getattr(self.ua, \"reconnect\", None)\n"
+                "        if reconnect is None:\n            return",
+        "to": "        reconnect = getattr(self.ua, \"reconnect\", None)\n        return",
+    },
+    {
+        "name": "a_lost_socket_is_kept",
+        "why": "the dead socket is left in place, so nothing can ever reopen it",
+        "file": "src/gate_agent/ua_baresip.py",
+        "from": "        self._sock = None\n        self._buffer = b\"\"\n"
+                "        self._schedule_retry()",
+        "to": "        self._buffer = b\"\"\n        self._schedule_retry()",
+    },
+    {
+        "name": "an_orphaned_call_survives_a_reconnect",
+        "why": "a leg left live after the socket came back is conferenced into the next case",
+        "file": "src/gate_agent/agent.py",
+        "from": "            try:\n                self.ua.hangup(call.call_id)\n"
+                "            except UaUnreachable as exc:",
+        "to": "            try:\n                pass\n"
+              "            except UaUnreachable as exc:",
+    },
+    {
+        "name": "the_backoff_is_unbounded",
+        "why": "the gap between attempts grows past the site's setting and never comes back",
+        "file": "src/gate_agent/ua_baresip.py",
+        "from": "        self._retry_gap = min(max(self._retry_gap * 2, RECONNECT_FLOOR),\n"
+                "                              max(self.reconnect_seconds, RECONNECT_FLOOR))",
+        "to": "        self._retry_gap = self._retry_gap * 2\n"
+              "        self._retry_gap = max(self._retry_gap, RECONNECT_FLOOR)",
+    },
+    {
+        "name": "the_sample_rate_is_not_checked",
+        "why": "the one file this package does not produce plays at the wrong rate",
+        "file": "src/gate_agent/agent.py",
+        "from": "            if channels != 1 or width != 2 or rate != NARROWBAND_RATE:",
+        "to": "            if channels != 1 or width != 2:",
+    },
+    {
+        "name": "a_name_audio_may_be_any_length",
+        "why": "a driver is held in a never-bridged call for as long as the site's file lasts",
+        "file": "src/gate_agent/agent.py",
+        "from": "            if path in site_files and seconds > "
+                "self.config.name_audio_max_seconds:",
+        "to": "            if False:",
+    },
+    {
+        "name": "the_operator_hanging_up_says_the_wrong_thing",
+        "why": "a driver is told an instruction could not be taken when the person hung up",
+        "file": "src/gate_agent/agent.py",
+        "from": '            "driver.operator_hung_up" if hung_up else "driver.nothing_usable",',
+        "to": '            "driver.nothing_usable",',
+    },
+    {
+        "name": "the_two_clocks_note_gets_a_second_copy",
+        "why": "the contract's sentence and the code's stop being one copy",
+        "file": "src/gate_agent/cases.py",
+        "from": "    \"NEGATIVE AGE IS REACHABLE -- a decision stamped after the moment this \"",
+        "to": "    \"NEGATIVE AGE IS IMPOSSIBLE -- a decision stamped after the moment this \"",
+    },
+    {
+        "name": "the_busy_refusal_is_justified_again",
+        "why": "an unmeasured claim about a door station's call list comes back",
+        "file": "docs/CONTRACT.md",
+        "from": "**What the refusal IS, measured from the caller's side:**",
+        "to": "That is deliberate: an unanswered call is what makes the intercom's own call\n"
+              "list move on to the human's number.\n\n"
+              "**What the refusal IS, measured from the caller's side:**",
+    },
+    {
+        "name": "the_spanish_loses_its_region",
+        "why": "Castilian ships under a generic tag and a site cannot see which it got",
+        "file": "src/gate_agent/lines.py",
+        "from": 'SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es-ES")',
+        "to": 'SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es")',
+    },
+    {
+        "name": "the_text_has_no_provenance",
+        "why": "who wrote the words, and whether anybody reviewed them, is unrecorded again",
+        "file": "src/gate_agent/audio/MANIFEST.json",
+        "from": '  "text_provenance": {',
+        "to": '  "text_provenance_removed": {',
+    },
 ]
 
 
 def stage() -> Path:
     directory = Path(tempfile.mkdtemp(prefix="gate-agent-agent-control-"))
-    for entry in ("src", "tests", "docs", "config", "pyproject.toml"):
+    # `scripts` is here because the audio build script is itself a published
+    # claim -- the manifest's provenance rows come out of it -- and a break that
+    # cannot reach it is a guarantee nobody is measuring.
+    for entry in ("src", "tests", "docs", "config", "scripts", "pyproject.toml"):
         source = ROOT / entry
         target = directory / entry
         if source.is_dir():

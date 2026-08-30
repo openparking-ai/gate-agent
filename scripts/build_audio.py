@@ -60,11 +60,49 @@ RATE = 8000
 #: The voice each shipped language is spoken in. Per language, named, and in the
 #: manifest beside every file -- a voice is part of what produced a file, and a
 #: file whose voice nobody recorded cannot be reproduced.
-VOICES: dict[str, str] = {"en": "en-us", "es": "es"}
+VOICES: dict[str, str] = {"en": "en-us", "es-ES": "es"}
 
 #: Slower than the default 175 wpm. A driver at a barrier hears this once,
 #: through a door station, with an engine running.
 WORDS_PER_MINUTE = 150
+
+#: WHO WROTE EACH LANGUAGE'S TEXT, AND FROM WHAT. Referenced by key from every
+#: file in the manifest, the same way the licence rows are.
+#:
+#: The manifest recorded the voice, the tool and the tool's licence for the
+#: AUDIO and nothing at all about the provenance of the TEXT -- and the text is
+#: the thing the audio is only a rendering of. `lines.py` said "the English is
+#: the source and the Spanish is a translation of it", which says what the
+#: relationship is and not who made it.
+#:
+#: Neither row claims a review nobody did. That is the point of writing them
+#: down: a site deciding whether to record its own voice is entitled to know
+#: that the words were written by the software that wrote the rest of this
+#: package, and checked by no native speaker.
+TEXT_PROVENANCE: dict[str, dict] = {
+    "en": {
+        "written_by": "The Claude Code session that built this module, 2026-08-30, "
+        "commit 5084a76 on openparking-ai/gate-agent.",
+        "from": "Nothing. English is the SOURCE: every line was written here first and "
+        "every other language is a translation of it.",
+        "reviewed_by": "No professional editor and no native-speaker review. The words are "
+        "held to what plays only by the sha256 rows below.",
+    },
+    "es-ES": {
+        "written_by": "The same session and the same commit as the English. It is a "
+        "MACHINE TRANSLATION in the ordinary sense -- written by the model that wrote the "
+        "English, not by a translator and not by a translation service.",
+        "from": "The English line of the same key, in `gate_agent.lines.TEXT`.",
+        "reviewed_by": "No native speaker and no professional translator. It was read line "
+        "by line against its English source by an independent review session on 2026-08-30, "
+        "which found every line a faithful rendering in a consistent `usted` register -- "
+        "that is a check on FAITHFULNESS, not a sign-off on register or regional fit.",
+        "register": "Castilian. `matrícula`, `aparcamiento`, `almohadilla`, `Pulse`. This "
+        "is why the key is `es-ES` and not `es`: at a garage in Texas or Bogotá several of "
+        "those words are wrong, and a generic tag would have chosen a register for that "
+        "site's drivers without telling anybody.",
+    },
+}
 
 #: The licence rows. One entry per licence, referenced BY KEY from every file in
 #: the manifest -- ninety copies of a paragraph would be eighty-nine copies to
@@ -190,6 +228,7 @@ def build(check_only: bool) -> int:
                 "line": line,
                 "language": language,
                 "text": text,
+                "text_provenance": language,
                 "sha256": digest,
                 "bytes": path.stat().st_size,
                 "sample_rate": RATE,
@@ -201,6 +240,7 @@ def build(check_only: bool) -> int:
     manifest = {
         "generated_by": "scripts/build_audio.py",
         "tool_version": tool_version,
+        "text_provenance": TEXT_PROVENANCE,
         "licences": LICENCES,
         "files": dict(sorted(files.items())),
     }

@@ -295,11 +295,31 @@ def test_the_real_adapter_refuses_a_user_agent_version_nobody_tested():
     from gate_agent.ua import UaUnsupportedVersion
     from gate_agent.ua_baresip import TESTED_VERSIONS, BaresipUa
 
-    class Answering:
-        """A control socket that answers `reginfo` and `about`, netstring-framed."""
+    #: What a correctly set-up baresip answers `config` and `modules` with. The
+    #: real shape, cut down: `config` is `key<TAB>value` lines and `modules` is
+    #: `  <name> type=<kind> ref=N`. Both are measured in `test_agent_sip.py`
+    #: against the real process; here they are the BACKGROUND to a question
+    #: about the version, and the misconfiguration cases have their own test.
+    GOOD_CONFIG = (
+        "\n# Audio\naudio_player\taufile,/tmp/x.wav\naudio_source\taufile,/tmp/y.wav\n"
+        "call_hold_other_calls\tno\n"
+    )
+    GOOD_MODULES = (
+        "\n--- Modules (5) ---\n            g711 type=audio codec  ref=1\n"
+        "        ctrl_tcp type=application  ref=1\n"
+        "        mixausrc type=filter       ref=1\n"
+        "        mixminus type=filter       ref=1\n"
+        "       debug_cmd type=application  ref=1\n\n"
+    )
 
-        def __init__(self, version: str) -> None:
+    class Answering:
+        """A control socket that answers `reginfo`, `about`, `config`, `modules`."""
+
+        def __init__(self, version: str, config: str = GOOD_CONFIG,
+                     modules: str = GOOD_MODULES) -> None:
             self.version = version
+            self.config = config
+            self.modules = modules
             self.pending = b""
 
         def settimeout(self, _timeout):
@@ -309,7 +329,11 @@ def test_the_real_adapter_refuses_a_user_agent_version_nobody_tested():
             body = payload.split(b":", 1)[1][:-1].decode()
             token = json.loads(body)["token"]
             command = json.loads(body)["command"]
-            data = f"baresip {self.version}" if command == "about" else ""
+            data = {
+                "about": f"baresip {self.version}",
+                "config": self.config,
+                "modules": self.modules,
+            }.get(command, "")
             answer = json.dumps(
                 {"response": True, "ok": True, "data": data, "token": token}
             ).encode()
@@ -322,8 +346,8 @@ def test_the_real_adapter_refuses_a_user_agent_version_nobody_tested():
         def close(self):
             pass
 
-    def connect(version):
-        return lambda _address, timeout=None: Answering(version)
+    def connect(version, **kwargs):
+        return lambda _address, timeout=None: Answering(version, **kwargs)
 
     # The control: the version this build WAS tested against starts.
     good = BaresipUa("127.0.0.1", 1, "sip:a@h", "sip:b@h", connect=connect(TESTED_VERSIONS[0]))
@@ -334,6 +358,107 @@ def test_the_real_adapter_refuses_a_user_agent_version_nobody_tested():
     with pytest.raises(UaUnsupportedVersion) as raised:
         bad.start()
     assert "9.9.9" in str(raised.value)
+
+
+def test_the_real_adapter_refuses_a_baresip_configuration_it_cannot_work_on(tmp_path):
+    """X5. The three settings are READ BACK OUT OF THE PROCESS, and named.
+
+    The source used to say they were "checked at startup" while
+    `config/agent.example.toml` said, correctly, that they were checked nowhere
+    but in baresip's own configuration file. Two copies of a claim, and the
+    hand-written one was the one that lied.
+
+    Every case here names the setting in the refusal, because a site reading
+    "the user agent is misconfigured" has been told nothing.
+    """
+    import json as _json
+
+    from gate_agent.ua import UaMisconfigured
+    from gate_agent.ua_baresip import TESTED_VERSIONS, BaresipUa
+
+    GOOD_CONFIG = (
+        "\naudio_player\taufile,/tmp/x.wav\naudio_source\taufile,/tmp/y.wav\n"
+        "call_hold_other_calls\tno\n"
+    )
+    GOOD_MODULES = (
+        "\n--- Modules (5) ---\n            g711 type=audio codec  ref=1\n"
+        "        ctrl_tcp type=application  ref=1\n"
+        "        mixausrc type=filter       ref=1\n"
+        "        mixminus type=filter       ref=1\n"
+        "       debug_cmd type=application  ref=1\n\n"
+    )
+
+    class Answering:
+        def __init__(self, config, modules, refuse=()):
+            self.config, self.modules, self.refuse = config, modules, refuse
+            self.pending = b""
+
+        def settimeout(self, _t):
+            pass
+
+        def sendall(self, payload):
+            body = _json.loads(payload.split(b":", 1)[1][:-1].decode())
+            command, token = body["command"], body["token"]
+            ok = command not in self.refuse
+            data = {
+                "about": f"baresip {TESTED_VERSIONS[0]}",
+                "config": self.config,
+                "modules": self.modules,
+            }.get(command, "")
+            answer = _json.dumps(
+                {"response": True, "ok": ok, "data": data if ok else "unknown command",
+                 "token": token}
+            ).encode()
+            self.pending += b"%d:%s," % (len(answer), answer)
+
+        def recv(self, _size):
+            out, self.pending = self.pending, b""
+            return out
+
+        def close(self):
+            pass
+
+    def ua(config=GOOD_CONFIG, modules=GOOD_MODULES, refuse=()):
+        return BaresipUa(
+            "127.0.0.1", 1, "sip:a@h", "sip:b@h",
+            connect=lambda _a, timeout=None: Answering(config, modules, refuse),
+        )
+
+    # THE CONTROL, first: a baresip set up the way the contract says starts.
+    ua().start()
+
+    # `aubridge` on either device, named.
+    for key in ("audio_source", "audio_player"):
+        broken = GOOD_CONFIG.replace(f"{key}\taufile", f"{key}\taubridge")
+        assert "aubridge" in broken
+        with pytest.raises(UaMisconfigured) as raised:
+            ua(config=broken).start()
+        assert "aubridge" in str(raised.value) and key in str(raised.value)
+
+    # `call_hold_other_calls yes`, named. It is what would put the driver at the
+    # barrier on hold the moment the agent calls the operator.
+    with pytest.raises(UaMisconfigured) as raised:
+        ua(config=GOOD_CONFIG.replace("call_hold_other_calls\tno",
+                                      "call_hold_other_calls\tyes")).start()
+    assert "call_hold_other_calls" in str(raised.value)
+
+    # Each required module, missing, named. One at a time, so the message is
+    # about the one that is gone rather than about all of them.
+    for module in ("ctrl_tcp", "mixausrc", "mixminus"):
+        without = "\n".join(
+            line for line in GOOD_MODULES.splitlines() if not line.strip().startswith(module)
+        )
+        with pytest.raises(UaMisconfigured) as raised:
+            ua(modules=without).start()
+        assert module in str(raised.value)
+
+    # And a baresip with no `debug_cmd`, which is what refuses the two commands
+    # this check is made of. A check that quietly did not run is the thing this
+    # replaced, so it is a refusal and it names the module.
+    for command in ("config", "modules"):
+        with pytest.raises(UaMisconfigured) as raised:
+            ua(refuse=(command,)).start()
+        assert "debug_cmd" in str(raised.value)
 
 
 def test_human_unreachable_recovers_when_the_person_answers(tmp_path):
@@ -384,3 +509,214 @@ def test_human_unreachable_recovers_when_the_person_answers(tmp_path):
     ua.established(operator)
     agent.poll()
     assert state_of(agent) == HealthState.OK.value
+
+
+def test_the_control_socket_is_reopened_with_a_bounded_backoff():
+    """X7. A lost `ctrl_tcp` used to be a PERMANENT outage.
+
+    `_open` was called once and from nowhere else, and every read raised on a
+    socket that was never replaced -- so an ordinary `systemctl restart
+    baresip`, a package upgrade, an OOM kill, or the second `ctrl_tcp` client
+    the contract already names left the agent alive, its user agent registered,
+    and every call ringing at a process that would never answer one. It failed
+    LOUDLY, which is this project's standing acceptance, and it never recovered.
+
+    Driven here against a socket a test can kill and revive, so the backoff and
+    the recovery are measured on the adapter itself; the real one, with a real
+    baresip and a real intruder on the port, is in `test_agent_sip.py`.
+    """
+    import json as _json
+
+    from gate_agent.ua import UaUnreachable
+    from gate_agent.ua_baresip import RECONNECT_FLOOR, TESTED_VERSIONS, BaresipUa
+
+    CONFIG = (
+        "\naudio_player\taufile,/tmp/x.wav\naudio_source\taufile,/tmp/y.wav\n"
+        "call_hold_other_calls\tno\n"
+    )
+    MODULES = (
+        "\n--- Modules (4) ---\n        ctrl_tcp type=application  ref=1\n"
+        "        mixausrc type=filter       ref=1\n"
+        "        mixminus type=filter       ref=1\n"
+        "       debug_cmd type=application  ref=1\n\n"
+    )
+
+    class Answering:
+        def __init__(self, world):
+            self.world = world
+            self.pending = b""
+            self.dead = False
+
+        def settimeout(self, _t):
+            pass
+
+        def sendall(self, payload):
+            if self.dead:
+                raise OSError("broken pipe")
+            body = _json.loads(payload.split(b":", 1)[1][:-1].decode())
+            data = {
+                "about": f"baresip {TESTED_VERSIONS[0]}",
+                "config": CONFIG,
+                "modules": MODULES,
+                "listcalls": self.world["listcalls"],
+            }.get(body["command"], "")
+            answer = _json.dumps(
+                {"response": True, "ok": True, "data": data, "token": body["token"]}
+            ).encode()
+            self.pending += b"%d:%s," % (len(answer), answer)
+
+        def recv(self, _size):
+            if self.dead:
+                return b""          # what a closed control socket reads as
+            if not self.pending:
+                # A live socket with nothing on it. `_drain` sets a zero
+                # timeout, and this is what a real one does then -- NOT an
+                # empty read, which is what "the far end closed" looks like.
+                raise BlockingIOError
+            out, self.pending = self.pending, b""
+            return out
+
+        def close(self):
+            self.dead = True
+
+    world = {"listcalls": "", "up": True, "sockets": [], "now": [0.0]}
+
+    def connect(_address, timeout=None):
+        if not world["up"]:
+            raise OSError("connection refused")
+        sock = Answering(world)
+        world["sockets"].append(sock)
+        return sock
+
+    ua = BaresipUa(
+        "127.0.0.1", 1, "sip:a@h", "sip:b@h",
+        connect=connect, reconnect_seconds=4.0, clock=lambda: world["now"][0],
+    )
+    ua.start()
+    assert ua.poll() == ()
+
+    # The user agent goes. The next poll raises, and the socket is DROPPED --
+    # which is what used to be missing and is what makes a reopen possible.
+    world["sockets"][-1].dead = True
+    world["up"] = False
+    with pytest.raises(UaUnreachable):
+        ua.poll()
+    assert ua._sock is None
+
+    # Too soon: the backoff is real, and reconnect says so rather than
+    # hammering a dead process once per poll for ever.
+    with pytest.raises(UaUnreachable):
+        ua.reconnect()
+
+    # THE BACKOFF IS BOUNDED. It doubles from the floor and stops at the
+    # setting; measured by asking when the next attempt is allowed.
+    gaps = []
+    for _ in range(6):
+        world["now"][0] += 100.0
+        with pytest.raises(UaUnreachable):
+            ua.reconnect()          # still down; schedules the next gap
+        gaps.append(ua._retry_gap)
+    assert gaps[0] > RECONNECT_FLOOR, gaps
+    assert max(gaps) <= 4.0, f"the backoff ran past the setting: {gaps}"
+    assert gaps == sorted(gaps), f"the backoff did not grow: {gaps}"
+
+    # It comes back, and it is holding one RINGING call and one established one.
+    world["up"] = True
+    world["listcalls"] = (
+        "\nUser-Agent: agent@h\n--- Active calls (2) ---\n"
+        "  [line 1, id aa11bb22]  00:00:03   INCOMING             sip:door1@10.0.0.9\n"
+        "  [line 2, id cc33dd44]  00:01:20   ESTABLISHED          sip:duty@10.0.0.5\n\n"
+    )
+    world["now"][0] += 100.0
+    found = ua.reconnect()
+    assert ua._sock is not None
+    assert [(one.call_id, one.ringing) for one in found] == [
+        ("aa11bb22", True), ("cc33dd44", False)
+    ]
+    assert found[0].peer_uri == "sip:door1@10.0.0.9"
+    # And the gap is back to the floor, so the NEXT outage is recovered from
+    # just as fast as this one.
+    assert ua._retry_gap == RECONNECT_FLOOR
+
+
+def test_a_call_that_arrived_while_the_socket_was_down_is_answered_or_released(tmp_path, capsys):
+    """X7, at the agent: what a reopened socket does with what it finds.
+
+    Whatever case was in progress is gone -- its legs were torn down or are
+    beyond reach, and nothing can say what was said while nobody was listening.
+    So the session is dropped with `case_not_spoken`, and each call the user
+    agent still holds gets the rule any new call gets: still RINGING is
+    answered, anything else is released rather than left live to be conferenced
+    into the next case.
+    """
+    from conftest import agent_config_for, agent_for
+    from fake_ua import FakeUa
+    from gate_agent.contract import AgentEventKind
+    from gate_agent.ua import UaCall, UaUnreachable
+
+    class Reconnecting(FakeUa):
+        """A fake whose socket can be taken away, and stays away until reopened.
+
+        The staying-away is the part that matters and the part a looser fake
+        would get wrong: the real adapter drops the socket on any loss, so every
+        later verb raises until `reconnect()` actually opens a new one. A fake
+        that started working again on its own would let an agent that never
+        reconnects pass this test.
+        """
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.down = False
+            self.broken = False
+            self.reconnects = 0
+
+        def poll(self):
+            if self.down or self.broken:
+                self.broken = True
+                raise UaUnreachable("the user agent closed its control socket")
+            return super().poll()
+
+        def reconnect(self):
+            self.reconnects += 1
+            if self.down:
+                raise UaUnreachable("still down")
+            self.broken = False
+            return tuple(self.held)
+
+    ua = Reconnecting()
+    agent = agent_for(agent_config_for(tmp_path, standalone=True), ua)
+    ua.incoming("sip:door1@10.0.0.9", call_id="driver-1")
+    agent.poll()
+    assert agent.session is not None
+
+    # The socket goes. The agent says so, and keeps trying.
+    ua.down = True
+    agent.poll()
+    assert [
+        entry["state"] for entry in agent.health().to_dict()["codes"]
+        if entry["code"] == "ua_unreachable"
+    ] == ["active"]
+    assert ua.reconnects == 1
+    agent.poll()
+    assert ua.reconnects == 2, "the agent stopped trying to come back"
+
+    # It comes back holding a ringing call and an orphaned one.
+    ua.down = False
+    ua.held = [
+        UaCall(call_id="ringing-9", peer_uri="sip:door1@10.0.0.9", ringing=True),
+        UaCall(call_id="orphan-9", peer_uri="sip:duty@10.0.0.5", ringing=False),
+    ]
+    agent.poll()
+
+    assert [
+        entry["state"] for entry in agent.health().to_dict()["codes"]
+        if entry["code"] == "ua_unreachable"
+    ] == ["ok"], "`ua_unreachable` did not recover on the reconnect"
+    events = [event["kind"] for event in agent.events(0).to_dict()["events"]]
+    assert AgentEventKind.CASE_NOT_SPOKEN.value in events
+    # The still-ringing call is ANSWERED and becomes the new case.
+    assert ("answer", "ringing-9") in ua.commands
+    assert agent.session is not None and agent.session.driver_call == "ringing-9"
+    # The orphan is RELEASED. A leg left live is a leg conferenced into the
+    # next case, which is blocker 1's harm arriving by another road.
+    assert ("hangup", "orphan-9") in ua.commands

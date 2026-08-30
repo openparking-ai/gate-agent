@@ -37,10 +37,15 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .camera import DEFAULT_MAX_SNAPSHOT_BYTES, DEFAULT_SNAPSHOT_TIMEOUT
+from .cases import DEFAULT_DECISION_MAX_AGE_SECONDS
 from .client import DEFAULT_TIMEOUT
 from .contract import Authorisation, SinkKind, TargetKind
 from .lines import DRIVER_LINES, OPERATOR_LINES, SHIPPED_LANGUAGES, audio_name, missing_text
-from .ua_baresip import DEFAULT_UA_TIMEOUT, TESTED_VERSIONS
+from .ua_baresip import (
+    DEFAULT_RECONNECT_SECONDS,
+    DEFAULT_UA_TIMEOUT,
+    TESTED_VERSIONS,
+)
 
 #: The published default for how often a target is polled.
 #:
@@ -824,7 +829,11 @@ def _renotify(raw: dict) -> float | None:
 
 __all__ = [
     "AgentConfig",
+    "DEFAULT_DECISION_MAX_AGE_SECONDS",
     "DEFAULT_HOLD_REPROMPT_SECONDS",
+    "DEFAULT_LINE_TIMEOUT_SECONDS",
+    "DEFAULT_NAME_AUDIO_MAX_SECONDS",
+    "DEFAULT_RECONNECT_SECONDS",
     "DEFAULT_NO_ANSWER_SECONDS",
     "DEFAULT_NOTHING_USABLE_SECONDS",
     "DEFAULT_UA_HOST",
@@ -894,6 +903,26 @@ DEFAULT_NOTHING_USABLE_SECONDS = 20.0
 #: on hold. Silence on a door station is indistinguishable from a dead intercom.
 DEFAULT_HOLD_REPROMPT_SECONDS = 45.0
 
+#: The published default for `[speech] line_timeout_seconds`: how long ONE line
+#: may go on being refused by the user agent before the agent stops waiting for
+#: it. A refusal is usually a call whose audio stream is a fifth of a second
+#: away, so this is drawn far longer than that; what it bounds is the OTHER
+#: cause -- a file the UA will not decode, an audio mode it will not play into,
+#: a mixer stuck in a mode it cannot leave -- where the retry never succeeds and
+#: nothing else in the dialogue is timing.
+#:
+#: A SETTING AND AN ASSUMPTION. Nothing here measures how long a loaded gate
+#: controller takes to bring a stream up.
+DEFAULT_LINE_TIMEOUT_SECONDS = 10.0
+
+#: The published default for `[speech] name_audio_max_seconds`: the longest the
+#: site's own recording of a door's name may be. It is the one audio file this
+#: package does not produce, so it is the one whose duration nothing here
+#: bounds -- and the operator's briefing waits for it, so a long one holds a
+#: driver in a call nobody is coming to.
+DEFAULT_NAME_AUDIO_MAX_SECONDS = 10.0
+
+
 
 @dataclass(frozen=True, slots=True)
 class Intercom:
@@ -920,6 +949,7 @@ class UserAgentSettings:
     driver_aor: str
     operator_aor: str
     timeout_seconds: float = DEFAULT_UA_TIMEOUT
+    reconnect_seconds: float = DEFAULT_RECONNECT_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -949,6 +979,9 @@ class AgentConfig:
     nothing_usable_seconds: float = DEFAULT_NOTHING_USABLE_SECONDS
     hold_reprompt_seconds: float = DEFAULT_HOLD_REPROMPT_SECONDS
     event_window_depth: int = DEFAULT_EVENT_WINDOW_DEPTH
+    decision_max_age_seconds: float = DEFAULT_DECISION_MAX_AGE_SECONDS
+    line_timeout_seconds: float = DEFAULT_LINE_TIMEOUT_SECONDS
+    name_audio_max_seconds: float = DEFAULT_NAME_AUDIO_MAX_SECONDS
 
     @classmethod
     def from_file(cls, path: str | Path) -> AgentConfig:
@@ -972,6 +1005,12 @@ class AgentConfig:
                     "told apart from another site's on its own surface or in a message."
                 )
         audio_directory = _audio_directory(agent.get("audio_directory"), relative_to)
+        speech = _table(raw, "speech", required=False)
+        name_audio_max = _positive(
+            speech.get("name_audio_max_seconds"),
+            "[speech].name_audio_max_seconds",
+            DEFAULT_NAME_AUDIO_MAX_SECONDS,
+        )
         lanes = _agent_lanes(_table(raw, "lanes", required=False), relative_to)
         intercoms = _intercoms(_table(raw, "intercoms", required=False), lanes, relative_to)
         driver_languages, operator_language = _languages(_table(raw, "languages"))
@@ -1023,6 +1062,17 @@ class AgentConfig:
                 "[agent].event_window_depth",
                 DEFAULT_EVENT_WINDOW_DEPTH,
             ),
+            decision_max_age_seconds=_positive(
+                _table(raw, "cases", required=False).get("decision_max_age_seconds"),
+                "[cases].decision_max_age_seconds",
+                DEFAULT_DECISION_MAX_AGE_SECONDS,
+            ),
+            line_timeout_seconds=_positive(
+                speech.get("line_timeout_seconds"),
+                "[speech].line_timeout_seconds",
+                DEFAULT_LINE_TIMEOUT_SECONDS,
+            ),
+            name_audio_max_seconds=name_audio_max,
         )
 
     def lane(self, name: str) -> Target | None:
@@ -1313,5 +1363,10 @@ def _user_agent(raw: dict) -> UserAgentSettings:
         operator_aor=aors["operator_aor"],
         timeout_seconds=_positive(
             raw.get("timeout_seconds"), "[user_agent].timeout_seconds", DEFAULT_UA_TIMEOUT
+        ),
+        reconnect_seconds=_positive(
+            raw.get("reconnect_seconds"),
+            "[user_agent].reconnect_seconds",
+            DEFAULT_RECONNECT_SECONDS,
         ),
     )

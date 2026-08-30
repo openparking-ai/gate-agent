@@ -27,8 +27,20 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+
+def decided_at(age_seconds: float = 0.0) -> str:
+    """A `decision.at` this many seconds OLD, as a lane publishes it.
+
+    The agent's `[cases] decision_max_age_seconds` has a fixture input on both
+    sides of it because of this: `decided_at()` is fresh and
+    `decided_at(3600)` is an hour ago, and neither is a string anybody typed.
+    """
+    return (datetime.now(UTC) - timedelta(seconds=age_seconds)).isoformat()
+
 
 #: Every malfunction code, COPIED FROM `lane-controller/docs/CONTRACT.md`, from
 #: the `<!--payload:sets-->` block under "The closed sets". Not imported: an
@@ -112,7 +124,12 @@ class ForeignLane:
             "fallback": None,
             "cause": None,
             "presence": None,
-            "at": "2026-08-30T14:03:11.482913+00:00",
+            # PRODUCED, not typed. The agent now branches on the AGE of this
+            # moment, so a fixed string is a fixture that drifts to the stale
+            # side of the threshold as the wall clock moves and can never land
+            # on the fresh side again. `decided_at()` is how a test asks for
+            # either.
+            "at": decided_at(),
             "read_ref": None,
         }
         self.transit: dict = {"state": "none", "since": None}

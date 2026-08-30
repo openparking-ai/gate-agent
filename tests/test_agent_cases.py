@@ -20,13 +20,16 @@ Three separate questions, and they are different:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from conftest import agent_config_for, agent_for
 from fake_ua import FakeUa
-from foreign_lane import ForeignLane
+from foreign_lane import ForeignLane, decided_at
 from foreign_lane import make_server as foreign_server
 from gate_agent.cases import (
+    DEFAULT_DECISION_MAX_AGE_SECONDS,
     FALLBACK_CASES,
     OUTCOMES,
     REQUIRED_FALLBACK_REASONS,
@@ -39,8 +42,23 @@ from serving import serving
 
 INTERCOM = "sip:door1@10.0.0.9"
 
+#: The clock the direct `derive()` calls below are given, and the stamp that is
+#: FRESH against it. Both produced from one moment, so "fresh" here is a
+#: property of the pair rather than of when the suite happened to run.
+NOW = datetime(2026, 8, 30, 14, 3, 11, tzinfo=UTC)
+FRESH = NOW.isoformat()
+STALE = (NOW - timedelta(seconds=DEFAULT_DECISION_MAX_AGE_SECONDS + 1)).isoformat()
 
-def decision(outcome: str, reason: str, transit: str = "none") -> tuple[dict, dict]:
+
+def decision(
+    outcome: str, reason: str, transit: str = "none", age_seconds: float = 0.0, at=...
+) -> tuple[dict, dict]:
+    """One served decision. `age_seconds` is how OLD the lane says it is.
+
+    Zero by default, which is the fresh side of `[cases]
+    decision_max_age_seconds`; `at=` replaces the moment outright, which is how
+    an unreadable one is asked for.
+    """
     return (
         {
             "outcome": outcome,
@@ -48,7 +66,7 @@ def decision(outcome: str, reason: str, transit: str = "none") -> tuple[dict, di
             "fallback": reason if reason in REQUIRED_FALLBACK_REASONS else None,
             "cause": None,
             "presence": None,
-            "at": "2026-08-30T14:03:11.482913+00:00",
+            "at": decided_at(age_seconds) if at is ... else at,
             "read_ref": None,
         },
         {"state": transit, "since": None},
@@ -74,6 +92,25 @@ ROWS = [
     # says: a broken lane's last decision is not a fact about the vehicle
     # standing at it.
     ("allow", "allow", "confirmed", ("boom_did_not_rise",), AgentCase.MALFUNCTION_ACTIVE),
+]
+
+#: The rows the decision's AGE decides. Separate from `ROWS` because they need a
+#: fixture input on the OTHER side of `[cases] decision_max_age_seconds`, and
+#: every row above is on the fresh side by construction.
+AGE_ROWS = [
+    # The one that costs the customer everything: `nothing_to_do` is the only
+    # case that reaches nobody, and this is the reading that used to produce it.
+    (3600.0, "allow", "allow", "confirmed", AgentCase.STALE_DECISION),
+    (3600.0, "allow", "allow", "pending", AgentCase.STALE_DECISION),
+    # A stale decision is stale whatever it said. The lane is not describing the
+    # person standing at the barrier in any of them.
+    (3600.0, "deny", "deny", "none", AgentCase.STALE_DECISION),
+    (3600.0, "fallback", "low_confidence", "none", AgentCase.STALE_DECISION),
+    (3600.0, "no_vehicle", "no_vehicle", "none", AgentCase.STALE_DECISION),
+    # And the other side of the same threshold, from the same fixture.
+    (0.0, "allow", "allow", "confirmed", AgentCase.NOTHING_TO_DO),
+    (DEFAULT_DECISION_MAX_AGE_SECONDS - 5, "allow", "allow", "confirmed",
+     AgentCase.NOTHING_TO_DO),
 ]
 
 
@@ -107,6 +144,90 @@ def test_every_row_of_the_case_table(tmp_path, lane, outcome, reason, transit, a
         served.sources[code] = "measured"
     case, _agent, _ua = case_of(tmp_path, served, url)
     assert case is expected
+
+
+@pytest.mark.parametrize(
+    "age,outcome,reason,transit,expected",
+    AGE_ROWS,
+    ids=[f"{row[0]:.0f}s-{row[1]}-{row[3]}" for row in AGE_ROWS],
+)
+def test_the_age_of_the_decision_decides_the_case(
+    tmp_path, lane, age, outcome, reason, transit, expected
+):
+    """A decision older than the site's bound is a person, whatever it said.
+
+    Both sides of `[cases] decision_max_age_seconds` come out of the SAME
+    fixture, which is the only way this threshold is exercised rather than
+    described: the rows above are all on the fresh side by construction.
+    """
+    served, url = lane
+    served.decision, served.transit = decision(outcome, reason, transit, age_seconds=age)
+    case, _agent, _ua = case_of(tmp_path, served, url)
+    assert case is expected
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [None, "", "not a moment", "2026-08-30T14:03:11.482913", 17],
+    ids=["missing", "empty", "unparseable", "naive", "not-a-string"],
+)
+def test_a_decision_whose_moment_cannot_be_read_escalates(tmp_path, lane, stamp):
+    """Unreadable is NOT fresh. It is the catch-all, which is a person.
+
+    The naive case is the round-4 rule again: a moment with no timezone compared
+    against an aware one is a guess about which machine it came from.
+    """
+    served, url = lane
+    served.decision, served.transit = decision("allow", "allow", "confirmed", at=stamp)
+    case, _agent, _ua = case_of(tmp_path, served, url)
+    assert case is AgentCase.UNRECOGNISED_REASON
+    # The control: the SAME reading with a readable moment is not the catch-all,
+    # so the assertion is about the stamp and not about the rest of the payload.
+    served.decision, served.transit = decision("allow", "allow", "confirmed")
+    case, _agent, _ua = case_of(tmp_path, served, url)
+    assert case is AgentCase.NOTHING_TO_DO
+
+
+def test_a_decision_stamped_in_the_future_is_fresh_and_not_stale(tmp_path, lane):
+    """The two clocks. A NEGATIVE age is reachable, and it is not staleness.
+
+    Sending a driver to a person because the lane's clock is ahead of this
+    process's would be acting on an offset nobody has measured. The contract
+    says so in one copy and this is that copy exercised.
+    """
+    served, url = lane
+    served.decision, served.transit = decision(
+        "allow", "allow", "confirmed", age_seconds=-3600.0
+    )
+    case, _agent, _ua = case_of(tmp_path, served, url)
+    assert case is AgentCase.NOTHING_TO_DO
+
+
+def test_the_two_clocks_note_has_one_copy(tmp_path):
+    """The sentence in `docs/CONTRACT.md` IS `cases.DECISION_AGE_NOTE`.
+
+    Two copies drift, and the hand-written one is always the one that lies. The
+    document quotes it as a block quote and renders `--` as an em dash, so both
+    are normalised away before the comparison and nothing else is.
+    """
+    from pathlib import Path as _Path
+
+    from gate_agent.cases import DECISION_AGE_NOTE
+
+    document = _Path(__file__).resolve().parent.parent / "docs" / "CONTRACT.md"
+    quoted = " ".join(
+        line.lstrip(">").strip()
+        for line in document.read_text(encoding="utf-8").splitlines()
+        if line.startswith(">")
+    )
+
+    def flat(text: str) -> str:
+        return " ".join(text.replace("`", "").replace("\u2014", "--").split())
+
+    assert flat(DECISION_AGE_NOTE) in flat(quoted), (
+        "the contract's two-clocks note is not `cases.DECISION_AGE_NOTE`. One copy, or the "
+        "hand-written one starts lying."
+    )
 
 
 def test_a_never_alarm_code_is_not_a_malfunction_case(tmp_path, lane):
@@ -207,29 +328,40 @@ def test_every_case_is_reachable_from_some_reading():
     A case nobody can produce is a sentence in ninety files that no driver will
     ever hear, and it would sit there reading like coverage.
     """
+    def case(**fields) -> AgentCase:
+        fields.setdefault("decision_at", FRESH)
+        return derive(LaneReading(**fields), now=NOW)
+
     reached = {
-        derive(LaneReading(lane=None)),
-        derive(LaneReading(lane="entry", readable=False)),
-        derive(LaneReading(lane="entry", readable=True, malfunctions=("x",))),
+        derive(LaneReading(lane=None), now=NOW),
+        derive(LaneReading(lane="entry", readable=False), now=NOW),
+        derive(LaneReading(lane="entry", readable=True, malfunctions=("x",)), now=NOW),
         *(
-            derive(LaneReading(lane="entry", readable=True, outcome="fallback", reason=reason))
+            case(lane="entry", readable=True, outcome="fallback", reason=reason)
             for reason in REQUIRED_FALLBACK_REASONS
         ),
-        derive(LaneReading(lane="entry", readable=True, outcome="deny", reason="deny")),
+        case(lane="entry", readable=True, outcome="deny", reason="deny"),
+        case(lane="entry", readable=True, outcome="no_vehicle", reason="no_vehicle"),
+        case(lane="entry", readable=True, outcome="allow", reason="allow", transit="held"),
+        case(lane="entry", readable=True, outcome="allow", reason="allow", transit="confirmed"),
+        case(lane="entry", readable=True, outcome="fallback", reason="theirs"),
+        # The two the decision's AGE decides, and they are the whole of X3: a
+        # stale decision is a person, and one whose moment cannot be read is the
+        # catch-all rather than being treated as fresh.
         derive(
-            LaneReading(lane="entry", readable=True, outcome="no_vehicle", reason="no_vehicle")
+            LaneReading(
+                lane="entry", readable=True, outcome="allow", reason="allow",
+                transit="confirmed", decision_at=STALE,
+            ),
+            now=NOW,
         ),
         derive(
             LaneReading(
-                lane="entry", readable=True, outcome="allow", reason="allow", transit="held"
-            )
+                lane="entry", readable=True, outcome="allow", reason="allow",
+                transit="confirmed", decision_at=None,
+            ),
+            now=NOW,
         ),
-        derive(
-            LaneReading(
-                lane="entry", readable=True, outcome="allow", reason="allow", transit="confirmed"
-            )
-        ),
-        derive(LaneReading(lane="entry", readable=True, outcome="fallback", reason="theirs")),
     }
     assert reached == set(AgentCase), sorted(
         one.value for one in set(AgentCase) - reached

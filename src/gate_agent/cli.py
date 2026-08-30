@@ -144,6 +144,7 @@ def cmd_agent(args) -> int:
         driver_aor=config.user_agent.driver_aor,
         operator_aor=config.user_agent.operator_aor,
         timeout=config.user_agent.timeout_seconds,
+        reconnect_seconds=config.user_agent.reconnect_seconds,
     )
     agent = Agent(config, ua)
 
@@ -162,8 +163,8 @@ def cmd_agent(args) -> int:
         # intercom" and "it reads a lane" are different facts and this is the
         # configuration where they come apart. NOT a degraded mode.
         print("  STANDALONE: no intercom has a lane, so every call is a human case")
-    print("  ONE CASE AT A TIME: a call arriving during a case is not answered, so the "
-          "intercom's own call list moves on to the human's number")
+    print("  ONE CASE AT A TIME: a call arriving during a case is refused unanswered, "
+          "whoever it is from (486 Busy Here)")
     print("  OPENS NOTHING: no vend route here, none at any lane on this contract version")
 
     try:

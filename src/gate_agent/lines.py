@@ -43,6 +43,10 @@ DRIVER_LINES: tuple[str, ...] = (
     *(f"authorisation.{value.value}" for value in Authorisation),
     "driver.human_unreachable",
     "driver.nothing_usable",
+    #: The person ANSWERED and then put the phone down before keying anything.
+    #: A separate line from `nothing_usable`, because "I could not take an
+    #: instruction" is not what happened and a driver told it goes on holding.
+    "driver.operator_hung_up",
     "driver.hold_reprompt",
     "driver.undeclared_intercom",
 )
@@ -62,7 +66,14 @@ LINES: tuple[str, ...] = DRIVER_LINES + OPERATOR_LINES
 #: only these; anything else is refused at startup with this list in the message,
 #: because a language declared with no lines behind it is a silence with a
 #: configuration key in front of it.
-SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es")
+#:
+#: **`es-ES`, not `es-ES`.** The Spanish here is Castilian and says so in the key:
+#: `matrícula`, `aparcamiento`, `almohadilla`, `Pulse`. Shipped under a generic
+#: `es-ES`, a garage in Texas or Bogotá would declare "Spanish", get this, and hear
+#: several words that are wrong for its drivers -- a register chosen for them by
+#: a package that never asked. A regional tag is the one thing that makes the
+#: difference visible in the site's own configuration file.
+SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es-ES")
 
 
 #: Every line, in every shipped language. **The English is the source and the
@@ -75,7 +86,7 @@ TEXT: dict[str, dict[str, str]] = {
     # --- what the driver is told the case is ------------------------------
     "case.malfunction_active": {
         "en": "There is a fault at this entrance. I am connecting you to a person.",
-        "es": "Hay una avería en esta entrada. Le paso con una persona.",
+        "es-ES": "Hay una avería en esta entrada. Le paso con una persona.",
     },
     # NEVER an instruction about the plate. The identification service is off,
     # and telling somebody to clean a plate nothing looked at is the failure
@@ -83,59 +94,65 @@ TEXT: dict[str, dict[str, str]] = {
     "case.identification_unavailable": {
         "en": "Our vehicle identification is not working right now. "
               "I am connecting you to a person.",
-        "es": "Nuestra identificación de vehículos no funciona ahora mismo. "
+        "es-ES": "Nuestra identificación de vehículos no funciona ahora mismo. "
               "Le paso con una persona.",
     },
     "case.plate_not_read": {
         "en": "We could not read your number plate. If something is covering it, please "
               "clear it. I am connecting you to a person.",
-        "es": "No hemos podido leer su matrícula. Si algo la tapa, despéjela por favor. "
+        "es-ES": "No hemos podido leer su matrícula. Si algo la tapa, despéjela por favor. "
               "Le paso con una persona.",
     },
     "case.plate_unclear": {
         "en": "We could not read your number plate clearly. If something is covering it, "
               "please clear it. I am connecting you to a person.",
-        "es": "No hemos podido leer su matrícula con claridad. Si algo la tapa, despéjela "
+        "es-ES": "No hemos podido leer su matrícula con claridad. Si algo la tapa, despéjela "
               "por favor. Le paso con una persona.",
     },
     "case.vehicle_not_recognised": {
         "en": "We do not recognise this vehicle. I am connecting you to a person.",
-        "es": "No reconocemos este vehículo. Le paso con una persona.",
+        "es-ES": "No reconocemos este vehículo. Le paso con una persona.",
     },
     "case.rules_unavailable": {
         "en": "We cannot check this entrance's rules right now. "
               "I am connecting you to a person.",
-        "es": "No podemos comprobar las normas de esta entrada ahora mismo. "
+        "es-ES": "No podemos comprobar las normas de esta entrada ahora mismo. "
               "Le paso con una persona.",
     },
     "case.entry_refused": {
         "en": "This vehicle was not admitted. I am connecting you to a person.",
-        "es": "Este vehículo no ha sido admitido. Le paso con una persona.",
+        "es-ES": "Este vehículo no ha sido admitido. Le paso con una persona.",
     },
     "case.vehicle_not_detected": {
         "en": "The entrance did not detect a vehicle. I am connecting you to a person.",
-        "es": "La entrada no ha detectado ningún vehículo. Le paso con una persona.",
+        "es-ES": "La entrada no ha detectado ningún vehículo. Le paso con una persona.",
     },
     "case.entry_not_confirmed": {
         "en": "We could not confirm that you drove through. "
               "I am connecting you to a person.",
-        "es": "No hemos podido confirmar que haya pasado. Le paso con una persona.",
+        "es-ES": "No hemos podido confirmar que haya pasado. Le paso con una persona.",
+    },
+    "case.stale_decision": {
+        "en": "The last thing this entrance recorded is too old to be about you. "
+              "I am connecting you to a person.",
+        "es-ES": "Lo último que registró esta entrada es demasiado antiguo para referirse a "
+              "usted. Le paso con una persona.",
     },
     "case.unrecognised_reason": {
         "en": "We cannot tell what happened here. I am connecting you to a person.",
-        "es": "No sabemos qué ha ocurrido aquí. Le paso con una persona.",
+        "es-ES": "No sabemos qué ha ocurrido aquí. Le paso con una persona.",
     },
     "case.lane_unavailable": {
         "en": "We cannot reach this entrance right now. I am connecting you to a person.",
-        "es": "No podemos comunicar con esta entrada ahora mismo. Le paso con una persona.",
+        "es-ES": "No podemos comunicar con esta entrada ahora mismo. Le paso con una persona.",
     },
     "case.standalone": {
         "en": "You are through to the parking intercom. I am connecting you to a person.",
-        "es": "Ha llamado al interfono del aparcamiento. Le paso con una persona.",
+        "es-ES": "Ha llamado al interfono del aparcamiento. Le paso con una persona.",
     },
     "case.nothing_to_do": {
         "en": "This entrance has nothing outstanding for you. Goodbye.",
-        "es": "Esta entrada no tiene nada pendiente para usted. Adiós.",
+        "es-ES": "Esta entrada no tiene nada pendiente para usted. Adiós.",
     },
     # --- what the driver is told the human decided ------------------------
     # `open_now` and `open_and_flag` do NOT say the barrier is opening. It is
@@ -144,49 +161,55 @@ TEXT: dict[str, dict[str, str]] = {
     "authorisation.open_now": {
         "en": "A person has authorised your entry. This system cannot open the barrier "
               "itself, so please wait for them.",
-        "es": "Una persona ha autorizado su entrada. Este sistema no puede abrir la barrera "
+        "es-ES": "Una persona ha autorizado su entrada. Este sistema no puede abrir la barrera "
               "por sí mismo; espere a que lo hagan.",
     },
     "authorisation.open_and_flag": {
         "en": "A person has authorised your entry and made a note of it. This system cannot "
               "open the barrier itself, so please wait for them.",
-        "es": "Una persona ha autorizado su entrada y lo ha anotado. Este sistema no puede "
+        "es-ES": "Una persona ha autorizado su entrada y lo ha anotado. Este sistema no puede "
               "abrir la barrera por sí mismo; espere a que lo hagan.",
     },
     "authorisation.do_not_open": {
         "en": "A person has decided not to open the barrier.",
-        "es": "Una persona ha decidido no abrir la barrera.",
+        "es-ES": "Una persona ha decidido no abrir la barrera.",
     },
     "authorisation.hold": {
         "en": "Please hold. Somebody is dealing with this.",
-        "es": "Espere, por favor. Alguien se está ocupando de esto.",
+        "es-ES": "Espere, por favor. Alguien se está ocupando de esto.",
     },
     "authorisation.transfer": {
         "en": "I am putting you through to somebody else.",
-        "es": "Le paso con otra persona.",
+        "es-ES": "Le paso con otra persona.",
     },
     "authorisation.call_back": {
         "en": "A person will call you back.",
-        "es": "Una persona le devolverá la llamada.",
+        "es-ES": "Una persona le devolverá la llamada.",
     },
     # --- what the driver is told when nothing worked ----------------------
     "driver.human_unreachable": {
         "en": "Nobody answered. Please try this intercom again, or use the help number at "
               "this entrance.",
-        "es": "No ha contestado nadie. Vuelva a llamar por este interfono o use el número de "
+        "es-ES": "No ha contestado nadie. Vuelva a llamar por este interfono o use el número de "
               "ayuda de esta entrada.",
     },
     "driver.nothing_usable": {
         "en": "I could not take an instruction. Please try this intercom again.",
-        "es": "No he podido recoger una instrucción. Vuelva a llamar por este interfono.",
+        "es-ES": "No he podido recoger una instrucción. Vuelva a llamar por este interfono.",
+    },
+    "driver.operator_hung_up": {
+        "en": "The call to the person ended before they gave an instruction. "
+              "Please try this intercom again.",
+        "es-ES": "La llamada con la persona ha terminado antes de que diera una instrucción. "
+              "Vuelva a llamar por este interfono.",
     },
     "driver.hold_reprompt": {
         "en": "Please keep holding. Somebody is dealing with this.",
-        "es": "Siga esperando, por favor. Alguien se está ocupando de esto.",
+        "es-ES": "Siga esperando, por favor. Alguien se está ocupando de esto.",
     },
     "driver.undeclared_intercom": {
         "en": "This intercom is not configured. Goodbye.",
-        "es": "Este interfono no está configurado. Adiós.",
+        "es-ES": "Este interfono no está configurado. Adiós.",
     },
     # --- what the operator is told the case is ----------------------------
     # The LANE NAME is not here. It cannot be: a name is a site's value and no
@@ -194,83 +217,88 @@ TEXT: dict[str, dict[str, str]] = {
     # per intercom saying where the call is from, and the agent plays that
     # first -- see `[intercoms.<uri>] name_audio`.
     "operator_case.malfunction_active": {
-        "en": "A fault is active at this lane.", "es": "Hay una avería activa en este carril.",
+        "en": "A fault is active at this lane.", "es-ES": "Hay una avería activa en este carril.",
     },
     "operator_case.identification_unavailable": {
         "en": "Vehicle identification is unavailable.",
-        "es": "La identificación de vehículos no está disponible.",
+        "es-ES": "La identificación de vehículos no está disponible.",
     },
     "operator_case.plate_not_read": {
-        "en": "The number plate was not read.", "es": "No se ha leído la matrícula.",
+        "en": "The number plate was not read.", "es-ES": "No se ha leído la matrícula.",
     },
     "operator_case.plate_unclear": {
-        "en": "The number plate was unclear.", "es": "La matrícula no estaba clara.",
+        "en": "The number plate was unclear.", "es-ES": "La matrícula no estaba clara.",
     },
     "operator_case.vehicle_not_recognised": {
-        "en": "The vehicle was not recognised.", "es": "El vehículo no ha sido reconocido.",
+        "en": "The vehicle was not recognised.", "es-ES": "El vehículo no ha sido reconocido.",
     },
     "operator_case.rules_unavailable": {
         "en": "The entrance rules could not be checked.",
-        "es": "No se han podido comprobar las normas de la entrada.",
+        "es-ES": "No se han podido comprobar las normas de la entrada.",
     },
     "operator_case.entry_refused": {
-        "en": "Entry was refused.", "es": "Se ha denegado la entrada.",
+        "en": "Entry was refused.", "es-ES": "Se ha denegado la entrada.",
     },
     "operator_case.vehicle_not_detected": {
         "en": "The lane detected no vehicle.",
-        "es": "El carril no ha detectado ningún vehículo.",
+        "es-ES": "El carril no ha detectado ningún vehículo.",
     },
     "operator_case.entry_not_confirmed": {
-        "en": "The entry was not confirmed.", "es": "No se ha confirmado la entrada.",
+        "en": "The entry was not confirmed.", "es-ES": "No se ha confirmado la entrada.",
+    },
+    "operator_case.stale_decision": {
+        "en": "The lane's last decision is older than this site allows.",
+        "es-ES": "La última decisión del carril es más antigua de lo que permite esta "
+              "instalación.",
     },
     "operator_case.unrecognised_reason": {
         "en": "The lane gave a reason this system does not recognise.",
-        "es": "El carril ha dado un motivo que este sistema no reconoce.",
+        "es-ES": "El carril ha dado un motivo que este sistema no reconoce.",
     },
     "operator_case.lane_unavailable": {
-        "en": "The lane could not be reached.", "es": "No se ha podido contactar con el carril.",
+        "en": "The lane could not be reached.", "es-ES": "No se ha podido contactar con el carril.",
     },
     "operator_case.standalone": {
-        "en": "This intercom has no lane.", "es": "Este interfono no tiene carril.",
+        "en": "This intercom has no lane.", "es-ES": "Este interfono no tiene carril.",
     },
     "operator_case.nothing_to_do": {
         "en": "Nothing was outstanding at this lane.",
-        "es": "No había nada pendiente en este carril.",
+        "es-ES": "No había nada pendiente en este carril.",
     },
     # --- the operator's menu ----------------------------------------------
     "menu.open_now": {
-        "en": "Press 1 to authorise opening.", "es": "Pulse 1 para autorizar la apertura.",
+        "en": "Press 1 to authorise opening.", "es-ES": "Pulse 1 para autorizar la apertura.",
     },
     "menu.open_and_flag": {
         "en": "Press 2 to authorise opening and flag it.",
-        "es": "Pulse 2 para autorizar la apertura y marcarla.",
+        "es-ES": "Pulse 2 para autorizar la apertura y marcarla.",
     },
     "menu.do_not_open": {
-        "en": "Press 3 to refuse.", "es": "Pulse 3 para denegar.",
+        "en": "Press 3 to refuse.", "es-ES": "Pulse 3 para denegar.",
     },
     "menu.hold": {
-        "en": "Press 4 to hold.", "es": "Pulse 4 para esperar.",
+        "en": "Press 4 to hold.", "es-ES": "Pulse 4 para esperar.",
     },
     "menu.transfer": {
-        "en": "Press 5 to transfer.", "es": "Pulse 5 para transferir.",
+        "en": "Press 5 to transfer.", "es-ES": "Pulse 5 para transferir.",
     },
     "menu.call_back": {
         "en": "Press 6 to record a call-back number.",
-        "es": "Pulse 6 para registrar un número de devolución de llamada.",
+        "es-ES": "Pulse 6 para registrar un número de devolución de llamada.",
     },
     "operator.menu_repeat": {
         "en": "I did not get that. Please try again.",
-        "es": "No lo he recogido. Inténtelo de nuevo.",
+        "es-ES": "No lo he recogido. Inténtelo de nuevo.",
     },
     "operator.menu_callback_number": {
         "en": "Key the call-back number, then hash.",
-        "es": "Marque el número de devolución de llamada y luego almohadilla.",
+        "es-ES": "Marque el número de devolución de llamada y luego almohadilla.",
     },
     # Played to the HUMAN, at the moment they key an authorisation this version
     # can only record. It is one fixed sentence and it is not optional.
     "operator.cannot_open": {
         "en": "Recorded. This version cannot operate the barrier.",
-        "es": "Registrado. Esta versión no puede accionar la barrera.",
+        "es-ES": "Registrado. Esta versión no puede accionar la barrera.",
     },
 }
 
@@ -296,7 +324,7 @@ def missing_text(driver_languages, operator_language) -> tuple[str, ...]:
 def audio_name(line: str, language: str) -> str:
     """The file a line's audio lives in, DERIVED from the key and the language.
 
-    `case.plate_unclear` in `es` is `es/case.plate_unclear.wav`, and there is no
+    `case.plate_unclear` in `es-ES` is `es-ES/case.plate_unclear.wav`, and there is no
     table mapping lines to filenames -- a table would be a second copy of the
     line set, and the copy is the one that goes stale.
     """

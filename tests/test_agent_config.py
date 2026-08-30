@@ -242,3 +242,107 @@ def test_a_credential_in_a_sip_uri_is_refused(tmp_path):
         BASE.replace("sip:duty@10.0.0.5", "sip:duty:S3CRET@10.0.0.5"),
         "userinfo in URL",
     )
+
+
+# ---------------------------------------------------------------------------
+# The round-5 cut: what the SITE's own audio file has to be
+# ---------------------------------------------------------------------------
+
+
+def test_a_name_audio_at_the_wrong_sample_rate_is_refused(tmp_path):
+    """`_measure_audio` checks the rate it SAYS it checks.
+
+    It named "8 kHz, mono, 16-bit" and compared channels and width only, so a
+    44.1 kHz `name_audio` started -- and `name_audio` is the ONE file in this
+    configuration that this package does not produce, which makes it exactly
+    the one that would be at the wrong rate.
+    """
+    import pytest
+
+    from conftest import agent_config_for, agent_for
+    from gate_agent.agent import AudioMissing
+
+    # THE CONTROL, first: at the rate a narrowband call carries, it starts.
+    agent_for(agent_config_for(tmp_path, standalone=True, name_audio_rate=8000))
+
+    with pytest.raises(AudioMissing) as raised:
+        agent_for(agent_config_for(tmp_path, standalone=True, name_audio_rate=44100))
+    assert "44100" in str(raised.value) and "8000" in str(raised.value)
+
+
+def test_a_name_audio_longer_than_the_site_allows_is_refused(tmp_path):
+    """`[speech] name_audio_max_seconds`, and an unbounded one used to start.
+
+    The person's briefing waits for the whole of it and the driver at the
+    barrier waits for the briefing, so an unbounded one holds somebody in a
+    never-bridged call for as long as the file lasts. Measured on the build this
+    replaces: a 200 MB WAV started, and its duration read as 12500 seconds.
+    """
+    import pytest
+
+    from conftest import agent_config_for, agent_for
+    from gate_agent.agent import AudioMissing
+
+    # THE CONTROL: inside the bound, it starts.
+    agent_for(
+        agent_config_for(
+            tmp_path, standalone=True, name_audio_seconds=4.0, name_audio_max_seconds=5.0
+        )
+    )
+
+    with pytest.raises(AudioMissing) as raised:
+        agent_for(
+            agent_config_for(
+                tmp_path, standalone=True, name_audio_seconds=9.0, name_audio_max_seconds=5.0
+            )
+        )
+    assert "name_audio_max_seconds" in str(raised.value)
+
+
+def test_the_three_new_settings_are_read_and_published(tmp_path):
+    """`[cases]`, `[speech]` and `[user_agent] reconnect_seconds`, per site.
+
+    Each with a published default, and each on `GET /v1/agent` -- a consumer
+    cannot read the case table without knowing the age bound, and one reading
+    `ua_unreachable` is entitled to know whether the agent is trying to come
+    back. Read through a TOML file on disk, the way a site's is.
+    """
+    from gate_agent.cases import DEFAULT_DECISION_MAX_AGE_SECONDS
+    from gate_agent.config import (
+        DEFAULT_LINE_TIMEOUT_SECONDS,
+        DEFAULT_NAME_AUDIO_MAX_SECONDS,
+        DEFAULT_RECONNECT_SECONDS,
+    )
+
+    config = AgentConfig.from_file(written(tmp_path))
+    assert config.decision_max_age_seconds == DEFAULT_DECISION_MAX_AGE_SECONDS
+    assert config.line_timeout_seconds == DEFAULT_LINE_TIMEOUT_SECONDS
+    assert config.name_audio_max_seconds == DEFAULT_NAME_AUDIO_MAX_SECONDS
+    assert config.user_agent.reconnect_seconds == DEFAULT_RECONNECT_SECONDS
+
+    declared = BASE + """
+[cases]
+decision_max_age_seconds = 45.0
+
+[speech]
+line_timeout_seconds = 3.0
+name_audio_max_seconds = 2.0
+"""
+    declared = declared.replace(
+        'operator_aor = "sip:agent-operator@10.0.0.20"',
+        'operator_aor = "sip:agent-operator@10.0.0.20"\nreconnect_seconds = 9.0',
+    )
+    config = AgentConfig.from_file(written(tmp_path, declared))
+    assert config.decision_max_age_seconds == 45.0
+    assert config.line_timeout_seconds == 3.0
+    assert config.name_audio_max_seconds == 2.0
+    assert config.user_agent.reconnect_seconds == 9.0
+
+    # And each one is REFUSED when it is not a positive number, by name -- the
+    # rule every other setting in this file is held to.
+    for table, key in (
+        ("[cases]", "decision_max_age_seconds"),
+        ("[speech]", "line_timeout_seconds"),
+        ("[speech]", "name_audio_max_seconds"),
+    ):
+        refused(tmp_path, BASE + f"\n{table}\n{key} = -1\n", key)

@@ -26,16 +26,28 @@ site_id = "site-1"
 # version is checked at startup and a version this build was not tested against
 # is refused.
 #
-# The baresip side needs three things that are easy to get wrong and are checked
-# nowhere but in baresip's own configuration file:
+# The baresip side needs things that are easy to get wrong, and THREE OF THEM
+# ARE NOW CHECKED: the agent reads baresip's loaded configuration back out of
+# the running process at startup, over the same control socket, and refuses to
+# start naming the setting. That needs baresip's `debug_cmd` module, which
+# answers `config` and `modules` -- so it is an install requirement too, and the
+# agent refuses by name if it is missing.
 #   ctrl_tcp_listen        127.0.0.1:4444    # loopback. That socket can place a
 #                                            # call and bridge two of them.
-#   call_hold_other_calls  no                # or calling the person puts the
-#                                            # driver on hold behind our back
-#   audio_source / audio_player              # NOT `aubridge`: it loops the
-#                                            # player into the source, which
+#                                            # NOT checked: the agent reaches it,
+#                                            # so it is on a socket by definition
+#   call_hold_other_calls  no                # CHECKED. Otherwise calling the
+#                                            # person puts the driver on hold
+#                                            # behind our back
+#   audio_source / audio_player              # CHECKED. NOT `aubridge`: it loops
+#                                            # the player into the source, which
 #                                            # bridges every call to every other
 #                                            # whether this agent asked or not
+#   modules                ctrl_tcp,         # CHECKED, by name. `mixausrc`
+#                          mixausrc,         # plays one file into ONE leg and
+#                          mixminus,         # `mixminus` IS the bridge.
+#                          aufile, account,
+#                          menu, debug_cmd
 [user_agent]
 kind = "baresip"
 host = "127.0.0.1"
@@ -46,6 +58,12 @@ port = 4444
 driver_aor = "sip:agent@10.0.0.20"
 operator_aor = "sip:agent-operator@10.0.0.20"
 # timeout_seconds = 5.0
+# The LONGEST gap between attempts to reopen the control socket after it is
+# lost. `ctrl_tcp` accepts exactly one client, and baresip restarts, so this is
+# not a rare path: without it a lost socket was a permanent outage that only a
+# human restarting the agent could repair. The first retry is a quarter of a
+# second away and the gap doubles up to this.
+# reconnect_seconds = 5.0
 
 # --- which lane a call belongs to ------------------------------------------
 # The SIP identity of the caller is the mapping and there is no default. An
@@ -82,7 +100,7 @@ url = "http://127.0.0.1:8090"
 # here, one after the other. `operator` is the one language the person on the
 # phone hears.
 [languages]
-driver = ["en", "es"]
+driver = ["en", "es-ES"]
 operator = "en"
 
 # --- what the person on the phone may authorise -----------------------------
@@ -100,6 +118,31 @@ do_not_open = true
 hold = true
 transfer = false
 call_back = true
+
+# --- how old a lane decision may be and still be about THIS driver ----------
+# A SETTING AND AN ASSUMPTION, said plainly: nothing has measured how long a
+# lane decision stays the same car's. Two minutes is drawn from somebody walking
+# from a stopped car to a door station and pressing a button, which is a guess
+# about people rather than a measurement of them. Past it the driver gets a
+# person -- which is what every case but one already gets -- and it is the only
+# guard in front of `nothing_to_do`, the one case that reaches nobody.
+# [cases]
+# decision_max_age_seconds = 120.0
+
+# --- speech ------------------------------------------------------------------
+# `line_timeout_seconds`: how long ONE line may go on being undelivered before
+# the agent stops waiting for it. A refusal is usually a call whose audio stream
+# is a fifth of a second away; what this bounds is the other cause -- a file the
+# user agent will not decode, an audio mode it will not play into -- where the
+# retry never succeeds. Past it the leg is `audio_playback_failed` and the case
+# goes to a person, or ends if the person cannot be spoken to either.
+#
+# `name_audio_max_seconds`: the longest the site's own `name_audio` may be. The
+# person's briefing waits for the whole of it and the driver waits for the
+# briefing.
+# [speech]
+# line_timeout_seconds = 10.0
+# name_audio_max_seconds = 10.0
 
 # --- the person -------------------------------------------------------------
 [escalation]

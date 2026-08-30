@@ -26,9 +26,10 @@ ships and can measure.
 **One case at a time, and it is published as a limit.** The user agent's bridge
 is site-wide: a second case bridged while the first is open would put two
 strangers and two operators into one conversation. So a call arriving during a
-case is REFUSED WITHOUT BEING ANSWERED, which is what makes the intercom's own
-call list move on to the human's number -- the degradation the install
-requirement in `docs/CONTRACT.md` exists for.
+case is REFUSED WITHOUT BEING ANSWERED -- **and the live case is checked before
+the caller's identity is**, because being undeclared is the default state of
+every caller on a network, not a rare one. Measured from the caller's side, the
+refusal is `486 Busy Here` after `180 Ringing`.
 """
 
 from __future__ import annotations
@@ -80,6 +81,10 @@ REPROMPTS = 2
 
 #: The digit that ends a keyed number.
 END_OF_NUMBER = "#"
+
+#: The sample rate of every file this agent plays. What a narrowband SIP call
+#: carries, and what `scripts/build_audio.py` writes.
+NARROWBAND_RATE = 8000
 
 
 class State(Enum):
@@ -135,12 +140,24 @@ class Session:
     #: agent, and the driver hears the first sentence of their case not at all.
     #: Answered is not established, and the difference is a whole message.
     live: set = field(default_factory=set)
+    #: Whether `case_spoken` has been written for this case. It is written when
+    #: the last file of the case has FINISHED, so it is written once and there
+    #: has to be somewhere to remember that.
+    spoken: bool = False
     #: What is queued to play on each leg, and when the leg is next free.
     speech: dict[UaLeg, deque] = field(default_factory=lambda: {
         UaLeg.DRIVER: deque(), UaLeg.OPERATOR: deque()
     })
     free_at: dict[UaLeg, float] = field(default_factory=lambda: {
         UaLeg.DRIVER: 0.0, UaLeg.OPERATOR: 0.0
+    })
+    #: WHEN the line at the head of each leg's queue became DUE, or `None` when
+    #: nothing is waiting. `[speech] line_timeout_seconds` is measured from
+    #: here, and it starts when the line is due rather than when it is first
+    #: REFUSED: a leg whose media never comes up is never even attempted, and to
+    #: the driver that is the same silence.
+    line_due: dict[UaLeg, float | None] = field(default_factory=lambda: {
+        UaLeg.DRIVER: None, UaLeg.OPERATOR: None
     })
 
     def call_of(self, leg: UaLeg) -> str | None:
@@ -202,6 +219,8 @@ class Agent:
         """
         self._measure_audio()
         self._code(AgentCode.AUDIO_MISSING, self.config.agent_id, HealthState.OK)
+        for leg in UaLeg:
+            self._code(AgentCode.AUDIO_PLAYBACK_FAILED, leg.value, HealthState.OK)
         self.ua.start()
         self._ua_version = self.ua.version()
         self._code(AgentCode.UA_UNREACHABLE, self.config.agent_id, HealthState.OK)
@@ -212,10 +231,19 @@ class Agent:
 
         A duration is what the dialogue schedules on, so an unreadable file is
         found here rather than as a step that never completes. It doubles as the
-        check that what shipped is a file this user agent can play: 8 kHz, mono,
-        16-bit, which is what a narrowband call carries.
+        check that what shipped is a file this user agent can play: **8 kHz,
+        mono, 16-bit**, which is what a narrowband call carries -- and it now
+        checks the RATE it says it checks. It used to name 8 kHz and compare
+        only channels and width, so a `name_audio` recorded at 44.1 kHz started,
+        and the one file in this configuration that this package does not
+        produce is exactly the one that would be.
+
+        The site's `name_audio` is also BOUNDED: `[speech] name_audio_max_seconds`.
+        The operator's briefing waits for it, so an unbounded one holds a driver
+        in a call nobody is coming to.
         """
-        paths = [intercom.name_audio for intercom in self.config.intercoms]
+        site_files = {intercom.name_audio for intercom in self.config.intercoms}
+        paths = list(site_files)
         for line, languages in self._every_line():
             paths.extend(
                 self.config.audio_directory / audio_name(line, language)
@@ -228,13 +256,21 @@ class Agent:
                     channels, width = handle.getnchannels(), handle.getsampwidth()
             except (OSError, wave.Error) as exc:
                 raise AudioMissing(f"{path}: {exc}") from exc
-            if channels != 1 or width != 2:
+            if channels != 1 or width != 2 or rate != NARROWBAND_RATE:
                 raise AudioMissing(
-                    f"{path} is {channels} channel(s) at {width * 8} bits. Every file this "
-                    "agent plays is mono 16-bit PCM, which is what a narrowband call "
-                    "carries."
+                    f"{path} is {channels} channel(s) at {width * 8} bits, {rate} Hz. Every "
+                    f"file this agent plays is mono 16-bit PCM at {NARROWBAND_RATE} Hz, "
+                    "which is what a narrowband call carries."
                 )
-            self._durations[path] = frames / rate if rate else 0.0
+            seconds = frames / rate if rate else 0.0
+            if path in site_files and seconds > self.config.name_audio_max_seconds:
+                raise AudioMissing(
+                    f"{path} is {seconds:.1f}s and [speech].name_audio_max_seconds is "
+                    f"{self.config.name_audio_max_seconds:.1f}. It is played to the person "
+                    "on the phone before the two legs are put together, so a driver at the "
+                    "barrier waits for the whole of it."
+                )
+            self._durations[path] = seconds
 
     def _every_line(self):
         from .lines import DRIVER_LINES, OPERATOR_LINES
@@ -247,7 +283,15 @@ class Agent:
     # -- the loop ----------------------------------------------------------
 
     def poll(self) -> None:
-        """Everything the user agent said, then everything that is due."""
+        """Everything the user agent said, then everything that is due.
+
+        **A lost control socket is REOPENED here.** It used to be a permanent
+        outage: the socket was raised on and never replaced, so an ordinary
+        `systemctl restart baresip`, a package upgrade or an OOM kill left the
+        agent alive, its user agent registered, and every call ringing at a
+        process that would never answer one -- `ua_unreachable` active for the
+        life of the process, and the only repair a human restarting the agent.
+        """
         try:
             events = self.ua.poll()
             self._code(AgentCode.UA_UNREACHABLE, self.config.agent_id, HealthState.OK)
@@ -257,11 +301,61 @@ class Agent:
             # make it, because a UA that is down cannot report that it is down.
             log.error("the user agent is unreachable: %s", exc)
             self._code(AgentCode.UA_UNREACHABLE, self.config.agent_id, HealthState.ACTIVE)
+            self._reconnect()
             return
         for event in events:
             self._handle(event)
         self._registration_state()
         self._advance()
+
+    def _reconnect(self) -> None:
+        """Try to get the control socket back, and deal with what was missed.
+
+        Whatever case was in progress is GONE: its legs were torn down or are
+        beyond reach, and there is no way to find out what was said while
+        nobody was listening. So the session is dropped and every call the user
+        agent is still holding is dealt with by the same rule the agent applies
+        to any new call -- one that is still RINGING is answered, and anything
+        else is released.
+        """
+        reconnect = getattr(self.ua, "reconnect", None)
+        if reconnect is None:
+            return
+        try:
+            calls = reconnect()
+        except UaUnreachable as exc:
+            log.debug("the control socket is still down: %s", exc)
+            return
+        if not calls:
+            return
+        log.warning("the control socket came back; %d call(s) were held", len(calls))
+        self._code(AgentCode.UA_UNREACHABLE, self.config.agent_id, HealthState.OK)
+        if self.session is not None:
+            self._record(
+                AgentEventKind.CASE_NOT_SPOKEN,
+                intercom=self.session.intercom.sip_uri,
+                lane=self.session.intercom.lane,
+                case=self.session.case.value if self.session.case else None,
+            )
+            self._end(self.session)
+        for call in calls:
+            if call.ringing:
+                self._incoming(
+                    UaEvent(
+                        kind=UaEventKind.CALL_INCOMING,
+                        call_id=call.call_id,
+                        peer_uri=call.peer_uri,
+                    )
+                )
+                continue
+            # Answered before the socket went, or placed by this process and
+            # since orphaned. There is no dialogue behind it any more, and a leg
+            # left live would be conferenced into the NEXT case.
+            try:
+                self.ua.hangup(call.call_id)
+            except UaUnreachable as exc:
+                log.error("could not release the orphaned call %s: %s", call.call_id, exc)
+                return
 
     def _registration_state(self) -> None:
         registered = self.ua.registered()
@@ -302,7 +396,7 @@ class Agent:
                 session.operator_call = None
                 if session.state in (State.BRIEFING, State.WAITING_DIGIT,
                                      State.COLLECTING_NUMBER):
-                    self._nothing_usable(session)
+                    self._nothing_usable(session, hung_up=True)
             return
         if event.kind is UaEventKind.DTMF and event.call_id == session.operator_call:
             # ONLY the operator's leg. A digit from the driver is not an
@@ -313,7 +407,30 @@ class Agent:
     # -- answering ---------------------------------------------------------
 
     def _incoming(self, event: UaEvent) -> None:
+        """A new inbound call. **The live case is checked BEFORE the identity.**
+
+        The order is the whole of this method. `concurrent_cases` is 1 because
+        the user agent's bridge is site-wide, so the limit has to hold against
+        EVERY caller -- and being undeclared is the DEFAULT state of every
+        caller on the network, not a rare one. Checking the identity first made
+        the limit apply only to callers the site had declared: a stranger
+        dialling mid-case was answered, given a session, and conferenced into a
+        live bridge, and the fixed sentence it was told ended with `hangup_all`,
+        which cut off the real driver and the real operator.
+
+        So: a live case refuses every new call, unanswered, without looking at
+        who it is. Neither refusal assigns `session`, plays anything, or sends
+        `conference`.
+        """
         uri = _bare_uri(event.peer_uri)
+        if self.session is not None:
+            # NOT answered, whoever it is. The refusal carries the caller's
+            # identity so a site can see who was turned away, and reading that
+            # identity is the only thing done with it.
+            self._record(AgentEventKind.CALL_REFUSED_BUSY, intercom=uri or "unknown")
+            if event.call_id:
+                self.ua.hangup(event.call_id)
+            return
         intercom = self._by_uri.get(uri)
         if intercom is None:
             # ONE fixed message and the call ends. The agent never guesses a
@@ -337,14 +454,6 @@ class Agent:
                 self.session = session
                 self._say(session, UaLeg.DRIVER, "driver.undeclared_intercom")
             return
-        if self.session is not None:
-            # NOT answered. An unanswered call is what makes the intercom's own
-            # call list move on to the human's number; answering it to say "busy"
-            # would take that fall-through away.
-            self._record(AgentEventKind.CALL_REFUSED_BUSY, intercom=uri or "unknown")
-            if event.call_id:
-                self.ua.hangup(event.call_id)
-            return
         if event.call_id is None:
             return
         self.ua.answer(event.call_id)
@@ -360,14 +469,23 @@ class Agent:
         )
         self._record(AgentEventKind.CALL_ANSWERED, intercom=intercom.sip_uri,
                      lane=intercom.lane)
-        session.case = derive(self._read_lane(intercom))
-        self._record(AgentEventKind.CASE_SPOKEN, intercom=intercom.sip_uri,
-                     lane=intercom.lane, case=session.case.value)
+        session.case = derive(
+            self._read_lane(intercom),
+            now=datetime.now(UTC),
+            max_age_seconds=self.config.decision_max_age_seconds,
+        )
         self._say(session, UaLeg.DRIVER, f"case.{session.case.value}")
+        # `case_spoken` is NOT written here. It is written when the last file of
+        # the case has finished playing -- see `_advance`. Written at this point
+        # it recorded that a driver had been told their case at the moment the
+        # first file was QUEUED, which is a claim about a queue, and it stayed
+        # true in the log through thirty-three hours of a user agent refusing
+        # every one of them.
         if session.case is AgentCase.NOTHING_TO_DO:
             session.state = State.CLOSING
         else:
             session.state = State.SPEAKING_CASE
+        session.deadline = None
 
     def _read_lane(self, intercom: Intercom) -> LaneReading:
         """The lane's last decision and health, through the contract, GET only.
@@ -419,6 +537,10 @@ class Agent:
             readable=True,
             outcome=_string(decision, "outcome"),
             reason=_string(decision, "reason"),
+            # WHEN the lane decided, exactly as it published it. Read as a
+            # string and interpreted in `cases`, so an unreadable one is a case
+            # rather than an exception in the middle of answering a call.
+            decision_at=_string(decision, "at"),
             transit=_string(transit, "state"),
             malfunctions=tuple(malfunctions),
         )
@@ -554,7 +676,14 @@ class Agent:
         session.state = State.CLOSING
         session.deadline = None
 
-    def _nothing_usable(self, session: Session) -> None:
+    def _nothing_usable(self, session: Session, hung_up: bool = False) -> None:
+        """No usable instruction. **The driver is told WHICH of the two it was.**
+
+        A person who keyed nothing this site accepts and a person who put the
+        phone down mid-menu are different things, and the driver used to hear "I
+        could not take an instruction" for both -- which is not what happened in
+        the second, and a driver told it goes on standing there.
+        """
         self._record(
             AgentEventKind.NOTHING_USABLE,
             intercom=session.intercom.sip_uri,
@@ -562,7 +691,11 @@ class Agent:
             case=session.case.value if session.case else None,
             human=self.config.human_sip_uri,
         )
-        self._say(session, UaLeg.DRIVER, "driver.nothing_usable")
+        self._say(
+            session,
+            UaLeg.DRIVER,
+            "driver.operator_hung_up" if hung_up else "driver.nothing_usable",
+        )
         session.state = State.CLOSING
         session.deadline = None
 
@@ -574,7 +707,15 @@ class Agent:
             return
         now = self._clock()
         self._speak(session, now)
+        if self.session is not session:
+            # `_speak` can END the case: a line nobody can be told is a case
+            # nobody can be told. Everything below is about a session that is
+            # still in progress, and from `BRIEFING` with a cleared queue the
+            # very next branch would send `conference` on a call already hung
+            # up.
+            return
         if session.state is State.SPEAKING_CASE and self._silent(session, UaLeg.DRIVER, now):
+            self._spoken(session)
             self._call_human(session)
             return
         if session.state is State.CALLING_HUMAN and session.deadline is not None:
@@ -600,35 +741,129 @@ class Agent:
                 session.deadline = now + self.config.hold_reprompt_seconds
             return
         if session.state is State.CLOSING and self._silent(session, UaLeg.DRIVER, now):
-            self.ua.hangup_all()
+            # `nothing_to_do` reaches here without passing SPEAKING_CASE, and it
+            # is a case that WAS spoken -- so this is its moment too.
+            self._spoken(session)
+            self._hangup_all()
             self._end(session)
 
     def _speak(self, session: Session, now: float) -> None:
+        """Play what is due on each leg, and BOUND how long a line may be due.
+
+        A refusal is usually benign and a fifth of a second from resolving --
+        the call's audio stream has not come up yet -- so the line is kept and
+        retried. What this used to have no answer for is the OTHER cause: a file
+        the user agent will not decode, an audio mode it will not play into, a
+        mixer stuck in a mode it cannot leave. Retried for ever, that is a driver
+        in an answered call hearing nothing, with no timer, no code, and a log
+        saying their case was spoken. Measured on this build: thirty-three hours
+        of it, and a clean health surface throughout.
+
+        So every line carries `[speech] line_timeout_seconds`, and a line still
+        undelivered past it is `audio_playback_failed` on that LEG.
+        """
         for leg in (UaLeg.DRIVER, UaLeg.OPERATOR):
-            if session.free_at[leg] > now or not session.speech[leg]:
+            if not session.speech[leg]:
+                session.line_due[leg] = None
                 continue
+            if session.free_at[leg] > now:
+                continue
+            # A line is DUE on this leg. The clock starts here.
+            if session.line_due[leg] is None:
+                session.line_due[leg] = now
             call_id = session.call_of(leg)
             if call_id is None or call_id not in session.live:
-                continue
-            path = session.speech[leg].popleft()
+                # Answered, and no audio stream. Nothing to play into and
+                # nothing to be refused by, which is why the clock is not
+                # started by a refusal.
+                self._line_overdue(session, leg, now)
+                return
+            path = session.speech[leg][0]
             try:
                 self.ua.play(call_id, str(path))
             except UaRefused as exc:
-                # It answered, and said no. Put the line BACK and try again next
-                # poll: the usual reason is that the call's audio stream has not
-                # come up yet, which is a fifth of a second away. A driver who is
-                # never told their case has been told nothing, so the line is not
-                # dropped -- and no code goes `active`, because the agent is
-                # working the phone perfectly well.
                 log.debug("the user agent refused %s for now: %s", path, exc)
-                session.speech[leg].appendleft(path)
+                self._line_overdue(session, leg, now)
                 return
             except UaUnreachable as exc:
                 log.error("could not play %s: %s", path, exc)
-                session.speech[leg].appendleft(path)
                 self._code(AgentCode.UA_UNREACHABLE, self.config.agent_id, HealthState.ACTIVE)
+                self._line_overdue(session, leg, now)
                 return
+            session.speech[leg].popleft()
+            session.line_due[leg] = None
+            self._code(AgentCode.AUDIO_PLAYBACK_FAILED, leg.value, HealthState.OK)
+            # WHEN IT IS OVER, on the file's own measured duration. The user
+            # agent offers no completion signal for the verb this plays with --
+            # measured against baresip 4.11.0, whose `mixausrc` reports the end
+            # of a file to nobody: it logs at debug level and emits no event.
+            # The duration is read out of the file at startup, which is a
+            # property of something this package ships and can measure.
             session.free_at[leg] = now + self._durations.get(path, 0.0)
+
+    def _line_overdue(self, session: Session, leg: UaLeg, now: float) -> None:
+        """One line has been due too long. Say so, and stop waiting for it."""
+        started = session.line_due[leg]
+        if started is None or now - started <= self.config.line_timeout_seconds:
+            return
+        log.error(
+            "the %s leg could not be spoken to for %.0fs; giving up on the line",
+            leg.value, now - started,
+        )
+        self._code(AgentCode.AUDIO_PLAYBACK_FAILED, leg.value, HealthState.ACTIVE)
+        session.speech[leg].clear()
+        session.line_due[leg] = None
+        session.free_at[leg] = now
+        if leg is UaLeg.DRIVER and session.state is State.SPEAKING_CASE:
+            # The driver cannot be told their case. It is still a case, so it
+            # goes to a person -- briefed the same way, and timed the same way.
+            self._call_human(session)
+            return
+        if leg is UaLeg.DRIVER and session.state is State.CALLING_HUMAN:
+            # Already on its way to a person; nothing more to say to the driver.
+            return
+        # Nothing left that can tell anybody anything. The case ENDS and the
+        # driver's call is RELEASED rather than held open in silence, which is
+        # the failure this exists to stop.
+        self._not_spoken(session)
+
+    def _not_spoken(self, session: Session) -> None:
+        self._record(
+            AgentEventKind.CASE_NOT_SPOKEN,
+            intercom=session.intercom.sip_uri,
+            lane=session.intercom.lane,
+            case=session.case.value if session.case else None,
+        )
+        self._hangup_all()
+        self._end(session)
+
+    def _hangup_all(self) -> None:
+        """End every call, and do not let a dead user agent keep the session.
+
+        A session that outlived its calls because the socket was down would
+        refuse every later caller as busy for a case nobody is in.
+        """
+        try:
+            self.ua.hangup_all()
+        except UaUnreachable as exc:
+            log.error("could not end the calls: %s", exc)
+
+    def _spoken(self, session: Session) -> None:
+        """`case_spoken`, ONCE, when the last file of the case has FINISHED.
+
+        It used to be written when the first file was QUEUED, which is a claim
+        about a queue: the record said the driver had been told their case
+        while the user agent was refusing every line of it.
+        """
+        if session.case is None or session.spoken:
+            return
+        session.spoken = True
+        self._record(
+            AgentEventKind.CASE_SPOKEN,
+            intercom=session.intercom.sip_uri,
+            lane=session.intercom.lane,
+            case=session.case.value,
+        )
 
     def _silent(self, session: Session, leg: UaLeg, now: float) -> bool:
         return not session.speech[leg] and session.free_at[leg] <= now
@@ -735,6 +970,7 @@ class Agent:
                 version=self._ua_version,
                 tested_versions=_tested_versions(self.ua),
                 registered=self.ua.registered(),
+                reconnect_seconds=self.config.user_agent.reconnect_seconds,
             ),
             driver_languages=self.config.driver_languages,
             operator_language=self.config.operator_language,
@@ -747,6 +983,9 @@ class Agent:
             nothing_usable_seconds=self.config.nothing_usable_seconds,
             hold_reprompt_seconds=self.config.hold_reprompt_seconds,
             transfer_declared=self.config.transfer_sip_uri is not None,
+            decision_max_age_seconds=self.config.decision_max_age_seconds,
+            line_timeout_seconds=self.config.line_timeout_seconds,
+            name_audio_max_seconds=self.config.name_audio_max_seconds,
         )
 
     def health(self) -> AgentHealth:
@@ -830,6 +1069,7 @@ def _tested_versions(user_agent) -> tuple[str, ...]:
 __all__ = [
     "CONTRACT_VERSION",
     "END_OF_NUMBER",
+    "NARROWBAND_RATE",
     "KNOWN_LANE_VERSIONS",
     "REPROMPTS",
     "Agent",
