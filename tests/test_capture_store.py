@@ -11,6 +11,7 @@ this repository and `check-no-real-data.js` refuses one.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -23,7 +24,9 @@ from gate_agent.store import (
     TEMP_PREFIX,
     CaptureStore,
     StoreOverBudget,
+    StoreRecordRefused,
     StoreUnwritable,
+    _at,
 )
 
 START = datetime.fromisoformat("2026-08-30T14:00:00+00:00")
@@ -122,12 +125,13 @@ def test_a_records_name_is_a_timestamp_a_camera_and_a_sequence(tmp_path):
     assert "lane_vend" not in record.id and "7" not in record.id.split("_")[1]
 
 
-def test_trigger_to_capture_ms_is_the_delay_and_is_absent_without_a_trigger(tmp_path):
-    """THE COST OF THE SEAT, on every record rather than in a sentence.
+def test_capture_minus_lane_event_ms_is_the_subtraction_and_is_absent_without_one(tmp_path):
+    """NAMED FOR THE SUBTRACTION IT IS, on every record rather than in a sentence.
 
     This process learns that a car arrived by POLLING the lane's read contract,
-    so the picture is taken when the event was SEEN. That delay is a per-site
-    number and it is published per record.
+    so the picture is taken when the event was SEEN -- and the two ends of this
+    subtraction are read from two different machines' clocks. What it can and
+    cannot be read as is stated once, in `CAPTURE_MINUS_LANE_EVENT_NOTE`.
     """
     store = store_at(tmp_path)
     triggered = store.write(
@@ -135,10 +139,10 @@ def test_trigger_to_capture_ms_is_the_delay_and_is_absent_without_a_trigger(tmp_
         captured_at=START + timedelta(milliseconds=1400),
         lane_event_cursor=7, lane_event_at=START.isoformat(),
     )
-    assert triggered.trigger_to_capture_ms == 1400
+    assert triggered.capture_minus_lane_event_ms == 1400
 
     interval = store.write(jpeg(), camera_id="front", reason="interval", captured_at=START)
-    assert interval.trigger_to_capture_ms is None
+    assert interval.capture_minus_lane_event_ms is None
     assert interval.lane_event_cursor is None and interval.lane_event_at is None
 
 
@@ -304,7 +308,7 @@ def test_a_write_that_one_purge_cannot_make_room_for_is_refused_and_named(tmp_pa
     be a recording missing exactly the busiest hour, with nothing saying so.
     """
     store = store_at(tmp_path, max_bytes=100)
-    with pytest.raises(StoreOverBudget, match="one purge could not get"):
+    with pytest.raises(StoreOverBudget, match="no purge can make room"):
         store.write(jpeg(b"x" * 500), camera_id="front", reason="interval", captured_at=START)
     assert list(store.directory.iterdir()) == []
     # The control: a capture that DOES fit is written.
@@ -400,8 +404,19 @@ def test_a_record_id_from_a_request_is_never_joined_onto_a_path(tmp_path):
     assert store.get("../outside") is None
 
 
-def test_a_timestamp_nothing_can_read_is_purged_rather_than_kept(tmp_path):
-    """A record no retention rule can honour is a photograph outside the rule."""
+def test_a_timestamp_nothing_can_read_never_enters_the_index_at_all(tmp_path):
+    """A record no retention rule can honour is a photograph outside the rule.
+
+    **The mechanism changed and the guarantee is stronger.** It used to be that
+    such a record was admitted and then taken by the age half of the purge,
+    because `_at` reads an unparseable stamp as the beginning of time. Now the
+    rebuild builds every record THROUGH the contract, and a sidecar the contract
+    will not accept is half a record: reported as `store_record_incomplete` and
+    purged where it is found, before anything can read it.
+
+    Both halves are proven here -- that it does not enter, and that the old
+    backstop is still in place under it.
+    """
     store = store_at(tmp_path, retention_days=3650)
     record = write(store, START)
     sidecar = store.directory / f"{record.id}{SIDECAR_SUFFIX}"
@@ -411,7 +426,240 @@ def test_a_timestamp_nothing_can_read_is_purged_rather_than_kept(tmp_path):
 
     reopened = CaptureStore(store.directory, 3650, 1 << 20)
     reopened.open()
-    assert reopened.records(), "the record did not survive the rebuild, so the purge is untested"
-    reopened.purge(now=datetime.now(UTC))
-    assert reopened.records() == ()
-    assert reopened.purged_by_age == 1
+    assert reopened.records() == (), "a sidecar the contract refuses was admitted to the index"
+    assert reopened.incomplete == (record.id,)
+    assert list(reopened.directory.iterdir()) == [], "the image was left on the disk"
+
+    # AND THE BACKSTOP UNDER IT: were such a record ever in an index, the age
+    # rule still reaches it -- `_at` reads what it cannot parse as the beginning
+    # of time, so the purge takes it rather than keeping it for ever.
+    assert _at("whenever") < datetime.now(UTC) - timedelta(days=3650)
+
+
+# ---------------------------------------------------------------------------
+# W2 — A CAPTURE THAT CANNOT FIT IS REFUSED BEFORE ANY PURGE
+# ---------------------------------------------------------------------------
+
+
+def test_an_oversized_capture_purges_nothing_at_all(tmp_path):
+    """**The store is not emptied to make room for a write that is then refused.**
+
+    The order used to be: purge for the headroom, then discover the capture can
+    never fit. The size half was `while there is anything left`, so an
+    impossible headroom emptied the store and the write was refused anyway --
+    and `len(image)` is the CAMERA'S to choose. Against SETTLED 3g, where the
+    store exists so the entries can be reconstructed and pursued, a camera that
+    had gone strange or been swapped erased the evidence.
+    """
+    store = store_at(tmp_path, max_bytes=10_000)
+    for minute in range(20):
+        write(store, START + timedelta(minutes=minute), body=b"x" * 100)
+    before = store.reads()
+    assert before["record_count"] == 20
+
+    with pytest.raises(StoreOverBudget, match="no purge can make room"):
+        store.write(
+            jpeg(b"y" * 20_000), camera_id="front", reason="interval", captured_at=START
+        )
+
+    after = store.reads()
+    assert after["record_count"] == 20, "the store was emptied for a write that was refused"
+    assert after["bytes_used"] == before["bytes_used"]
+    assert store.purged_by_size == 0, "the size purge ran for a capture that can never fit"
+    assert len(list(store.directory.iterdir())) == 40
+
+    # THE CONTROL, and it is what makes this a measurement rather than a
+    # tautology: a capture that DOES need room still gets it, from the oldest.
+    store.write(jpeg(b"z" * 9_000), camera_id="front", reason="interval", captured_at=START)
+    assert store.purged_by_size > 0, "the size purge no longer makes room for anything"
+
+
+def test_the_size_purge_is_bounded_by_the_headroom_and_never_empties_the_store(tmp_path):
+    """Asked for room it cannot make, it makes none -- and says so."""
+    store = store_at(tmp_path, max_bytes=10_000)
+    for minute in range(10):
+        write(store, START + timedelta(minutes=minute), body=b"x" * 100)
+
+    by_age, by_size = store.purge(headroom=99_999)
+    assert (by_age, by_size) == (0, 0), "an impossible headroom emptied the store"
+    assert store.reads()["record_count"] == 10
+
+    # The control: a POSSIBLE headroom evicts, and evicts only what it needs.
+    by_age, by_size = store.purge(headroom=9_500)
+    assert by_size > 0
+    assert store.reads()["record_count"] < 10
+
+
+# ---------------------------------------------------------------------------
+# W3 — CRASH LEFTOVERS ARE INSIDE THE RULE
+# ---------------------------------------------------------------------------
+
+
+def test_a_live_write_removes_its_own_temporary_files_whatever_ends_it(tmp_path, monkeypatch):
+    """The `finally` half. A crash that is an EXCEPTION leaves nothing behind.
+
+    Those temporary files hold the JPEG. Left on the disk they are outside the
+    index, outside `bytes_used`, outside every report, and outside the retention
+    rule itself -- because that rule reads a sidecar and there is none to read.
+    """
+    store = store_at(tmp_path)
+    write(store, START)
+
+    real = os.replace
+
+    def boom(source, target):
+        raise OSError("the disk went away between the write and the rename")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(StoreUnwritable):
+        store.write(
+            jpeg(b"A" * 500),
+            camera_id="front",
+            reason="interval",
+            captured_at=START + timedelta(minutes=1),
+        )
+    monkeypatch.setattr(os, "replace", real)
+
+    left = [path.name for path in store.directory.iterdir() if path.name.startswith(TEMP_PREFIX)]
+    assert left == [], f"a live write left {left} on the disk"
+    # The control: the failed write is not simply invisible -- the good record
+    # is still there, so this is not an empty directory agreeing with itself.
+    assert store.reads()["record_count"] == 1
+
+
+def test_a_temporary_file_found_at_a_rebuild_is_removed_and_counted(tmp_path):
+    """The other half: what a POWER CUT leaves, which no `finally` can reach.
+
+    A temporary file at a rebuild is BY DEFINITION a write that died -- nothing
+    else can leave one, because this process is the only writer of the directory
+    and a live write cleans up after itself. It is removed, and it is COUNTED,
+    because how often a site loses power mid-write is a fact about that site.
+    """
+    store = store_at(tmp_path)
+    write(store, START)
+    # What the machine that lost power left: both temporary files, complete on
+    # the disk, neither renamed.
+    (store.directory / f"{TEMP_PREFIX}20260830T140000000Z_front_000002.jpg").write_bytes(
+        jpeg(b"A" * 1000)
+    )
+    (store.directory / f"{TEMP_PREFIX}20260830T140000000Z_front_000002.json").write_bytes(
+        b'{"captured_at": "2026-08-30T14:00:00+00:00"}'
+    )
+
+    reopened = CaptureStore(store.directory, 30, 1 << 20)
+    reopened.open()
+    assert reopened.purged_by_crash == 2
+    assert [
+        path.name for path in reopened.directory.iterdir() if path.name.startswith(TEMP_PREFIX)
+    ] == []
+    assert reopened.reads()["purged_by_crash"] == 2
+    # The control: the real record beside them was NOT swept.
+    assert reopened.reads()["record_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# W4 — BY VALUE, AND A CLOCK THAT STEPPED BACK IS A CODE
+# ---------------------------------------------------------------------------
+
+
+def test_oldest_and_newest_are_by_value_after_the_clock_steps_back(tmp_path):
+    """`records[0]` and `records[-1]` are the ends of a list in INSERTION order.
+
+    One NTP step back and the last record written is the earliest one held, so
+    read by position these two come out the wrong way round -- `newest_at`
+    earlier than `oldest_at`, published, with nothing going active.
+    """
+    now = [START]
+    store = store_at(tmp_path, now=lambda: now[0])
+    write(store, START)
+    now[0] = START - timedelta(hours=1)
+    write(store, START - timedelta(hours=1))
+
+    reads = store.reads()
+    assert reads["oldest_at"] == (START - timedelta(hours=1)).isoformat()
+    assert reads["newest_at"] == START.isoformat()
+    assert _at(reads["oldest_at"]) <= _at(reads["newest_at"])
+    # The control: this store really does hold two records at two moments, so
+    # the comparison above is not one record agreeing with itself.
+    assert reads["record_count"] == 2
+
+
+def test_the_size_purge_takes_the_oldest_by_value_not_the_first_written(tmp_path):
+    now = [START]
+    store = store_at(tmp_path, max_bytes=400, now=lambda: now[0])
+    late = write(store, START, body=b"x" * 64)
+    now[0] = START - timedelta(hours=1)
+    early = write(store, START - timedelta(hours=1), body=b"x" * 64)
+
+    store.purge(headroom=250)
+    held = [record.id for _cursor, record in store.records()]
+    assert early.id not in held, "the size purge kept the OLDEST record"
+    assert late.id in held, "the size purge took the newest record"
+
+
+def test_a_record_stamped_ahead_of_the_clock_is_a_code_and_not_a_deletion(tmp_path):
+    """It is not deleted early and it is not ignored: it is NAMED.
+
+    `_at(captured_at) < cutoff` keeps a record stamped after now until the clock
+    reaches it, which is correct -- deleting a photograph because a clock moved
+    is the failure a retention window exists to prevent. What was missing is
+    that nothing said so.
+    """
+    now = [START]
+    store = store_at(tmp_path, retention_days=1, now=lambda: now[0])
+    write(store, START + timedelta(hours=2))
+
+    by_age, _by_size = store.purge()
+    assert by_age == 0, "a record ahead of the clock was deleted early"
+    assert store.clock_stepped_back is True
+    assert store.reads()["record_count"] == 1
+
+    # RECOVERS BY ITSELF once the clock reaches it. The control for the flag:
+    # it is a measurement of the store against the clock, not a latch.
+    now[0] = START + timedelta(hours=3)
+    store.purge()
+    assert store.clock_stepped_back is False
+
+
+# ---------------------------------------------------------------------------
+# W1 — A RECORD THE CONTRACT REFUSES IS NEVER WRITTEN
+# ---------------------------------------------------------------------------
+
+
+def test_a_record_the_contract_would_refuse_never_reaches_the_disk(tmp_path):
+    """Built THROUGH the contract, before anything is written.
+
+    The class `GET /v1/capture/records` builds its page from is the class this
+    write is validated by, so a record that route could not publish is a record
+    this store does not hold. Without it, one such record makes that route raise
+    for every consumer until it ages out -- up to `retention_days`.
+    """
+    store = store_at(tmp_path)
+    for reason, cursor, at in (
+        # A lane reason with no reference: the contract refuses the pair.
+        ("lane_arrival", None, None),
+        # A reference whose timestamp carries no UTC offset.
+        ("lane_arrival", 7, "2026-08-30T14:03:11.482913"),
+        # An interval capture carrying a lane reference.
+        ("interval", 7, "2026-08-30T14:03:11.482913+00:00"),
+    ):
+        with pytest.raises((StoreRecordRefused, ValueError)):
+            store.write(
+                jpeg(),
+                camera_id="front",
+                reason=reason,
+                captured_at=START,
+                lane_event_cursor=cursor,
+                lane_event_at=at,
+            )
+    assert list(store.directory.iterdir()) == [], "a refused record left something on the disk"
+    # The control: the same write with a reference the contract accepts IS
+    # written, so the refusals above are about the record and not the store.
+    assert store.write(
+        jpeg(),
+        camera_id="front",
+        reason="lane_arrival",
+        captured_at=START,
+        lane_event_cursor=7,
+        lane_event_at="2026-08-30T14:03:11.482913+00:00",
+    )

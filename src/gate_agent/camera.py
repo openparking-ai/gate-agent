@@ -25,20 +25,25 @@ Standard library only, like every other module here.
 from __future__ import annotations
 
 import logging
+import time
 import urllib.error
 import urllib.request
 
+from .contract import CameraUnreachableCause
 from .redirects import build_opener
 
 log = logging.getLogger(__name__)
 
-#: A snapshot larger than this is not a snapshot. A process that read an
-#: unbounded body from a camera that had gone strange would become the second
-#: thing that is down, and this one is meant to outlive what it photographs.
-#: It is a CEILING on a read, not a statement about how big a picture is: this
+#: The published default for `[capture] max_snapshot_bytes`: the most this
+#: process will read from one camera before it stops reading.
+#:
+#: A CEILING ON A READ, and not a statement about how big a picture is -- this
 #: package has never seen a capture from any camera and says nothing about the
-#: size of one.
-MAX_SNAPSHOT_BYTES = 32 << 20
+#: size of one. It is a SETTING because of what it decides: the store evicts to
+#: make room for what arrives, so a ceiling above `[capture] max_bytes` would
+#: let a camera that had gone strange decide how much of a site's store
+#: survives. Startup refuses a value that is not below `max_bytes`.
+DEFAULT_MAX_SNAPSHOT_BYTES = 32 << 20
 
 #: The published default for how long a camera has to answer one snapshot.
 #: A per-site SETTING and an ASSUMPTION -- nothing here measures how long a
@@ -54,6 +59,12 @@ DEFAULT_SNAPSHOT_TIMEOUT = 10.0
 #: a working installation.
 JPEG_MAGIC = b"\xff\xd8\xff"
 
+#: How much of a body is read between two looks at the deadline. Small enough
+#: that a camera dripping bytes is abandoned within one chunk of its timeout,
+#: large enough that a real snapshot is a handful of reads rather than a
+#: thousand. It is a granularity, not a limit.
+CHUNK_BYTES = 64 << 10
+
 
 class CameraUnreachable(Exception):
     """Nothing came back, or what came back was not a picture.
@@ -65,7 +76,15 @@ class CameraUnreachable(Exception):
 
     A **5xx** is here. The camera's process answered, and what it answered is
     that it could not take the picture; the repair is at the camera either way.
+
+    `cause` says WHICH of them it was, out of `CameraUnreachableCause`, and it
+    goes on the wire beside the code. One fact to the process asking, four
+    different repairs to the person sent to fix it.
     """
+
+    def __init__(self, message: str, cause: CameraUnreachableCause) -> None:
+        super().__init__(message)
+        self.cause = cause
 
 
 class CameraRefusedUs(Exception):
@@ -106,10 +125,17 @@ class SnapshotCamera:
         username: str | None = None,
         password: str | None = None,
         timeout: float = DEFAULT_SNAPSHOT_TIMEOUT,
+        max_snapshot_bytes: int = DEFAULT_MAX_SNAPSHOT_BYTES,
+        clock=time.monotonic,
     ) -> None:
         self.camera_id = camera_id
         self.snapshot_url = snapshot_url
         self.timeout = timeout
+        self.max_snapshot_bytes = max_snapshot_bytes
+        #: MONOTONIC, and not the process's wall clock. The deadline below is a
+        #: duration, and a duration measured against a clock that can be stepped
+        #: by NTP is a deadline that can be moved by something outside this box.
+        self._clock = clock
         handlers = []
         if username is not None and password is not None:
             manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
@@ -121,37 +147,84 @@ class SnapshotCamera:
         self._opener = build_opener(*handlers)
 
     def snapshot(self) -> bytes:
-        """One picture, or one of the two refusals. There is no other method."""
+        """One picture, or one of the two refusals. There is no other method.
+
+        **`timeout_seconds` IS A DEADLINE ON THE WHOLE READ, not a socket
+        option.** `urllib`'s `timeout` bounds one socket operation: a camera
+        that answers, declares a length and then sends one byte every quarter
+        second never times out, because no single read waits long enough. This
+        process runs ONE poller thread, so a camera doing that holds every other
+        camera's capture and the lane's event poll behind it -- for as long as
+        the camera chooses. The body is therefore read in CHUNKS against a wall
+        of `timeout` seconds from the moment the request went out, and past it
+        this stops reading and says `timeout`. One camera cannot hold this
+        process for longer than that camera's own timeout.
+        """
         request = urllib.request.Request(self.snapshot_url, method="GET")
+        deadline = self._clock() + self.timeout
+        ceiling = self.max_snapshot_bytes
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
-                body = response.read(MAX_SNAPSHOT_BYTES + 1)
+                chunks: list[bytes] = []
+                read = 0
+                while read <= ceiling:
+                    if self._clock() >= deadline:
+                        raise CameraUnreachable(
+                            f"{self.camera_id}: still answering after {self.timeout}s; "
+                            f"{read} byte(s) arrived and the read was abandoned",
+                            CameraUnreachableCause.TIMEOUT,
+                        )
+                    # `read1`, NOT `read`. `read(n)` blocks until it has n bytes
+                    # or the body ends, so a camera dripping bytes spends hours
+                    # inside ONE call and the deadline above is never reached.
+                    # `read1` comes back with whatever one socket read produced,
+                    # which is what makes this loop a deadline rather than a
+                    # bound on the number of chunks.
+                    chunk = response.read1(CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    read += len(chunk)
+                body = b"".join(chunks)
         except urllib.error.HTTPError as exc:
             # It ANSWERED. Which half of the fault that is depends on the
             # status, and the status is carried so a human can tell them apart.
             if exc.code >= 500:
-                raise CameraUnreachable(f"{self.camera_id}: HTTP {exc.code}") from exc
+                raise CameraUnreachable(
+                    f"{self.camera_id}: HTTP {exc.code}", CameraUnreachableCause.SERVER_ERROR
+                ) from exc
             raise CameraRefusedUs(f"{self.camera_id}: HTTP {exc.code}", exc.code) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise CameraUnreachable(f"{self.camera_id}: {exc}") from exc
-        if len(body) > MAX_SNAPSHOT_BYTES:
+            # A socket that timed out PAST THE DEADLINE is the same fault as a
+            # body that was still arriving at it: a camera that has stopped
+            # answering inside its own timeout. Told apart from a socket that
+            # failed, because they are two different repairs.
+            timed_out = self._clock() >= deadline
             raise CameraUnreachable(
-                f"{self.camera_id}: answered more than {MAX_SNAPSHOT_BYTES} bytes"
+                f"{self.camera_id}: {exc}",
+                CameraUnreachableCause.TIMEOUT if timed_out else CameraUnreachableCause.NETWORK,
+            ) from exc
+        if len(body) > ceiling:
+            raise CameraUnreachable(
+                f"{self.camera_id}: answered more than {ceiling} bytes",
+                CameraUnreachableCause.NOT_A_PICTURE,
             )
         if not body.startswith(JPEG_MAGIC):
             # A login page served as `image/jpeg`, an error document, an empty
             # body. Refused rather than stored: a store full of those reads as a
             # working installation right up until somebody opens one.
             raise CameraUnreachable(
-                f"{self.camera_id}: answered {len(body)} bytes that do not begin as a JPEG"
+                f"{self.camera_id}: answered {len(body)} bytes that do not begin as a JPEG",
+                CameraUnreachableCause.NOT_A_PICTURE,
             )
         return body
 
 
 __all__ = [
+    "CHUNK_BYTES",
+    "DEFAULT_MAX_SNAPSHOT_BYTES",
     "DEFAULT_SNAPSHOT_TIMEOUT",
     "JPEG_MAGIC",
-    "MAX_SNAPSHOT_BYTES",
     "CameraRefusedUs",
     "CameraUnreachable",
     "SnapshotCamera",

@@ -19,12 +19,14 @@ import json
 import re
 import urllib.error
 import urllib.request
+from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from cameras import FakeCamera, camera_server, jpeg
-from conftest import camera_config, capture_config_for, capture_for
+from conftest import MovingUtc, camera_config, capture_config_for, capture_for
 from foreign_lane import ForeignLane
 from foreign_lane import make_server as foreign_server
 from gate_agent.capture_service import (
@@ -42,7 +44,9 @@ from gate_agent.config import (
     RETENTION_DAYS_BOUNDS,
 )
 from gate_agent.contract import (
+    CAMERA_CODES,
     CAPTURE_CAVEATS,
+    CAPTURE_MINUS_LANE_EVENT_NOTE,
     CONTRACT_VERSION,
     CaptureCode,
     CaptureEntry,
@@ -66,7 +70,9 @@ from test_monitor_contract import CAPTURE_PAYLOADS  # noqa: E402
 #: A key whose value is a NUMBER OF BYTES or A COUNT OF STORED RECORDS. Every
 #: one of them must be `null` in the document: this round publishes no size, no
 #: rate and no capacity anywhere, because nothing here has measured one.
-SIZE_KEY = re.compile(r"(^|_)bytes($|_)|^record_count$|^records_last_24h$|^purged_by_")
+SIZE_KEY = re.compile(
+    r"(^|_)bytes($|_)|^record_count$|^records_last_24h$|^purged_by_|^lane_events_missed$"
+)
 
 
 @pytest.fixture
@@ -387,7 +393,7 @@ def test_the_records_route_carries_sidecar_fields_and_never_bytes_inline(running
     for record in page["records"]:
         assert set(record) == {
             "cursor", "id", "captured_at", "camera_id", "reason", "lane_event_cursor",
-            "lane_event_at", "trigger_to_capture_ms", "bytes", "image_url",
+            "lane_event_at", "capture_minus_lane_event_ms", "bytes", "image_url",
         }
         assert record["reason"] in {reason.value for reason in CaptureReason}
         assert record["image_url"].startswith(IMAGES_PREFIX)
@@ -483,5 +489,197 @@ def test_a_records_sidecar_holds_the_seven_fields_and_nothing_about_a_vehicle(ru
         body = json.loads(path.read_text(encoding="utf-8"))
         assert set(body) == {
             "captured_at", "camera_id", "reason", "lane_event_cursor", "lane_event_at",
-            "trigger_to_capture_ms", "bytes",
+            "capture_minus_lane_event_ms", "bytes",
         }
+
+
+# ---------------------------------------------------------------------------
+# W7 — COMPLETE PER (CODE, CAMERA), ON EVERY RESPONSE
+# ---------------------------------------------------------------------------
+
+
+def test_a_camera_that_has_never_answered_is_on_every_health_response(tmp_path):
+    """**The camera that has not answered is the camera worth asking about.**
+
+    Completeness per CODE alone is not enough: as soon as ONE camera reports, a
+    camera that has not is simply absent from the payload -- and this contract's
+    own rule, quoted in its own refusal, is that a code that is absent reads to a
+    consumer exactly like a code that is fine. At a site with four cameras
+    Gokhan's *"camera disconnected is a malfunction"* then fails for the one
+    that is worst broken.
+    """
+    directory = tmp_path / "store"
+    directory.mkdir()
+    camera = FakeCamera(body=jpeg(b"one"))
+    with serving(camera_server(camera)) as base:
+        config = capture_config_for(
+            directory=directory,
+            cameras=[
+                camera_config("front", f"{base}/snapshot", tmp_path),
+                # Declared and never reachable: nothing in this test points it
+                # at a socket, so it never produces a state of its own.
+                camera_config("rear", "http://127.0.0.1:1/snapshot", tmp_path),
+            ],
+        )
+        process = capture_for(config)
+        process.start()
+        # ONLY `front` is captured, which is the condition that used to make
+        # `rear` disappear.
+        process.capture("front", CaptureReason.INTERVAL)
+
+    seen = {
+        (entry["code"], entry["subject"]): entry["state"]
+        for entry in process.health().to_dict()["codes"]
+    }
+    for code in CAMERA_CODES:
+        assert (code.value, "rear") in seen, f"`rear` is absent under {code.value}"
+        assert seen[(code.value, "rear")] == "unknown"
+    # The control: `front` is there too, and it is NOT `unknown` -- so the
+    # assertions above are not a payload of `unknown` agreeing with itself.
+    assert seen[(CaptureCode.CAMERA_UNREACHABLE.value, "front")] == "ok"
+
+
+def test_a_health_payload_missing_a_camera_is_refused_at_construction():
+    """The control for the rule above, and it fires where the payload is built."""
+    store = StoreReads(
+        bytes_used=0, record_count=0, oldest_at=None, newest_at=None,
+        mean_bytes_per_record=None, records_last_24h=0, bytes_last_24h=0,
+        projected_bytes_per_day=None,
+    )
+    complete = tuple(
+        CaptureEntry(code=code.value, subject=subject, state=HealthState.UNKNOWN.value)
+        for code, subject in (
+            *((code, camera) for code in CAMERA_CODES for camera in ("front", "rear")),
+            *((code, "store") for code in CaptureCode if code not in CAMERA_CODES),
+        )
+    )
+    CaptureHealth(codes=complete, store=store, camera_ids=("front", "rear"))
+    with pytest.raises(ValueError, match="missing"):
+        CaptureHealth(
+            codes=tuple(entry for entry in complete if entry.subject != "rear"),
+            store=store,
+            camera_ids=("front", "rear"),
+        )
+    # And the control on the control: the same payload with `rear` not declared
+    # is accepted, so the refusal is about completeness and not about the shape.
+    CaptureHealth(
+        codes=tuple(entry for entry in complete if entry.subject != "rear"),
+        store=store,
+        camera_ids=("front",),
+    )
+
+
+# ---------------------------------------------------------------------------
+# W8 — THE TWO CLOCKS, SAID
+# ---------------------------------------------------------------------------
+
+
+def test_the_two_clocks_note_has_exactly_one_copy_and_the_document_carries_it():
+    """**THE SINGLE COPY IS `contract.CAPTURE_MINUS_LANE_EVENT_NOTE`.**
+
+    The monitor half of this document already has "`lane_gone_quiet`, and the
+    two clocks it spans", one page up, and it says the missing sentence: a
+    comparison across two machines' clocks, stated rather than corrected,
+    because correcting it means a second measurement nobody has made. This is
+    that precedent applied to this field -- and it is held to one copy the way
+    the retention default is: editing the document goes red, and so does editing
+    the constant.
+    """
+    text = CONTRACT_DOC.read_text(encoding="utf-8")
+    published = " ".join(
+        line.lstrip("> ").strip()
+        for line in text.splitlines()
+        if line.startswith(">")
+    )
+    assert CAPTURE_MINUS_LANE_EVENT_NOTE in published, (
+        "docs/CONTRACT.md no longer quotes contract.CAPTURE_MINUS_LANE_EVENT_NOTE verbatim"
+    )
+    # The control: the block quote this was found in is not the whole document,
+    # so a match here is a match against that paragraph.
+    assert len(published) < len(text)
+
+
+def test_a_negative_capture_minus_lane_event_ms_is_reachable_and_is_served(tmp_path):
+    """The sentence above describes something that HAPPENS, and here it is.
+
+    A claim about an unreachable case is design documentation. This one is not:
+    a lane whose clock is ahead of this box's produces a negative value on every
+    record it triggers, and the records route serves it.
+    """
+    directory = tmp_path / "store"
+    directory.mkdir()
+    lane = ForeignLane()
+    lane.window = 64
+    camera = FakeCamera(body=jpeg(b"one"))
+    with serving(camera_server(camera)) as camera_url, serving(foreign_server(lane)) as lane_url:
+        config = capture_config_for(
+            directory=directory,
+            cameras=[camera_config("front", f"{camera_url}/snapshot", tmp_path)],
+            lane=lane_url,
+        )
+        now = MovingUtc()
+        process = capture_for(config, now=now)
+        process.start()
+        # The LANE's clock is ninety seconds ahead of this process's.
+        lane.record("frames_captured", (now() + timedelta(seconds=90)).isoformat())
+        process.poll(force=True)
+
+    served = [
+        one
+        for one in process.records(0).to_dict()["records"]
+        if one["reason"] != CaptureReason.INTERVAL.value
+    ]
+    assert served, "no lane-triggered record was stored, so nothing below is measured"
+    assert served[0]["capture_minus_lane_event_ms"] == -90_000
+    # The control: an interval record in the same store carries none at all.
+    assert any(
+        one["capture_minus_lane_event_ms"] is None
+        for one in process.records(0).to_dict()["records"]
+    )
+
+
+def test_the_records_route_reports_and_purges_what_it_cannot_publish(tmp_path):
+    """**`GET /v1/capture/records` does not die on what it finds on a disk.**
+
+    Every record is built through the contract before it is written, so one this
+    route cannot publish is one this process did not write -- a sidecar edited by
+    hand, or left by a build with a different idea of a record. It is reported as
+    `store_record_incomplete` and PURGED where it is found. A route that raised
+    would answer nothing, for every consumer of that store, until the record
+    aged out: up to `retention_days`, with the health route saying `200`
+    throughout.
+
+    The bad record is planted straight into the index here, past the two checks
+    that exist to keep it out, because the property under test is what this
+    route does with one it nevertheless has.
+    """
+    directory = tmp_path / "store"
+    directory.mkdir()
+    camera = FakeCamera(body=jpeg(b"one"))
+    with serving(camera_server(camera)) as base:
+        config = capture_config_for(
+            directory=directory,
+            cameras=[camera_config("front", f"{base}/snapshot", tmp_path)],
+        )
+        process = capture_for(config)
+        process.start()
+        good = process.capture("front", CaptureReason.INTERVAL)
+
+    store = process.store
+    bad = replace(good, id=f"{good.id}x", reason="lane_arrival", lane_event_cursor=None)
+    store._records.append((store.cursor() + 1, bad))
+
+    page = process.records(0)
+    assert [one["id"] for one in page.to_dict()["records"]] == [good.id]
+    assert states(process)[(CaptureCode.STORE_RECORD_INCOMPLETE.value, "store")] == "active"
+    assert bad.id not in [record.id for _cursor, record in store.records()]
+    # The control: the good record is still served and still on the disk, so
+    # this is a purge of one record rather than of the store.
+    assert store.reads()["record_count"] == 1
+
+
+def states(process):
+    return {
+        (entry["code"], entry["subject"]): entry["state"]
+        for entry in process.health().to_dict()["codes"]
+    }

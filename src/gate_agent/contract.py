@@ -717,14 +717,30 @@ class CaptureCode(StrEnum):
     #: A write was refused because one purge could not get the store under
     #: `[capture] max_bytes`. The store is not eating itself silently.
     STORE_OVER_BUDGET = "store_over_budget"
-    #: An image with no sidecar, or a sidecar with no image, was found when the
-    #: index was rebuilt. Reported and then purged, never silently kept.
+    #: An image with no sidecar, a sidecar with no image, or a sidecar the
+    #: contract will not accept, was found when the index was rebuilt. Reported
+    #: and then purged, never silently kept.
     STORE_RECORD_INCOMPLETE = "store_record_incomplete"
+    #: The newest record this store holds is stamped AFTER the clock that reads
+    #: it. Measured on every purge. While it is active the age rule cannot reach
+    #: those records and the size cap is the only bound on them.
+    CLOCK_STEPPED_BACK = "clock_stepped_back"
     #: The lane that triggers captures did not answer. `unknown` where no lane
     #: is declared: standalone is a MODE, and nobody measured.
     LANE_UNREACHABLE = "lane_unreachable"
     #: The lane ANSWERED, and the answer was no, with its status on the entry.
     LANE_REFUSED_US = "lane_refused_us"
+    #: The lane served a page this build cannot read: a timestamp with no UTC
+    #: offset, or a cursor that went backwards without `reset`. The page is
+    #: refused WHOLE -- the cursor is not adopted and nothing is photographed
+    #: under a lane reason. The same answer, for the same reason, as the
+    #: monitor's `target_contract_unsupported`.
+    LANE_CONTRACT_UNSUPPORTED = "lane_contract_unsupported"
+    #: The lane reported `reset`: it restarted, or it evicted further than this
+    #: process had fallen behind. Whatever was in that gap was never
+    #: photographed and cannot be. Recovers on the next page that is not a
+    #: reset; `lane_events_missed` counts what was lost, since start.
+    LANE_BACKLOG_LOST = "lane_backlog_lost"
 
 
 #: WHERE each capture code gets its answer in this build. One copy, and the
@@ -737,8 +753,11 @@ CAPTURE_SOURCES: dict[CaptureCode, Source] = {
     CaptureCode.STORE_UNWRITABLE: Source.MEASURED,
     CaptureCode.STORE_OVER_BUDGET: Source.MEASURED,
     CaptureCode.STORE_RECORD_INCOMPLETE: Source.MEASURED,
+    CaptureCode.CLOCK_STEPPED_BACK: Source.MEASURED,
     CaptureCode.LANE_UNREACHABLE: Source.MEASURED,
     CaptureCode.LANE_REFUSED_US: Source.MEASURED,
+    CaptureCode.LANE_CONTRACT_UNSUPPORTED: Source.MEASURED,
+    CaptureCode.LANE_BACKLOG_LOST: Source.MEASURED,
 }
 
 #: Whether a code may wake a human. Travels on the wire with the code, which is
@@ -759,7 +778,69 @@ CAPTURE_CAVEATS: dict[CaptureCode, str] = {
         "byte-identical while working perfectly. This measure is a cheap true negative, not a "
         "test of whether a camera is seeing."
     ),
+    CaptureCode.CLOCK_STEPPED_BACK: (
+        "WHILE THIS IS ACTIVE THE AGE RULE IS SUSPENDED for the records ahead of the clock: a "
+        "record stamped later than now is not older than any window, so the retention rule "
+        "cannot reach it and the size cap is the only bound on it. Nothing here corrects a "
+        "clock and nothing here measures how far out it is -- this says that the store holds a "
+        "record from the future, which is the fact a person has to act on."
+    ),
 }
+
+#: WHICH KIND OF THING each code is about, and therefore what its `subject` is.
+#: ONE copy: the process files its states under it and `CaptureHealth` refuses a
+#: payload that is not complete against it. A code whose subject kind lived in
+#: two places would be a code that is complete on one side and absent on the
+#: other, and an absent code reads to a consumer exactly like a code that is
+#: fine.
+CAMERA_CODES: tuple[CaptureCode, ...] = (
+    CaptureCode.CAMERA_UNREACHABLE,
+    CaptureCode.CAMERA_REFUSED_US,
+    CaptureCode.CAMERA_FEED_FROZEN,
+)
+
+#: The codes about the STORE. One subject: this process has one store.
+STORE_CODES: tuple[CaptureCode, ...] = (
+    CaptureCode.STORE_UNWRITABLE,
+    CaptureCode.STORE_OVER_BUDGET,
+    CaptureCode.STORE_RECORD_INCOMPLETE,
+    CaptureCode.CLOCK_STEPPED_BACK,
+)
+
+#: The codes about the LANE that triggers captures. One subject, and at a
+#: standalone site it is this process's own id: there is no lane to name.
+LANE_CODES: tuple[CaptureCode, ...] = (
+    CaptureCode.LANE_UNREACHABLE,
+    CaptureCode.LANE_REFUSED_US,
+    CaptureCode.LANE_CONTRACT_UNSUPPORTED,
+    CaptureCode.LANE_BACKLOG_LOST,
+)
+
+
+class CameraUnreachableCause(StrEnum):
+    """WHY nothing came back. CLOSED, and on the wire beside the code.
+
+    `camera_unreachable` folds four different repairs together -- a camera that
+    is off, a camera that is answering too slowly to be read inside its own
+    timeout, a camera whose own process failed, and a camera answering something
+    that is not a picture. They are one code because to this process they are
+    one fact, "I asked and I do not have an image"; they are told apart here
+    because they are not one repair.
+    """
+
+    #: The deadline passed. The body was still arriving, or was not arriving at
+    #: all: this process stopped reading rather than being held by one camera.
+    TIMEOUT = "timeout"
+    #: The socket failed, or nothing answered on it.
+    NETWORK = "network"
+    #: The camera's own process answered that it could not take the picture -- a
+    #: 5xx. The repair is at the camera either way, which is why it is here and
+    #: not under `camera_refused_us`.
+    SERVER_ERROR = "server_error"
+    #: Something came back and it was not a JPEG, or it was longer than
+    #: `[capture] max_snapshot_bytes`. A login page served as `image/jpeg` is
+    #: this one.
+    NOT_A_PICTURE = "not_a_picture"
 
 
 def _capture_never_alarm(code: CaptureCode) -> bool:
@@ -814,6 +895,11 @@ class CaptureDescription:
     interval_seconds: float
     retention_days: int
     max_bytes: int
+    #: The most this process reads from one camera before it stops reading. On
+    #: this route beside `max_bytes` because the relationship between the two is
+    #: what a site has to get right, and startup refuses it unless it is BELOW
+    #: `max_bytes`.
+    max_snapshot_bytes: int
     cameras: tuple[CameraDescription, ...]
     #: Whether a lane is declared. `false` is STANDALONE, and standalone is a
     #: mode: a garage with a camera and no gate is a customer of this process,
@@ -848,6 +934,7 @@ class CaptureDescription:
             "interval_seconds": self.interval_seconds,
             "retention_days": self.retention_days,
             "max_bytes": self.max_bytes,
+            "max_snapshot_bytes": self.max_snapshot_bytes,
             "lane_declared": self.lane_declared,
             "lane_url": self.lane_url,
             "cameras": [camera.to_dict() for camera in self.cameras],
@@ -871,6 +958,12 @@ class CaptureEntry:
     #: The HTTP status the camera or the lane answered with, when the code is
     #: about an ANSWER. `null` everywhere else.
     status: int | None = None
+    #: WHY nothing came back, on `camera_unreachable` and nowhere else. `null`
+    #: on every other code, and `null` on this one until it has been measured:
+    #: one closed set, on the wire, so a monitor reading this surface can tell a
+    #: camera that is off from one that cannot be read inside its own timeout
+    #: without holding a second list of its own.
+    cause: str | None = None
 
     def __post_init__(self) -> None:
         if self.code not in tuple(code.value for code in CaptureCode):
@@ -878,6 +971,13 @@ class CaptureEntry:
         _text(self.subject, "subject")
         if self.state not in tuple(state.value for state in HealthState):
             raise ValueError(f"state must be one of {tuple(HealthState)}, got {self.state!r}")
+        if self.cause is not None:
+            if self.code != CaptureCode.CAMERA_UNREACHABLE.value:
+                raise ValueError(f"{self.code} does not carry a cause; got {self.cause!r}")
+            if self.cause not in tuple(cause.value for cause in CameraUnreachableCause):
+                raise ValueError(
+                    f"cause must be one of {tuple(CameraUnreachableCause)}, got {self.cause!r}"
+                )
         if self.status is not None and (
             isinstance(self.status, bool) or not isinstance(self.status, int)
             or not 100 <= self.status <= 599
@@ -911,6 +1011,7 @@ class CaptureEntry:
             "never_alarm": _capture_never_alarm(code),
             "caveat": CAPTURE_CAVEATS.get(code),
             "status": self.status,
+            "cause": self.cause,
         }
 
 
@@ -941,6 +1042,11 @@ class StoreReads:
     #: that is too small looks exactly like a store nothing is happening at.
     purged_by_age: int = 0
     purged_by_size: int = 0
+    #: How many temporary files an index rebuild has removed since this process
+    #: started. A temporary file found at a rebuild is BY DEFINITION a write
+    #: that died -- a power cut in a gate housing -- and it is counted rather
+    #: than swept, because the number is how often that is happening at a site.
+    purged_by_crash: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -957,6 +1063,14 @@ class CaptureHealth:
 
     codes: tuple[CaptureEntry, ...] = field(default_factory=tuple)
     store: StoreReads | None = None
+    #: Every camera this process was DECLARED with. Not published -- it is on
+    #: `GET /v1/capture`, where a reader looks for what this process is set to
+    #: do -- but held here because completeness is per `(code, subject)` and a
+    #: payload cannot be checked complete against a list it does not have.
+    camera_ids: tuple[str, ...] = field(default_factory=tuple)
+    #: How many lane events this process is known not to have followed, since it
+    #: started. `0` at a standalone site: there is no lane to miss events from.
+    lane_events_missed: int = 0
 
     def __post_init__(self) -> None:
         seen = [(entry.code, entry.subject) for entry in self.codes]
@@ -969,6 +1083,23 @@ class CaptureHealth:
                 "one that is absent reads exactly like one that is fine. A code with no "
                 "subject yet ships once, `unknown`, under this process's own id."
             )
+        # AND COMPLETE PER (CODE, CAMERA). A camera that has never produced a
+        # state is exactly the camera worth asking about -- the one that has not
+        # answered since the process started -- and under a per-CODE rule alone
+        # it disappears from this payload the moment any other camera reports.
+        absent = sorted(
+            (code.value, camera_id)
+            for code in CAMERA_CODES
+            for camera_id in self.camera_ids
+            if (code.value, camera_id) not in set(seen)
+        )
+        if absent:
+            raise ValueError(
+                f"health payload is missing {absent}. Every declared camera ships under every "
+                "camera code on every response, `unknown` until its first attempt: a camera "
+                "that is absent reads to a consumer exactly like a camera that is fine, and "
+                "the camera that has never answered is the one worth asking about."
+            )
         if self.store is None:
             raise ValueError("a capture health payload without the store's reads is half of one")
 
@@ -977,7 +1108,28 @@ class CaptureHealth:
             "contract_version": CONTRACT_VERSION,
             "codes": [entry.to_dict() for entry in self.codes],
             "store": self.store.to_dict(),
+            "lane_events_missed": self.lane_events_missed,
         }
+
+
+#: WHAT `capture_minus_lane_event_ms` SPANS. **The one copy.** Published into
+#: `docs/CONTRACT.md` from here and held to it by a value test, so the sentence
+#: a reader acts on and the sentence this package believes cannot come apart.
+#:
+#: It is the monitor half's "`lane_gone_quiet`, and the two clocks it spans"
+#: applied to this field, for the same reason and with the same honesty: naming
+#: a subtraction across two machines as a delay is a number nobody measured
+#: wearing the label of one that was.
+CAPTURE_MINUS_LANE_EVENT_NOTE = (
+    "This is a SUBTRACTION ACROSS TWO CLOCKS: `captured_at` is read from this process's clock "
+    "and `lane_event_at` from the lane's. It is not a measured delay. A NEGATIVE VALUE IS "
+    "REACHABLE and is served -- it means the two clocks disagree by at least that much, with "
+    "the lane's ahead. Nothing here measures the offset between them, so nothing here can "
+    "separate the offset from the time this process took to see the event, and correcting it "
+    "would mean a second measurement nobody has made. Where the two clocks are the same box, "
+    "or are disciplined to the same source, it is the cost of this process being a CONSUMER of "
+    "the lane's contract rather than something the lane calls."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1003,13 +1155,12 @@ class RecordRef:
     #: the car was lives at the lane's platform, under this cursor.
     lane_event_cursor: int | None
     lane_event_at: str | None
-    #: `captured_at` minus `lane_event_at`, in milliseconds. THE COST OF THE
-    #: SEAT, measured on every record rather than described once: this process
-    #: learns that a car arrived by POLLING the lane's read contract, so the
-    #: picture is taken when the event was SEEN and not when the frames were
-    #: grabbed. `null` on an interval capture, which has no trigger to be late
-    #: for.
-    trigger_to_capture_ms: int | None
+    #: `captured_at` minus `lane_event_at`, in milliseconds. NAMED FOR THE
+    #: SUBTRACTION IT IS, and what it spans is stated once, in
+    #: `CAPTURE_MINUS_LANE_EVENT_NOTE`, published into `docs/CONTRACT.md` from
+    #: that one copy. `null` on an interval capture, which has no lane event to
+    #: subtract.
+    capture_minus_lane_event_ms: int | None
     bytes: int
     image_url: str
 
@@ -1030,10 +1181,10 @@ class RecordRef:
                 f"reason={self.reason!r} and the lane event reference disagree about whether a "
                 "lane triggered this capture"
             )
-        if (self.trigger_to_capture_ms is None) != (self.lane_event_at is None):
+        if (self.capture_minus_lane_event_ms is None) != (self.lane_event_at is None):
             raise ValueError(
-                "trigger_to_capture_ms is present exactly when a lane event triggered the "
-                "capture: it is that event's delay, and there is no delay without a trigger"
+                "capture_minus_lane_event_ms is present exactly when a lane event triggered "
+                "the capture: it is a subtraction, and there is nothing to subtract without one"
             )
 
     def to_dict(self) -> dict:

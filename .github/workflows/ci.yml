@@ -79,6 +79,17 @@ jobs:
         # figure in the document, `camera_feed_frozen` on identical bytes only, a
         # dead camera never reading `ok`, a credential on the images route, an id
         # never becoming a path, and a camera's name surviving to the message.
+        # AND THE ROUND-4 CUT, one break per blocker: a record filed without
+        # being built through the contract, a naive lane timestamp followed
+        # rather than refusing the page, the records route raising on what it
+        # finds, a purge run for a capture that can never fit, an unbounded size
+        # purge, crash leftovers surviving a rebuild, a live write leaving its
+        # temporary files, the ends of a list published as oldest and newest, a
+        # size purge taking the first written, a stepped clock going unsaid, a
+        # lost backlog raising no code and counting nothing, a snapshot read with
+        # no deadline over it, a camera that never answered absent from the
+        # health payload, the two-clocks note coming apart from its one copy, a
+        # negative subtraction hidden, and a backwards cursor adopted.
         # Each break fails in the REASSURING direction, because that is the
         # direction this kind of software fails in when nobody is looking.
         run: python scripts/monitor_fail_control.py

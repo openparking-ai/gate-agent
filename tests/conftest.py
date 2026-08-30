@@ -129,7 +129,14 @@ def utc():
     return FakeUtc()
 
 
-def camera_config(camera_id: str, url: str, tmp_path, username="operator", password="s3cret"):
+def camera_config(
+    camera_id: str,
+    url: str,
+    tmp_path,
+    username="operator",
+    password="s3cret",
+    max_snapshot_bytes: int = 1 << 16,
+):
     """One `CameraConfig`, with its credential written to a file first.
 
     A file, always, even here: there is no path in this package that takes a
@@ -146,6 +153,11 @@ def camera_config(camera_id: str, url: str, tmp_path, username="operator", passw
         username=username,
         password=password,
         timeout_seconds=5.0,
+        # Below the 1 MiB cap `capture_config_for` gives a test store, because
+        # the product refuses a configuration where they are the other way
+        # round -- a builder that shipped the 32 MiB default here would build
+        # configurations the product would not accept.
+        max_snapshot_bytes=max_snapshot_bytes,
     )
 
 
@@ -155,6 +167,7 @@ def capture_config_for(
     cameras,
     lane: str | None = None,
     max_bytes: int = 1 << 20,
+    max_snapshot_bytes: int = 1 << 16,
     retention_days: int = 30,
     interval_seconds: float = 60.0,
     poll_seconds: float = 30.0,
@@ -168,6 +181,7 @@ def capture_config_for(
         site_id="site-1",
         directory=directory,
         max_bytes=max_bytes,
+        max_snapshot_bytes=max_snapshot_bytes,
         cameras=tuple(cameras),
         lane=(
             Target(name="lane", kind=TargetKind.LANE, url=lane, poll_seconds=poll_seconds)

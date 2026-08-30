@@ -12,13 +12,15 @@ could do neither pass everything here.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
-from cameras import FakeCamera, camera_server, jpeg
+from cameras import FakeCamera, camera_server, drip_camera_server, jpeg
 from conftest import camera_config, capture_config_for, capture_for
 from gate_agent.camera import CameraRefusedUs, CameraUnreachable, SnapshotCamera
 from gate_agent.config import CaptureConfig, ConfigError
-from gate_agent.contract import CaptureCode
+from gate_agent.contract import CameraUnreachableCause, CaptureCode
 from serving import serving
 
 
@@ -147,6 +149,10 @@ def test_a_credential_in_a_snapshot_url_is_refused_at_startup(tmp_path):
             "site_id": "site-1",
             "directory": str(tmp_path),
             "max_bytes": 1 << 20,
+            # Below the cap, so this configuration is refused for the ONE
+            # reason this test is about. A fixture refused for two reasons
+            # measures whichever refusal happens to run first.
+            "max_snapshot_bytes": 1 << 16,
         },
         "cameras": {
             "front": {
@@ -262,3 +268,149 @@ def test_a_camera_that_stopped_answering_is_not_frozen_it_is_unmeasured(tmp_path
         camera.status = None
         process.poll(force=True)
         assert states(process)[frozen] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# W6 — A SNAPSHOT READ HAS A DEADLINE, NOT A SOCKET TIMEOUT
+# ---------------------------------------------------------------------------
+
+
+def test_a_camera_that_answers_for_ever_is_abandoned_at_its_own_timeout(tmp_path):
+    """`timeout` on `urllib` bounds ONE socket operation, not the read.
+
+    A camera that answers, declares a length and then sends bytes slowly never
+    trips a per-operation timeout, because no single read waits long enough.
+    This process runs one poller thread, so such a camera held every other
+    camera's capture and the lane's event poll behind it -- for as long as it
+    chose, with nothing going `active`.
+    """
+    import threading
+    import time
+
+    timeout, grace = 0.5, 0.5
+    answer = {}
+
+    # The camera's whole answer takes 200 * 0.02 = FOUR SECONDS to arrive,
+    # eight times the timeout, while no single read waits more than 0.02s.
+    with serving(drip_camera_server(drip=0.02, body=200)) as base:
+        camera = SnapshotCamera("slow", f"{base}/snapshot", timeout=timeout)
+
+        def read_it():
+            started = time.monotonic()
+            try:
+                answer["returned"] = len(camera.snapshot())
+            except CameraUnreachable as exc:
+                answer["cause"] = exc.cause
+            answer["took"] = time.monotonic() - started
+
+        # IN A THREAD, with a join. The failing behaviour here is a read that
+        # NEVER RETURNS -- at this drip rate it runs for months -- so a test
+        # that simply called `snapshot()` would not fail, it would hang, and a
+        # control that hangs is not a control.
+        reader = threading.Thread(target=read_it, daemon=True)
+        reader.start()
+        reader.join(timeout + grace)
+        alive = reader.is_alive()
+
+    assert not alive, (
+        f"snapshot() had not returned {timeout + grace}s into a read against a "
+        f"{timeout}s timeout"
+    )
+    assert "returned" not in answer, (
+        "the whole four-second answer was read: this is a socket timeout, not a deadline"
+    )
+    assert answer.get("cause") is CameraUnreachableCause.TIMEOUT
+    assert answer["took"] < timeout + grace
+    # The control: the same client against a camera that ANSWERS returns a
+    # picture, so the abandonment above is about the deadline and not about a
+    # client that can no longer read anything.
+    healthy = FakeCamera(body=jpeg(b"one"), username=None)
+    with serving(camera_server(healthy)) as base:
+        assert SnapshotCamera("ok", f"{base}/snapshot", timeout=0.5).snapshot() == healthy.body
+
+
+def test_one_slow_camera_does_not_stop_the_others_or_go_unreported(tmp_path):
+    """The consequence, at the process: the poller comes back, and it says so."""
+    healthy = FakeCamera(body=jpeg(b"one"), username=None)
+    with serving(drip_camera_server(drip=0.02, body=200)) as slow_base, serving(
+        camera_server(healthy)
+    ) as good_base:
+        directory = tmp_path / "store"
+        directory.mkdir()
+        config = capture_config_for(
+            directory=directory,
+            cameras=[
+                camera_config("slow", f"{slow_base}/snapshot", tmp_path),
+                camera_config("works", f"{good_base}/snapshot", tmp_path, username=None),
+            ],
+        )
+        config = replace(
+            config,
+            cameras=tuple(replace(one, timeout_seconds=0.5) for one in config.cameras),
+        )
+        process = capture_for(config)
+        process.start()
+        process.poll(force=True)
+
+    seen = states(process)
+    assert seen[(CaptureCode.CAMERA_UNREACHABLE.value, "slow")] == "active"
+    assert seen[(CaptureCode.CAMERA_UNREACHABLE.value, "works")] == "ok"
+    assert process.store.reads()["record_count"] == 1, "the healthy camera stopped recording"
+    causes = {
+        (entry["code"], entry["subject"]): entry["cause"]
+        for entry in process.health().to_dict()["codes"]
+    }
+    assert causes[(CaptureCode.CAMERA_UNREACHABLE.value, "slow")] == "timeout"
+    assert causes[(CaptureCode.CAMERA_UNREACHABLE.value, "works")] is None
+
+
+# ---------------------------------------------------------------------------
+# W2 — THE CEILING ON A READ IS A SETTING, AND IT IS BOUNDED BY THE CAP
+# ---------------------------------------------------------------------------
+
+
+def test_a_snapshot_ceiling_that_is_not_below_max_bytes_is_refused_at_startup(tmp_path):
+    """A camera may not decide how much of a site's store survives.
+
+    The store evicts to make room for what arrives, and the length of what
+    arrives is the camera's to choose. A ceiling at or above the whole cap is
+    therefore a camera with a lever on the retention rule.
+    """
+    auth = tmp_path / "camera.auth"
+    auth.write_text("operator:s3cret\n", encoding="utf-8")
+    raw = {
+        "capture": {
+            "id": "capture-1",
+            "site_id": "site-1",
+            "directory": str(tmp_path),
+            "max_bytes": 1 << 20,
+            "max_snapshot_bytes": 1 << 20,
+        },
+        "cameras": {
+            "front": {"snapshot_url": "http://example.com/snap", "auth_file": str(auth)}
+        },
+    }
+    with pytest.raises(ConfigError, match="must be below the cap on the WHOLE"):
+        CaptureConfig.from_dict(raw)
+    raw["capture"]["max_snapshot_bytes"] = (1 << 20) + 1
+    with pytest.raises(ConfigError, match="must be below the cap on the WHOLE"):
+        CaptureConfig.from_dict(raw)
+
+    # The control: one byte below it is accepted, and reaches the cameras.
+    raw["capture"]["max_snapshot_bytes"] = (1 << 20) - 1
+    parsed = CaptureConfig.from_dict(raw)
+    assert parsed.max_snapshot_bytes == (1 << 20) - 1
+    assert parsed.cameras[0].max_snapshot_bytes == (1 << 20) - 1
+
+
+def test_the_ceiling_is_what_the_camera_read_stops_at(tmp_path):
+    """It is a read bound, and it is the per-site one rather than a constant."""
+    camera = FakeCamera(body=jpeg(b"x" * 400), username=None)
+    with serving(camera_server(camera)) as base:
+        small = SnapshotCamera("front", f"{base}/snapshot", max_snapshot_bytes=64)
+        with pytest.raises(CameraUnreachable) as refused:
+            small.snapshot()
+        assert refused.value.cause is CameraUnreachableCause.NOT_A_PICTURE
+        # The control: the same camera under a ceiling above it IS read.
+        big = SnapshotCamera("front", f"{base}/snapshot", max_snapshot_bytes=4096)
+        assert big.snapshot() == camera.body
