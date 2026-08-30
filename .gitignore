@@ -10,3 +10,4 @@ config/capture.toml
 .DS_Store
 config/captures/
 config/agent.toml
+speaker.wav
