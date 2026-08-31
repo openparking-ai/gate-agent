@@ -77,6 +77,8 @@ from .contract import (
 )
 from .display import DisplayUnavailable, frame_for
 from .lines import DISPLAY_TEXT, audio_name
+from .relay import RelayRefusedUs, RelayUnreachable
+from .relay import build as relay_build
 from .tickets import TicketRecord as _TicketRecord
 from .tickets import TicketStore, confirmed, mint, vended, voided
 from .ua import (
@@ -261,9 +263,14 @@ class Agent:
         #: declare none offers no ticket.
         self._displays_at: dict[str, tuple] = {}
         for intercom in config.intercoms:
-            if intercom.lane and intercom.display:
-                self._displays_at.setdefault(intercom.lane, ())
-                self._displays_at[intercom.lane] += (config.displays[intercom.display],)
+            if not intercom.display:
+                continue
+            # Keyed on the LANE where there is one and on the DOOR where there
+            # is not. A standalone site has no lane, and a ticket has to say
+            # where it was issued: the door is the place.
+            where = intercom.lane or intercom.sip_uri
+            self._displays_at.setdefault(where, ())
+            self._displays_at[where] += (config.displays[intercom.display],)
         #: One pending ticket per lane, IN MEMORY ONLY -- see `Pending`.
         self._pending: dict[str, Pending] = {}
         #: Where this agent follows each lane's events from, and when it is next
@@ -283,6 +290,13 @@ class Agent:
         #: a person who is told a ticket was just confirmed and what came of it,
         #: rather than a person who has to ask.
         self._help_lines: dict[str, tuple] = {}
+        #: The relays this agent can pulse, by INTERCOM. Standalone only: an
+        #: intercom with a lane has none, and the configuration refuses one.
+        self._relays = {
+            intercom.sip_uri: relay_build(intercom.relay)
+            for intercom in config.intercoms
+            if intercom.relay is not None
+        }
         self._store = (
             TicketStore(config.tickets.directory, config.tickets.retention_days)
             if config.tickets is not None
@@ -678,13 +692,23 @@ class Agent:
             return
         self._issue(lane, case, reading.decision_at)
 
-    def _issue(self, lane: str, case: AgentCase, decision_at: str) -> None:
+    def _issue(
+        self, lane: str, case: AgentCase, decision_at: str, show: bool = True
+    ) -> None:
         """Mint, record, show. In that order, and the order is the guarantee.
 
         The RECORD IS WRITTEN AND FLUSHED BEFORE THE SCREEN, so a crash between
         them leaves a ticket nobody has seen rather than a ticket on a screen
         that this site has no record of. The second is the one that costs a
         customer: they photograph a code and the exit has never heard of it.
+
+        **`show=False` mints WITHOUT a screen**, and it is not a convenience.
+        Standalone with a relay and no display still needs the record, because
+        the record is the SITE'S and the frame is the DRIVER'S -- and it is the
+        record, not the frame, that has to exist before a barrier moves. A
+        version of this that minted only where a screen existed pulsed a relay
+        with nothing written down, which is the invariant broken; a test that
+        records every call in order is what found it.
         """
         tickets = self.config.tickets
         ticket, payload = mint(
@@ -707,7 +731,7 @@ class Agent:
             expires=self._clock() + tickets.confirm_window_s,
             displays=self._displays_at.get(lane, ()),
         )
-        if not self._show(pending):
+        if show and not self._show(pending):
             self._store.write(
                 voided(record, self._now(), "display_unavailable")
             )
@@ -1299,6 +1323,8 @@ class Agent:
         leaving an operator to discover it.
         """
         self._say(session, UaLeg.DRIVER, f"authorisation.{value.value}")
+        if session.intercom.lane is None:
+            return self._standalone_opens(session, value)
         lane = session.intercom.lane
         pending = self._pending.pop(lane, None) if lane else None
         if lane is not None and pending is None and self._can_mint_for(lane):
@@ -1315,6 +1341,93 @@ class Agent:
         session.state = State.CLOSING
         session.deadline = None
         self._command_vend(session, pending, ACTS[value])
+
+    def _standalone_opens(self, session: Session, value: Authorisation) -> None:
+        """STANDALONE: the intercom's own relay, on the human's word only.
+
+        **THE ORDER IS THE INVARIANT** (SETTLED 7, round 6 E4). Where there is a
+        lane, the lane writes the identity and flushes it before its relay
+        moves. There is no lane here, so this agent's OWN RECORD is written and
+        flushed first, and only then does the relay pulse -- and if the record
+        cannot be written, nothing moves.
+
+        **AND NOTHING MEASURES PRESENCE.** There is no loop, no camera and no
+        gate. The human, who can hear the driver, is the presence check; that is
+        the whole of it, and `docs/CONTRACT.md` says so in a paragraph rather
+        than leaving a reader to assume otherwise.
+        """
+        relay = self._relays.get(session.intercom.sip_uri)
+        if relay is None:
+            self._say(session, UaLeg.OPERATOR, "operator.cannot_open",
+                      operator=True)
+            session.state = State.CLOSING
+            return
+        # THE RECORD, ALWAYS, AND BEFORE THE RELAY. Not only where a screen
+        # exists: the record is what says this site opened a barrier, and a
+        # pulse with nothing written down is the invariant broken. Its `lane`
+        # field is the INTERCOM's URI, because a standalone site has no lane and
+        # a ticket has to say where it was issued.
+        pending = self._mint_standalone(session.intercom)
+        if pending is None:
+            # NOTHING CAN BE RECORDED, so nothing moves. `[tickets]` is required
+            # wherever a relay is declared, so this is reachable only if the
+            # store itself refused a write -- and a barrier that opened anyway
+            # would be one this site cannot prove it opened.
+            log.error("no ticket record could be written; the relay is NOT pulsed")
+            self._say(session, UaLeg.OPERATOR, "operator.cannot_open", operator=True)
+            session.state = State.CLOSING
+            return
+        # `TicketStore.write` renames a temporary file into place, which is the
+        # flush: past this line the record is on the disk.
+        self._record(
+            AgentEventKind.RELAY_PULSED,
+            intercom=session.intercom.sip_uri,
+            lane=None,
+            case=session.case.value if session.case else None,
+            authorisation=value.value,
+            relay_port=relay.relay.port,
+            relay_ms=relay.relay.pulse_ms,
+        )
+        try:
+            relay.pulse()
+        except RelayRefusedUs as exc:
+            log.error("the relay at %s refused us: %s", session.intercom.sip_uri, exc)
+            self._code(
+                AgentCode.RELAY_REFUSED_US, session.intercom.sip_uri, HealthState.ACTIVE
+            )
+            self._say(session, UaLeg.OPERATOR, "operator.cannot_open", operator=True)
+            session.state = State.CLOSING
+            return
+        except RelayUnreachable as exc:
+            log.error("the relay at %s did not answer: %s", session.intercom.sip_uri, exc)
+            self._code(
+                AgentCode.RELAY_UNREACHABLE, session.intercom.sip_uri, HealthState.ACTIVE
+            )
+            self._say(session, UaLeg.OPERATOR, "operator.cannot_open", operator=True)
+            session.state = State.CLOSING
+            return
+        self._code(AgentCode.RELAY_REFUSED_US, session.intercom.sip_uri, HealthState.OK)
+        self._code(AgentCode.RELAY_UNREACHABLE, session.intercom.sip_uri, HealthState.OK)
+        if pending is not None:
+            self._blank(pending)
+        self._say(session, UaLeg.OPERATOR, "operator.vend_commanded", operator=True)
+        session.state = State.CLOSING
+        session.deadline = None
+
+    def _mint_standalone(self, intercom: Intercom) -> Pending | None:
+        """A ticket at a door with no lane. Its `lane` field is the door's URI.
+
+        Shown only where a screen is declared; RECORDED either way.
+        """
+        if not self._can_mint_for(intercom.sip_uri):
+            return None
+        self._issue(
+            intercom.sip_uri,
+            AgentCase.STANDALONE,
+            self._now(),
+            show=bool(intercom.display),
+        )
+        return self._pending.pop(intercom.sip_uri, None)
 
     def _can_mint_for(self, lane: str) -> bool:
         return self.config.tickets is not None and self._store is not None
@@ -1678,7 +1791,7 @@ class Agent:
                     sip_uri=intercom.sip_uri,
                     lane=intercom.lane,
                     has_display=intercom.display is not None,
-                    has_relay=False,
+                    has_relay=intercom.relay is not None,
                 )
                 for intercom in self.config.intercoms
             ),

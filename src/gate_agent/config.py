@@ -50,6 +50,7 @@ from .lines import (
     missing_text,
     undrawable_display_text,
 )
+from .relay import PORTS, RELAY_KINDS, Relay
 from .tickets import (
     DEFAULT_CONFIRM_WINDOW_S,
     DEFAULT_HELP_WINDOW_S,
@@ -226,6 +227,10 @@ SECRET_FILE_IS: dict[str, str] = {
     "[lanes.*].act_token_file": (
         "the credential that OPENS A BARRIER at that lane. It is not the read token and the "
         "read token does not authorise it."
+    ),
+    "[intercoms.*].relay.credentials_file": (
+        "an intercom's own `user:password`. Anybody who can read it can pulse that unit's "
+        "relay, which is wired to a barrier."
     ),
 }
 
@@ -1105,12 +1110,19 @@ class Intercom:
     #: ticket** -- its cases go to a human exactly as they did in round 5, which
     #: is a supported configuration and not a degraded one.
     display: str | None = None
+    #: This door's OWN relay, and it exists only where `lane = "none"`.
+    #:
+    #: Where there is a lane, the LANE writes the identity and moves its own
+    #: barrier; an agent pulsing a second relay at the same gate would be a
+    #: barrier that opened with no record on the machine that keeps the records.
+    #: The loader refuses the table on an intercom with a lane, by name.
+    relay: object = None
 
     def __repr__(self) -> str:
         return (
             f"Intercom(sip_uri={self.sip_uri!r}, lane={self.lane!r}, "
             f"name_audio={self.name_audio!r}, display={self.display!r}, "
-            "account_user=<not shown>)"
+            f"relay={self.relay!r}, account_user=<not shown>)"
         )
 
 
@@ -1406,6 +1418,14 @@ class AgentConfig:
             f"[intercoms.{intercom.sip_uri!r}] declares display"
             for intercom in intercoms
             if intercom.display
+        ) + tuple(
+            # A RELAY NEEDS IT TOO, and not because it shows anything: a
+            # standalone relay moves a barrier with no lane behind it, so this
+            # agent's own record is the only thing that says it happened -- and
+            # that record has to exist before the pulse.
+            f"[intercoms.{intercom.sip_uri!r}] declares a relay"
+            for intercom in intercoms
+            if intercom.relay is not None
         )
         tickets = _tickets(_table(raw, "tickets", required=False), relative_to, needed_by)
         return cls(
@@ -1634,6 +1654,7 @@ def _intercoms(
         accounts[account_user] = sip_uri
         if lane != STANDALONE:
             claimed.add(lane)
+        relay = _relay(table.get("relay"), sip_uri, lane, relative_to)
         display = table.get("display")
         if display is not None:
             if not isinstance(display, str) or not display.strip():
@@ -1648,7 +1669,7 @@ def _intercoms(
                 )
         intercoms.append(Intercom(sip_uri=sip_uri, lane=None if lane == STANDALONE else lane,
                                   name_audio=path, account_user=account_user,
-                                  display=display))
+                                  display=display, relay=relay))
     orphans = sorted(names - claimed)
     if orphans:
         raise ConfigError(
@@ -1659,6 +1680,74 @@ def _intercoms(
             "was mistyped, in which case every call at that door is refused."
         )
     return tuple(intercoms)
+
+
+def _relay(raw, sip_uri: str, lane: str, relative_to: Path | None):
+    """`[intercoms.<uri>.relay]`, and every refusal it can earn.
+
+    Present only where `lane = "none"`. That refusal is FIRST because it is the
+    one that matters: a relay beside a lane is a second thing that opens one
+    barrier, and the lane is the thing that keeps the record.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError(f"[intercoms.{sip_uri!r}.relay] must be a table")
+    if lane != STANDALONE:
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}] declares a relay AND a lane ({lane!r}). Where there is "
+            "a lane, the LANE writes the identity and flushes it before its own relay moves; "
+            "an agent pulsing a second relay at the same gate would be a barrier that opened "
+            "with no record on the machine that keeps the records. A relay belongs only to "
+            'an intercom with `lane = "none"`.'
+        )
+    kind = raw.get("kind")
+    if kind not in RELAY_KINDS:
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}.relay].kind is {kind!r} and this build drives "
+            f"{', '.join(repr(one) for one in RELAY_KINDS)}. 2N and Akuvox have their own "
+            "APIs and their own authentication, and a kind written without a device to try "
+            "it against would be an untested path wearing the same name as a tested one."
+        )
+    url = raw.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ConfigError(f"[intercoms.{sip_uri!r}.relay] does not declare a url")
+    _refuse_userinfo(url, f"[intercoms.{sip_uri!r}.relay].url")
+    port = raw.get("port")
+    if port not in PORTS:
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}.relay].port is {port!r} and this unit has "
+            f"{', '.join(str(one) for one in PORTS)}. Axis numbers its ports from ONE, "
+            "where one is the port physically labelled '1', and an off-by-one here is a "
+            "relay that pulses the wrong thing or nothing."
+        )
+    pulse = raw.get("pulse_ms")
+    if isinstance(pulse, bool) or not isinstance(pulse, int) or pulse <= 0:
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}.relay] does not declare pulse_ms as a positive whole "
+            "number of milliseconds. There is no default and there cannot be one: how long a "
+            "contact must close for a barrier to accept it is that BARRIER's specification, "
+            "and a number this package chose would be a guess about somebody else's "
+            "equipment written into every installation."
+        )
+    if "credentials_file" not in raw:
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}.relay] does not declare credentials_file. It is the "
+            "unit's `user:password`, it is a FILE and never a value, and there is no default."
+        )
+    username, password = _read_camera_auth(
+        raw["credentials_file"],
+        f"[intercoms.{sip_uri!r}].relay.credentials_file",
+        relative_to,
+    )
+    return Relay(
+        kind=kind,
+        url=url.strip().rstrip("/"),
+        port=port,
+        pulse_ms=pulse,
+        username=username,
+        password=password,
+    )
 
 
 def _sip_user(uri: str) -> str:

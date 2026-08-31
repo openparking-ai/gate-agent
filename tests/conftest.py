@@ -407,7 +407,10 @@ def agent_for(config, user_agent=None, clock=None, now=None):
     return agent
 
 
-def agent_raw_for(tmp_path, *, lane_extra=None, dial_secret_file=None, tickets=None) -> dict:
+def agent_raw_for(
+    tmp_path, *, lane_extra=None, dial_secret_file=None, tickets=None,
+    standalone=False, relay=None,
+) -> dict:
     """The smallest agent configuration `AgentConfig.from_dict` accepts, as a dict.
 
     Here rather than in one test file because the credential sweep needs to
@@ -417,13 +420,18 @@ def agent_raw_for(tmp_path, *, lane_extra=None, dial_secret_file=None, tickets=N
     return {
         "agent": {"id": "agent-1", "site_id": "site-1"},
         "user_agent": {"operator_aor": "sip:agent-operator@10.0.0.20"},
-        "lanes": {"entry": {"url": "http://127.0.0.1:8090", **(lane_extra or {})}},
+        **(
+            {}
+            if standalone
+            else {"lanes": {"entry": {"url": "http://127.0.0.1:8090", **(lane_extra or {})}}}
+        ),
         "intercoms": {
             "sip:door1@10.0.0.9": {
-                "lane": "entry",
+                "lane": "none" if standalone else "entry",
                 "name_audio": str(wav(tmp_path / "door1.wav")),
                 "dial_secret_file": dial_secret_file
                 or str(secret_file(tmp_path / "door1.dial-secret")),
+                **({"relay": relay} if relay else {}),
             }
         },
         "languages": {"driver": ["en"], "operator": "en"},
