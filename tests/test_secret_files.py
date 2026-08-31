@@ -234,6 +234,9 @@ NOT_A_CREDENTIAL = {
     ("tickets.py", "read"): "a ticket record, which holds no credential",
     ("tickets.py", "purge"): "a ticket record's issued_at, to decide its age",
     ("tickets.py", "write"): "a ticket record, and it is a WRITE",
+    ("display.py", "read_geometry"): "a framebuffer's geometry, out of the driver's sysfs",
+    ("display.py", "read"): "a framebuffer's geometry, out of the driver's sysfs",
+    ("display.py", "show"): "a frame, and it is a WRITE to the screen",
 }
 
 

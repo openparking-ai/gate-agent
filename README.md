@@ -110,6 +110,26 @@ enum.
 `openparking-lane-controller` is a **test** dependency, pinned to a commit, and
 appears nowhere in `src/`.
 
+### The test-only dependencies, and what each one is for
+
+`dependencies = []` is the package's own property and it is not a convenience:
+this runs beside a lane, on a box in a gate housing, and every dependency is one
+more thing to cross-compile, patch and have go wrong somewhere with no keyboard
+attached. Three things are installed to TEST it, none of them reaches `src/`,
+and each is named with its licence and the job it does.
+
+| | licence | what it is for |
+|---|---|---|
+| `pytest` | MIT | the suite |
+| `ruff` | MIT | the lint job |
+| `openparking-lane-controller` | AGPL-3.0-or-later | a REAL lane, served on a socket, beside a foreign one written from the document. A fake shaped like our lane would make "the same code reads ours and a third party's" a claim about two fakes. |
+| `opencv-python-headless` | Apache-2.0 (OpenCV 4.5.0 and later; the project relicensed from BSD-3-Clause) | the INDEPENDENT DECODER for the QR encoder. An encoder nobody can read back is a picture of a QR code, so every symbol this package builds is read by something that is not this repository. Headless because a test runner has no display. |
+
+**The audio's own licence rows are elsewhere and are not these**:
+`src/gate_agent/audio/MANIFEST.json` carries one per file, naming the
+synthesiser, its licence, and the provenance of the text — a build-time tool,
+not a dependency of anything.
+
 ## What the monitor watches
 
 | | |

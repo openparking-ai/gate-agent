@@ -27,9 +27,20 @@ dependencies = []
 # repository's `main`, not to `@main`: a moving target on the other side of a
 # contract boundary means this module's tests can change meaning without a
 # commit here.
+# `opencv-python-headless` is here for ONE JOB: it is the INDEPENDENT DECODER
+# that proves the QR encoder in `src/gate_agent/qr.py`. An encoder nobody can
+# read back is a picture of a QR code, so the suite requires something that is
+# not this repository to read every symbol it builds. Headless because a test
+# runner has no display and the GUI build pulls in a window toolkit.
+#
+# LICENCE: Apache-2.0 (OpenCV 4.5.0 and later; the project relicensed from
+# BSD-3-Clause). It is a TEST dependency and appears nowhere in `src/` --
+# `dependencies = []` above is the property, and `tests/test_no_opening_authority.py`
+# and `tests/test_qr.py` both rest on this one not being a runtime import.
 dev = [
   "pytest>=8",
   "ruff>=0.8",
+  "opencv-python-headless>=4.10",
   "openparking-lane-controller @ git+https://github.com/openparking-ai/lane-controller@053808bdef8f51feefc632d3e68512c27796ccce",
 ]
 

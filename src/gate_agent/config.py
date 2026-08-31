@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -40,7 +40,16 @@ from .camera import DEFAULT_MAX_SNAPSHOT_BYTES, DEFAULT_SNAPSHOT_TIMEOUT
 from .cases import DEFAULT_DECISION_MAX_AGE_SECONDS
 from .client import DEFAULT_TIMEOUT
 from .contract import Authorisation, SinkKind, TargetKind
-from .lines import DRIVER_LINES, OPERATOR_LINES, SHIPPED_LANGUAGES, audio_name, missing_text
+from .display import DisplayUnavailable, open_display
+from .lines import (
+    DRIVER_LINES,
+    OPERATOR_LINES,
+    SHIPPED_LANGUAGES,
+    audio_name,
+    missing_display_text,
+    missing_text,
+    undrawable_display_text,
+)
 from .tickets import (
     DEFAULT_CONFIRM_WINDOW_S,
     DEFAULT_HELP_WINDOW_S,
@@ -1089,11 +1098,19 @@ class Intercom:
     lane: str | None
     name_audio: Path
     account_user: str
+    #: The `[displays.<name>]` this door's driver can see, or `None`.
+    #:
+    #: DECLARED, and there is no default: a guessed display is a code shown at a
+    #: barrier somebody is not standing at. **An intercom with none offers no
+    #: ticket** -- its cases go to a human exactly as they did in round 5, which
+    #: is a supported configuration and not a degraded one.
+    display: str | None = None
 
     def __repr__(self) -> str:
         return (
             f"Intercom(sip_uri={self.sip_uri!r}, lane={self.lane!r}, "
-            f"name_audio={self.name_audio!r}, account_user=<not shown>)"
+            f"name_audio={self.name_audio!r}, display={self.display!r}, "
+            "account_user=<not shown>)"
         )
 
 
@@ -1113,6 +1130,50 @@ class UserAgentSettings:
     operator_aor: str
     timeout_seconds: float = DEFAULT_UA_TIMEOUT
     reconnect_seconds: float = DEFAULT_RECONNECT_SECONDS
+
+
+def _displays(raw: dict, relative_to: Path | None) -> dict:
+    """`[displays.<name>]`, and the geometry each one is READ to have.
+
+    The geometry is not here and cannot be: `virtual_size` and `bits_per_pixel`
+    come from the driver, at startup, through `display.read_geometry`. A site
+    that typed its own resolution would be a site whose display is silently
+    wrong on the day somebody changes a cable -- and a frame written at the
+    wrong stride is not a smaller picture, it is diagonal noise.
+
+    So this reads the device path, opens the screen, and refuses at STARTUP on
+    anything that is not a screen this build can write. An intercom whose
+    display refused is one that offers no ticket, and that is a configuration
+    somebody fixes at installation rather than a driver discovering it.
+    """
+    displays = {}
+    for name in sorted(raw):
+        table = raw[name]
+        if not isinstance(table, dict):
+            raise ConfigError(f"[displays.{name}] must be a table")
+        device = table.get("framebuffer")
+        if not isinstance(device, str) or not device.strip():
+            raise ConfigError(
+                f"[displays.{name}] does not declare framebuffer. It is the device this "
+                "agent writes a frame to -- `/dev/fb0` on most boards -- and there is no "
+                "default: a guessed one is a frame written to whatever else is on that box."
+            )
+        # OPTIONAL, and it exists for a real case rather than for the tests that
+        # also use it: `sysfs_for` derives `/sys/class/graphics/<fb0>` from the
+        # device's own name, which is right for every framebuffer named the way
+        # the kernel names one and wrong for a device that is not.
+        sysfs = table.get("sysfs")
+        if sysfs is not None and (not isinstance(sysfs, str) or not sysfs.strip()):
+            raise ConfigError(f"[displays.{name}].sysfs must be a path")
+        try:
+            displays[name] = open_display(
+                name,
+                _resolve(device.strip(), relative_to),
+                _resolve(sysfs.strip(), relative_to) if sysfs else None,
+            )
+        except DisplayUnavailable as exc:
+            raise ConfigError(f"[displays.{name}]: {exc}") from exc
+    return displays
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -1256,6 +1317,9 @@ class AgentConfig:
     #: anything -- no display declared and no lane with an act token. That is
     #: round 5 exactly and it is a supported configuration.
     tickets: TicketSettings | None = None
+    #: The declared screens, by name, each with the geometry its DRIVER
+    #: published at startup. Empty where a site declared none.
+    displays: dict = field(default_factory=dict)
 
     @property
     def can_vend_at(self) -> tuple[str, ...]:
@@ -1303,12 +1367,21 @@ class AgentConfig:
         # it: an intercom whose account collides with the one the agent dials
         # out from would put both legs of a case on one account.
         user_agent = _user_agent(_table(raw, "user_agent"))
+        # And the DISPLAYS before the intercoms, because an intercom names one:
+        # a door pointed at a screen nobody declared would publish `has_display`
+        # and show a driver nothing.
+        displays = _displays(_table(raw, "displays", required=False), relative_to)
         intercoms = _intercoms(
             _table(raw, "intercoms", required=False), lanes, relative_to,
-            operator_aor=user_agent.operator_aor,
+            operator_aor=user_agent.operator_aor, displays=displays,
         )
         driver_languages, operator_language = _languages(_table(raw, "languages"))
         _refuse_missing_lines(driver_languages, operator_language, audio_directory)
+        if any(intercom.display for intercom in intercoms):
+            # ONLY where something will be drawn. A site with no display is not
+            # asked to have words for one, and is not refused for a language
+            # whose display line this package has not written.
+            _refuse_undrawable_display_lines(driver_languages)
         escalation = _table(raw, "escalation")
         human = escalation.get("human_sip_uri")
         if not isinstance(human, str) or not human.strip():
@@ -1329,6 +1402,10 @@ class AgentConfig:
         # file rather than from a second pass over the raw table.
         needed_by = tuple(
             f"[lanes.{lane.name}] declares act_token_file" for lane in lanes if lane.can_act
+        ) + tuple(
+            f"[intercoms.{intercom.sip_uri!r}] declares display"
+            for intercom in intercoms
+            if intercom.display
         )
         tickets = _tickets(_table(raw, "tickets", required=False), relative_to, needed_by)
         return cls(
@@ -1375,6 +1452,7 @@ class AgentConfig:
             ),
             name_audio_max_seconds=name_audio_max,
             tickets=tickets,
+            displays=displays,
         )
 
     def lane(self, name: str) -> Target | None:
@@ -1462,6 +1540,7 @@ def _intercoms(
     lanes: tuple[Target, ...],
     relative_to: Path | None,
     operator_aor: str,
+    displays: dict | None = None,
 ):
     """`[intercoms.<sip-uri>]`, and every refusal an intercom can earn.
 
@@ -1555,8 +1634,21 @@ def _intercoms(
         accounts[account_user] = sip_uri
         if lane != STANDALONE:
             claimed.add(lane)
+        display = table.get("display")
+        if display is not None:
+            if not isinstance(display, str) or not display.strip():
+                raise ConfigError(
+                    f"[intercoms.{sip_uri!r}].display must be the name of a [displays.<name>]"
+                )
+            if display not in (displays or {}):
+                raise ConfigError(
+                    f"[intercoms.{sip_uri!r}].display is {display!r} and there is no "
+                    f"[displays.{display}]. A door pointed at a screen nobody declared would "
+                    "publish `has_display` and show a driver nothing."
+                )
         intercoms.append(Intercom(sip_uri=sip_uri, lane=None if lane == STANDALONE else lane,
-                                  name_audio=path, account_user=account_user))
+                                  name_audio=path, account_user=account_user,
+                                  display=display))
     orphans = sorted(names - claimed)
     if orphans:
         raise ConfigError(
@@ -1680,6 +1772,34 @@ def _refuse_missing_lines(driver_languages, operator_language, directory: Path) 
             "is not skipped and not played in another language: it would be a driver at a "
             "barrier hearing silence, which tells them nothing and looks like a dead "
             "intercom."
+        )
+
+
+def _refuse_undrawable_display_lines(driver_languages) -> None:
+    """Every display line, in every declared language, checked for WORDS and GLYPHS.
+
+    Two different failures and they are named separately, because the repairs
+    are different: a language with no display line needs somebody to write one,
+    and a line the font cannot draw needs a glyph. Both are refused at STARTUP.
+
+    **Never a blank and never a substitution.** A blank is a driver told
+    nothing; a substitution is a driver told something else. This is the same
+    rule `_refuse_missing_lines` applies to the spoken lines, applied to the
+    drawn one.
+    """
+    missing = missing_display_text(driver_languages)
+    if missing:
+        raise ConfigError(
+            "this build has no display text for " + ", ".join(missing) + ". An intercom here "
+            "declares a display, so a driver at it would be shown a code with no instruction "
+            "under it in that language. Refusing to start."
+        )
+    undrawable = undrawable_display_text(driver_languages)
+    if undrawable:
+        raise ConfigError(
+            "the shipped font cannot draw " + "; ".join(undrawable) + ". A character with no "
+            "glyph would be a HOLE in the frame at three in the morning -- never a blank and "
+            "never a substitution. Refusing to start."
         )
 
 
