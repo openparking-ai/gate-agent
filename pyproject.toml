@@ -30,7 +30,7 @@ dependencies = []
 dev = [
   "pytest>=8",
   "ruff>=0.8",
-  "openparking-lane-controller @ git+https://github.com/openparking-ai/lane-controller@ebc585d963e5a0bd5153a996409a119ebe3b0bb2",
+  "openparking-lane-controller @ git+https://github.com/openparking-ai/lane-controller@053808bdef8f51feefc632d3e68512c27796ccce",
 ]
 
 [project.scripts]

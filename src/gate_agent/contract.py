@@ -65,7 +65,7 @@ CONTRACT_VERSION = 1
 #: A lane on a version outside this set is REFUSED rather than partially read --
 #: the lane contract's own instruction to a consumer, and half-understanding a
 #: payload about a vehicle is worse than admitting it cannot be read.
-KNOWN_LANE_VERSIONS: tuple[int, ...] = (1,)
+KNOWN_LANE_VERSIONS: tuple[int, ...] = (2,)
 
 
 class TargetKind(StrEnum):

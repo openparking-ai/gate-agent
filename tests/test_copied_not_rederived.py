@@ -68,23 +68,57 @@ def test_is_loopback_is_the_lane_services_own_function_character_for_character()
 
 @pytest.mark.parametrize(("host", "token"), CASES)
 def test_the_bind_rule_answers_identically_in_both_services(host, token):
-    """The RULE, compared by behaviour rather than by text.
+    """The READ rule, compared by behaviour rather than by text.
 
     The messages differ on purpose: this surface publishes which of a site's
     lanes are broken, and the lane's publishes where a vehicle was. What may not
     differ is which binds are allowed.
+
+    **The lane's rule grew a SECOND refusal in its round 6 and this one has
+    not**, so the comparison names what it is comparing. A lane on contract
+    version 2 serves `POST /v1/lane/vend`, and off loopback it refuses a bind
+    that carries a read token and no ACT token -- because the read token does
+    not authorise an act. No surface in this package serves an act route
+    (`agent_service.ACT_ROUTES` is empty and `test_agent_contract.py` requires
+    it), so there is no second token here to require and nothing to compare.
+    The lane's act half is therefore SATISFIED in the call below, and what is
+    compared is the half both services have.
+
+    The divergence is a property of the SURFACES, not of the copy: this is the
+    one thing that may differ, it is named, and the assertion under it is what
+    keeps everything else identical.
     """
 
-    def verdict(module):
+    def verdict(module, **extra):
         try:
-            module.assert_bind_allowed(host, 9999, token)
+            module.assert_bind_allowed(host, 9999, token, **extra)
         except module.InsecureBind:
             return "refused"
         return "allowed"
 
-    assert verdict(monitor_service) == verdict(lane_service), (
+    assert verdict(monitor_service) == verdict(lane_service, act_token="an-act-token"), (
         f"the two services disagree about binding {host!r} with token {token!r}"
     )
+
+
+def test_this_package_serves_no_act_route_which_is_why_the_act_half_is_satisfied_above():
+    """The control for the exemption in the test above, and it is not optional.
+
+    The act half is satisfied there because nothing in this package serves an
+    act route. If one ever did, that sentence would silently become false and
+    the comparison would go on passing while the two services disagreed about a
+    bind that can open a barrier. So it is asserted, from the surfaces
+    themselves -- and the lane's own non-empty set is the positive control that
+    the attribute being read is the one that carries the answer.
+    """
+    from gate_agent import agent_service, capture_service
+
+    assert agent_service.ACT_ROUTES == ()
+    assert capture_service.ACT_ROUTES == ()
+    assert monitor_service.ACT_ROUTES == ()
+    # THE CONTROL: a surface that DOES serve one reads non-empty through the
+    # same attribute, so the three empties above are a measurement.
+    assert lane_service.ACT_ROUTES, lane_service.ACT_ROUTES
 
 
 def test_the_table_holds_cases_on_both_sides_of_the_rule():
