@@ -433,6 +433,18 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
+    "en/operator.ticket_refused.wav": {
+      "line": "operator.ticket_refused",
+      "language": "en",
+      "text": "This driver's ticket was refused by the entrance.",
+      "text_provenance": "en",
+      "sha256": "e0dd373b53b7c7ab8fe96a9774baec82907d768e402a022ac8abc0cacbc22df4",
+      "bytes": 52446,
+      "sample_rate": 8000,
+      "voice": "en-us",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
     "en/operator.vend_commanded.wav": {
       "line": "operator.vend_commanded",
       "language": "en",
@@ -548,6 +560,18 @@
       "text_provenance": "en",
       "sha256": "fe2f73494c93bbd294446af03c250f77366faf804565e66b667e795d3749feaf",
       "bytes": 51652,
+      "sample_rate": 8000,
+      "voice": "en-us",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "en/operator.vend_refused.unknown.wav": {
+      "line": "operator.vend_refused.unknown",
+      "language": "en",
+      "text": "The entrance gave a reason I have no words for.",
+      "text_provenance": "en",
+      "sha256": "094b18905628b134f85bd324de129b215c26b13348de9912e90f8fed72a405ba",
+      "bytes": 49964,
       "sample_rate": 8000,
       "voice": "en-us",
       "words_per_minute": 150,
@@ -728,6 +752,18 @@
       "text_provenance": "en",
       "sha256": "4afa4a775d0103b36ccf17756c9c514bbca7a8498ee0a50972c047c83f729a0c",
       "bytes": 39426,
+      "sample_rate": 8000,
+      "voice": "en-us",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "en/ticket.on_screen.wav": {
+      "line": "ticket.on_screen",
+      "language": "en",
+      "text": "There is a code on the screen. Take a photo of it, then press the button again.",
+      "text_provenance": "en",
+      "sha256": "384ecf6fe0efc1a93c08a5c9e279f5583f8661c3ecacc2bc25382a3a17c1ddc7",
+      "bytes": 87606,
       "sample_rate": 8000,
       "voice": "en-us",
       "words_per_minute": 150,
@@ -1165,6 +1201,18 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
+    "es-ES/operator.ticket_refused.wav": {
+      "line": "operator.ticket_refused",
+      "language": "es-ES",
+      "text": "La entrada ha rechazado el ticket de este conductor.",
+      "text_provenance": "es-ES",
+      "sha256": "c55f3898404d0d2dd3c733378687bc491efef0648d5ce25edc89a0967e7b4a0c",
+      "bytes": 57132,
+      "sample_rate": 8000,
+      "voice": "es",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
     "es-ES/operator.vend_commanded.wav": {
       "line": "operator.vend_commanded",
       "language": "es-ES",
@@ -1280,6 +1328,18 @@
       "text_provenance": "es-ES",
       "sha256": "ffc91d77b4122bc5948cd11b1df8fbe5174cf49a78aa72c63d37a9446695574f",
       "bytes": 47194,
+      "sample_rate": 8000,
+      "voice": "es",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "es-ES/operator.vend_refused.unknown.wav": {
+      "line": "operator.vend_refused.unknown",
+      "language": "es-ES",
+      "text": "La entrada ha dado un motivo para el que no tengo palabras.",
+      "text_provenance": "es-ES",
+      "sha256": "89816c7de2a7f4550f3296291b0e285b3d312a4bffade6e17f98c89516fbd180",
+      "bytes": 60324,
       "sample_rate": 8000,
       "voice": "es",
       "words_per_minute": 150,
@@ -1460,6 +1520,18 @@
       "text_provenance": "es-ES",
       "sha256": "83ea58b4c4073f23029de38491c133c9b4364c0407ce3f562563e1c54bb8a57d",
       "bytes": 38876,
+      "sample_rate": 8000,
+      "voice": "es",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "es-ES/ticket.on_screen.wav": {
+      "line": "ticket.on_screen",
+      "language": "es-ES",
+      "text": "Hay un código en la pantalla. Hágale una foto y pulse el botón otra vez.",
+      "text_provenance": "es-ES",
+      "sha256": "e13247a644eb795f04007b0ae60c8a0055bfce84c207becb37b73ae0f4fe28af",
+      "bytes": 81144,
       "sample_rate": 8000,
       "voice": "es",
       "words_per_minute": 150,

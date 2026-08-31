@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
 import threading
 from pathlib import Path
@@ -190,15 +191,65 @@ def cmd_agent(args) -> int:
     stop = threading.Event()
     poller = threading.Thread(target=_agent_forever, args=(agent, stop), daemon=True)
     poller.start()
+    _raise_on_sigterm()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print()
     finally:
         stop.set()
+        # THE POLLER FIRST, so nothing redraws a screen after it is blanked: a
+        # poll in flight re-asserts a pending ticket's frame.
+        poller.join(timeout=2.0)
+        # **THE SCREENS GO BLACK, on every way out of this function.** The
+        # display module published "idle is a black frame, and so is exit" and
+        # nothing anywhere blanked one on exit: `SIGTERM` -- which is how a
+        # service manager stops this -- did not reach Python at all, so an
+        # ordinary `systemctl restart gate-agent` during a package upgrade left
+        # the last ticket on the screen. By the contract's own paragraph that
+        # code can never be vended, so the driver photographing it gets a human.
+        # The document treated that as the crash exception; it was what every
+        # restart did.
+        #
+        # BEFORE the socket and the user agent, and that ordering is the point:
+        # it is the only step here a driver at a barrier can see, and a failure
+        # in either of the others must not leave a code on a screen. It cost
+        # this test a red run to find out -- `ua.close()` raised, and the frame
+        # stayed up.
+        _blank_displays(config)
         server.server_close()
         ua.close()
     return 0
+
+
+def _raise_on_sigterm() -> None:
+    """`SIGTERM` becomes the same exception `SIGINT` already raises.
+
+    One handler and one `finally`, rather than a second exit path that would
+    come to disagree with the first. Python's default for `SIGTERM` is to end
+    the process without unwinding anything, so the `finally` above never ran --
+    and it is the only thing that takes a code off a screen.
+    """
+
+    def stop(signum, frame):  # noqa: ARG001
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop)
+
+
+def _blank_displays(config: AgentConfig) -> None:
+    """Every declared screen, black. Nothing here raises.
+
+    An exit path that raised would be a process dying differently depending on
+    which screen failed, and the screen is the thing being given up on anyway.
+    """
+    for name, display in sorted(config.displays.items()):
+        try:
+            display.blank()
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).error(
+                "the display %s could not be blanked on exit: %s", name, exc
+            )
 
 
 def _agent_forever(agent: Agent, stop: threading.Event, tick: float = 0.2) -> None:

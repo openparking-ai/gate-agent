@@ -428,9 +428,22 @@ def test_the_vend_refusal_codes_are_the_lanes_own_in_both_directions():
     }
     # AND ONE SENTENCE EACH, keyed one-to-one, generated from the same list on
     # both sides -- a missing key and an orphan key each fail.
+    #
+    # PLUS EXACTLY ONE MORE, and it is not a member of that set: the sentence
+    # for a code this build has no words for. `VEND_REFUSALS` is our lane's
+    # vocabulary, which is the right check for our lane and no check at all for
+    # the third-party seat this module sits in -- so a foreign lane's own code
+    # reaches a person as "the entrance gave a reason I have no words for"
+    # rather than as silence.
+    from gate_agent.lines import UNKNOWN_REFUSAL
+
     expected = {f"operator.vend_refused.{code}" for code in VEND_REFUSALS}
+    assert UNKNOWN_REFUSAL not in expected, (
+        "the lane has grown a refusal code called `unknown`, which now collides with the "
+        "line for a code this build has no words for"
+    )
     published = {line for line in OPERATOR_LINES if line.startswith("operator.vend_refused.")}
-    assert published == expected
-    for line in expected:
+    assert published == expected | {UNKNOWN_REFUSAL}
+    for line in expected | {UNKNOWN_REFUSAL}:
         assert TEXT[line]["en"].strip(), line
         assert TEXT[line]["es-ES"].strip(), line

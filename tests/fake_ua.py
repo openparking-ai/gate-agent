@@ -151,6 +151,15 @@ class FakeUa:
         events, self.events = tuple(self.events), []
         return events
 
+    def close(self) -> None:
+        """The seam the real adapter closes its control socket in.
+
+        Here because the fake stands in for the WHOLE seam: `cli.cmd_agent`
+        calls this on the way out, and a fake missing one verb makes an exit
+        path untestable by construction.
+        """
+        self.commands.append(("close", ""))
+
     def reconnect(self) -> tuple[UaCall, ...]:
         """The seam's answer to a socket that was lost. Empty when nothing was.
 

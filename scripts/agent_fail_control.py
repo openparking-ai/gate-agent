@@ -928,6 +928,190 @@ BREAKS = [
         "from": '  "text_provenance": {',
         "to": '  "text_provenance_removed": {',
     },
+    # -----------------------------------------------------------------
+    # THE ROUND-7 CUT. One break per blocker the L3 found, each of them a
+    # revert of the cut rather than a nearby edit -- the question a control has
+    # to answer is "does the thing that was fixed still fail without the fix".
+    # -----------------------------------------------------------------
+    {
+        "name": "the_offer_consults_the_health",
+        "why": "a ticket is suppressed by any active code, so a lane whose engine is "
+               "down offers none -- the case the module exists for",
+        "file": "src/gate_agent/cases.py",
+        "from": "    return (\n        decision_case(reading, now, max_age_seconds) "
+                "in TICKET_CASES\n        and reading.presence is True\n    )",
+        "to": "    return (\n        not reading.malfunctions\n"
+              "        and decision_case(reading, now, max_age_seconds) in TICKET_CASES\n"
+              "        and reading.presence is True\n    )",
+    },
+    {
+        "name": "the_press_does_not_mint",
+        "why": "a press inside the poll gap rings a person while the ticket is minted "
+               "behind the driver",
+        "file": "src/gate_agent/agent.py",
+        "from": "        elif pending is None and intercom.display and self._offers_a_ticket_at(",
+        "to": "        elif False and pending is None and intercom.display and self._offers_a_ticket_at(",  # noqa: E501
+    },
+    {
+        "name": "a_press_confirms_an_untold_ticket",
+        "why": "the vend of a code the driver was never shown and never photographed",
+        "file": "src/gate_agent/agent.py",
+        "from": "            if pending.told_at is None:",
+        "to": "            if False:",
+    },
+    {
+        "name": "relay_pulsed_is_written_whatever_happened",
+        "why": "the site's only machine-readable account of a barrier says the relay was "
+               "pulsed when it was not",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if pulse.outcome == \"\":",
+        "to": "        if True:",
+    },
+    {
+        "name": "the_relay_maps_only_the_classes_it_used_to",
+        "why": "a challenge urllib cannot parse raises out of poll(), the barrier does not "
+               "move, and the operator who authorised it is told nothing",
+        "file": "src/gate_agent/relay.py",
+        "from": "        except Exception as exc:  # noqa: BLE001",
+        "to": "        except (urllib.error.URLError, TimeoutError, OSError) as exc:",
+    },
+    {
+        "name": "an_answered_unit_is_reported_as_silence",
+        "why": "`RelayUnreachable` for a unit that answered sends somebody to look at a "
+               "network instead of at the device",
+        "file": "src/gate_agent/relay.py",
+        "from": "            if self._answered.seen:",
+        "to": "            if False:",
+    },
+    {
+        "name": "the_relay_timeout_is_fixed_again",
+        "why": "a legal six-second barrier is reported as a relay that could not be reached, "
+               "while the unit is mid-pulse",
+        "file": "src/gate_agent/relay.py",
+        "from": "        self.timeout = relay.timeout if timeout is None else timeout",
+        "to": "        self.timeout = 5.0 if timeout is None else timeout",
+    },
+    {
+        "name": "pulse_ms_is_unbounded_again",
+        "why": "an unbounded pulse is an unbounded time this process holds a connection "
+               "open for one press",
+        "file": "src/gate_agent/config.py",
+        "from": "    if not PULSE_MS_BOUNDS[0] <= pulse <= PULSE_MS_BOUNDS[1]:",
+        "to": "    if False:",
+    },
+    {
+        "name": "a_refused_vend_is_lane_decided_again",
+        "why": "the record asserts a cause that did not happen, in the one place a "
+               "standalone site keeps",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._finish_ticket(pending, \"lane_refused\", answer.code)",
+        "to": "        self._finish_ticket(pending, \"lane_decided_again\", answer.code)",
+    },
+    {
+        "name": "an_unreachable_lane_is_lane_decided_again",
+        "why": "the same wrong cause on the path where there is no lane_answer either",
+        "file": "src/gate_agent/agent.py",
+        "from": "            self._finish_ticket(pending, \"lane_unreachable\", None)",
+        "to": "            self._finish_ticket(pending, \"lane_decided_again\", None)",
+    },
+    {
+        "name": "an_act_the_lane_refuses_is_lane_decided_again",
+        "why": "a 401 on the vend route is recorded as a decision the lane never made",
+        "file": "src/gate_agent/agent.py",
+        "from": "            self._finish_ticket(pending, \"act_refused\", None)",
+        "to": "            self._finish_ticket(pending, \"lane_decided_again\", None)",
+    },
+    {
+        "name": "a_refusal_with_no_words_reaches_nobody",
+        "why": "a third party's own refusal code leaves the person briefed as an ordinary "
+               "case and then offered OPEN_NOW",
+        "file": "src/gate_agent/agent.py",
+        "from": "        refusal = named if named in self._durations_for_lines() "
+                "else UNKNOWN_REFUSAL",
+        "to": "        refusal = named if named in self._durations_for_lines() else None",
+    },
+    {
+        "name": "the_person_is_not_told_a_ticket_was_refused",
+        "why": "the operator is briefed as an ordinary case with no line saying a ticket "
+               "was confirmed and refused",
+        "file": "src/gate_agent/agent.py",
+        "from": "        lines = (\"operator.ticket_refused\", refusal)",
+        "to": "        lines = (refusal,)",
+    },
+    {
+        "name": "the_help_window_outlives_its_ticket",
+        "why": "the NEXT driver is briefed with two sentences that are false about them, "
+               "and the operator decides on that briefing",
+        "file": "src/gate_agent/agent.py",
+        "from": "            if help_window.lane == lane:\n                del self._help[uri]",
+        "to": "            if False:\n                del self._help[uri]",
+    },
+    {
+        "name": "a_restart_settles_nothing",
+        "why": "`restarted` goes back to being a published reason no code path writes, and "
+               "a confirmed record stands with nothing saying whether the barrier opened",
+        "file": "src/gate_agent/agent.py",
+        "from": "        for ticket_id in self._store.all_ids():",
+        "to": "        for ticket_id in ():",
+    },
+    {
+        "name": "nothing_blanks_a_screen_on_exit",
+        "why": "an ordinary `systemctl restart` leaves the last ticket on the screen",
+        "file": "src/gate_agent/cli.py",
+        "from": "        _blank_displays(config)",
+        "to": "        pass",
+    },
+    {
+        "name": "sigterm_never_reaches_python",
+        "why": "the `finally` that blanks the screens is never run by the signal a service "
+               "manager actually sends",
+        "file": "src/gate_agent/cli.py",
+        "from": "    _raise_on_sigterm()",
+        "to": "    pass",
+    },
+    {
+        "name": "the_screen_is_never_re_asserted",
+        "why": "a display that dies between frames leaves a code the driver cannot see, a "
+               "health surface saying ok, and a press that vends it",
+        "file": "src/gate_agent/agent.py",
+        "from": "            self._reassert(lane.name)",
+        "to": "            pass",
+    },
+    {
+        "name": "the_geometry_is_read_once",
+        "why": "a framebuffer that changes mode is written at the old stride, which is "
+               "diagonal noise, while the agent believes a code is up",
+        "file": "src/gate_agent/agent.py",
+        "from": "                now = screen.reread_geometry()",
+        "to": "                now = screen.geometry",
+    },
+    {
+        # NOT the round-6 break of the same shape: that one is `padding bits go
+        # unchecked` above, and a second entry with its name would have been two
+        # rows reporting one measurement.
+        "name": "case_and_whitespace_spellings_verify",
+        "why": "lower case, mixed case and whitespace all verify, so the exit can file one "
+               "stay twice",
+        "file": "src/gate_agent/tickets.py",
+        "from": "    text = payload\n",
+        "to": "    text = payload.strip().upper()\n",
+    },
+    {
+        "name": "two_screens_on_one_lane_are_accepted",
+        "why": "one code on two door stations, and whoever photographs the second screen "
+               "holds the first driver's ticket",
+        "file": "src/gate_agent/config.py",
+        "from": "    _one_display_per_lane(intercoms)",
+        "to": "    pass",
+    },
+    {
+        "name": "a_ticket_field_is_checked_at_the_mint_only",
+        "why": "a site named with a newline starts, publishes a healthy surface, and "
+               "refuses its first ticket at three in the morning",
+        "file": "src/gate_agent/config.py",
+        "from": "        _refuse_unticketable_fields(str(agent[\"site_id\"]), lanes, intercoms)",
+        "to": "        pass",
+    },
 ]
 
 

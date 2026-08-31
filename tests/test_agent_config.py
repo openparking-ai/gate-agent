@@ -713,3 +713,158 @@ def test_a_site_with_no_display_is_not_asked_for_display_words(tmp_path, monkeyp
 
     monkeypatch.setitem(lines.DISPLAY_TEXT["display.instruction"], "en", "")
     assert AgentConfig.from_file(written(tmp_path)) is not None
+
+
+# ---------------------------------------------------------------------------
+# ONE DISPLAY PER LANE, AND THE FIELDS A TICKET IS MADE OF
+# ---------------------------------------------------------------------------
+
+
+def a_second_door(text: str, display: str | None) -> str:
+    """A second intercom on the SAME lane, with or without a screen of its own."""
+    from conftest import OTHER_SECRET
+
+    return text + (
+        '\n[intercoms."sip:door2@10.0.0.9"]\n'
+        'lane = "entry"\n'
+        'name_audio = "NAME_AUDIO"\n'
+        'dial_secret_file = "SECOND_SECRET"\n'
+        + (f'display = "{display}"\n' if display else "")
+    ).replace("OTHER_SECRET", OTHER_SECRET)
+
+
+def written_two_doors(tmp_path, text: str):
+    from conftest import OTHER_SECRET
+    from conftest import secret_file as _secret_file
+
+    second = _secret_file(tmp_path / "door2.dial-secret", OTHER_SECRET)
+    return written(tmp_path, text.replace("SECOND_SECRET", str(second)))
+
+
+def test_two_intercoms_with_displays_on_one_lane_are_refused_naming_both(tmp_path):
+    """B15. A lane has ONE pending ticket, and every screen at it was shown it.
+
+    So one code stood on two door stations and a press at EITHER confirmed it
+    and opened the barrier -- whoever photographed the second screen was holding
+    the first driver's ticket. The design's whole binding is that a press proves
+    somebody at THAT barrier pressed; with two, it proved somebody at one of
+    these barriers did.
+    """
+    text = with_display(tmp_path, with_tickets(tmp_path))
+    text = a_second_door(text, "front")
+    with pytest.raises(ConfigError) as raised:
+        AgentConfig.from_file(written_two_doors(tmp_path, text))
+    assert "sip:door1@10.0.0.9" in str(raised.value)
+    assert "sip:door2@10.0.0.9" in str(raised.value)
+
+
+def test_a_second_door_at_that_lane_with_no_display_is_accepted(tmp_path):
+    """THE CONTROL, and it is the ordinary two-door lane: the ticket is bound to
+    the one screen that shows it, and a press at the other door is round 5."""
+    text = a_second_door(with_display(tmp_path, with_tickets(tmp_path)), None)
+    config = AgentConfig.from_file(written_two_doors(tmp_path, text))
+    assert [one.display for one in config.intercoms] == ["front", None]
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ('site_id = "site-1"', r'site_id = "site\nwith-a-newline"'),
+        ("[lanes.entry]", r'[lanes."entry\nnewline"]'),
+        (
+            '[intercoms."sip:door1@10.0.0.9"]',
+            r'[intercoms."sip:door1\n@10.0.0.9"]',
+        ),
+    ],
+)
+def test_a_value_that_cannot_be_a_ticket_field_is_refused_at_startup(
+    tmp_path, before, after
+):
+    """B16. `Ticket.canonical()` refuses a field holding the separator, and
+    nothing checked the CONFIGURATION.
+
+    So a site named with a newline started, published a healthy surface, and
+    refused its FIRST MINT at three in the morning: `BadTicket` out of `_issue`,
+    through `_consider_ticket` and `_follow_lanes`, into `poll()`'s blanket
+    handler -- a traceback per arrival, no ticket ever issued, `_advance()`
+    skipped for that poll, and nothing on the health surface saying why. The
+    same class as the font check, which IS a startup refusal.
+
+    The three values are the three that end up in a ticket: `site`, `lane`, and
+    -- for a standalone door, whose ticket names the door because there is no
+    lane -- the intercom's URI.
+    """
+    text = with_display(tmp_path, with_tickets(tmp_path))
+    if before == "[lanes.entry]":
+        text = text.replace('lane = "entry"', r'lane = "entry\nnewline"')
+    text = text.replace(before, after)
+    with pytest.raises(ConfigError) as raised:
+        AgentConfig.from_file(written(tmp_path, text))
+    assert "separator" in str(raised.value), raised.value
+    assert "Refusing to start" in str(raised.value)
+
+
+def test_the_control_is_that_the_same_file_without_the_newline_loads(tmp_path):
+    """Every refusal above is about the newline and not about the file."""
+    config = AgentConfig.from_file(
+        written(tmp_path, with_display(tmp_path, with_tickets(tmp_path)))
+    )
+    assert config.site_id == "site-1"
+
+
+# ---------------------------------------------------------------------------
+# THE RELAY'S TWO NUMBERS
+# ---------------------------------------------------------------------------
+
+
+def with_relay(tmp_path, pulse_ms=500, margin=None) -> str:
+    """A STANDALONE door with a relay, as a site declares one."""
+    credentials = tmp_path / "relay.auth"
+    credentials.write_text("root:s3cret\n", encoding="utf-8")
+    credentials.chmod(0o600)
+    text = (
+        BASE.replace("[lanes.entry]\nurl = \"http://127.0.0.1:8090\"\n", "")
+        .replace('lane = "entry"', 'lane = "none"')
+    )
+    return with_tickets(tmp_path, text) + (
+        "\n[intercoms.\"sip:door1@10.0.0.9\".relay]\n"
+        'kind = "axis_vapix"\n'
+        f'url = "http://10.0.0.9"\n'
+        "port = 1\n"
+        f"pulse_ms = {pulse_ms}\n"
+        + (f"answer_margin_s = {margin}\n" if margin is not None else "")
+        + f'credentials_file = "{credentials}"\n'
+    )
+
+
+@pytest.mark.parametrize("pulse_ms", [0, -1, 10_001, 60_000])
+def test_a_pulse_outside_the_published_bounds_is_refused(tmp_path, pulse_ms):
+    """B13's first half. It accepted any positive integer, and the HTTP timeout
+    is derived from it -- so an unbounded pulse is an unbounded time for which
+    this process holds a connection open for one press."""
+    with pytest.raises(ConfigError) as raised:
+        AgentConfig.from_file(written(tmp_path, with_relay(tmp_path, pulse_ms=pulse_ms)))
+    assert "pulse_ms" in str(raised.value)
+
+
+@pytest.mark.parametrize("pulse_ms", [1, 500, 6000, 10_000])
+def test_a_pulse_inside_them_is_accepted_and_the_timeout_follows_it(tmp_path, pulse_ms):
+    """THE CONTROL on both ends, and the derivation measured on the value."""
+    from gate_agent.relay import DEFAULT_ANSWER_MARGIN_S
+
+    config = AgentConfig.from_file(written(tmp_path, with_relay(tmp_path, pulse_ms=pulse_ms)))
+    relay = config.intercoms[0].relay
+    assert relay.pulse_ms == pulse_ms
+    assert relay.answer_margin_s == DEFAULT_ANSWER_MARGIN_S
+    assert relay.timeout == pulse_ms / 1000 + DEFAULT_ANSWER_MARGIN_S
+
+
+def test_the_answer_margin_is_a_published_default_a_site_can_move(tmp_path):
+    """It is an ASSUMPTION -- nothing has driven a real unit -- so it is a
+    setting with a default rather than a constant, like every other number in
+    this configuration that nobody has measured."""
+    config = AgentConfig.from_file(
+        written(tmp_path, with_relay(tmp_path, pulse_ms=6000, margin=2.5))
+    )
+    assert config.intercoms[0].relay.answer_margin_s == 2.5
+    assert config.intercoms[0].relay.timeout == 8.5
