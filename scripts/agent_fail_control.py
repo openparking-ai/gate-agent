@@ -566,6 +566,85 @@ BREAKS = [
         "to": 'SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es")',
     },
     {
+        # F1. A SOURCE property, and it has to be: `list(a) != list(b)` behaves
+        # identically to `compare_digest` and differs only in TIMING, which
+        # nothing in this suite measures and which a timing test would measure
+        # flakily. So the sweep reads the comparison out of the source, the way
+        # the no-opening-authority sweeps read the request builders.
+        "name": "the_signature_is_compared_with_equals",
+        "why": "a forged signature leaks how much of it was right, one byte at a time",
+        "file": "src/gate_agent/tickets.py",
+        "from": "    if not hmac.compare_digest(signature, expected):",
+        "to": "    if list(signature) != list(expected):",
+    },
+    {
+        "name": "a_ticket_is_verified_without_its_signature",
+        "why": "any well-formed payload is accepted, so anybody can mint this site's tickets",
+        "file": "src/gate_agent/tickets.py",
+        "from": "    if not hmac.compare_digest(signature, expected):",
+        "to": "    if False:",
+    },
+    {
+        "name": "a_ticket_has_more_than_one_spelling",
+        "why": "base32 padding bits go unchecked, so one ticket has several payloads",
+        "file": "src/gate_agent/tickets.py",
+        "from": '    if base64.b32encode(raw).decode("ascii").rstrip("=") != text:',
+        "to": "    if False:",
+    },
+    {
+        "name": "a_reference_may_hold_a_confusable",
+        "why": "`I`, `O`, `0` and `1` come back, and a person reads one out wrongly",
+        "file": "src/gate_agent/tickets.py",
+        "from": 'TICKET_REF_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"',
+        "to": 'TICKET_REF_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"',
+    },
+    {
+        "name": "a_ticket_ref_is_drawn_from_random",
+        "why": "references become predictable, so the next one can be guessed",
+        "file": "src/gate_agent/tickets.py",
+        "from": "            secrets.choice(TICKET_REF_ALPHABET) for _ in range(TICKET_REF_LENGTH)",
+        "to": "            TICKET_REF_ALPHABET[0] for _ in range(TICKET_REF_LENGTH)",
+    },
+    {
+        "name": "the_signing_key_may_be_typed",
+        "why": "the one case needing no measurement stops being refused",
+        "file": "src/gate_agent/config.py",
+        "from": "    if len(key) < MINIMUM_SIGNING_KEY:",
+        "to": "    if False:",
+    },
+    {
+        # Flipping `repr=False` on the decorator was a NO-OP and this is why:
+        # `dataclass` does not overwrite a `__repr__` defined in the class body,
+        # so the explicit one won either way and the break measured nothing.
+        # The break has to be to the method that actually renders it.
+        "name": "the_signing_key_is_in_the_repr",
+        "why": "the key every ticket is signed with reaches every traceback and log line",
+        "file": "src/gate_agent/config.py",
+        "from": '            f"TicketSettings(signing_key=<not shown>, '
+                'directory={self.directory!r}, "',
+        "to": '            f"TicketSettings(signing_key={self.signing_key!r}, '
+              'directory={self.directory!r}, "',
+    },
+    {
+        "name": "the_purge_keeps_what_it_cannot_read",
+        "why": "a purge deletes on an age it never measured",
+        "file": "src/gate_agent/tickets.py",
+        "from": "                log.warning(\n"
+                '                    "%s: a ticket record with no readable issued_at", path.name\n'
+                "                )\n"
+                "                continue",
+        "to": "                path.unlink(missing_ok=True)\n"
+              "                removed += 1\n"
+              "                continue",
+    },
+    {
+        "name": "a_ticket_id_may_become_a_path",
+        "why": "a record with a `..` in its id is written somewhere nobody declared",
+        "file": "src/gate_agent/tickets.py",
+        "from": "        if not _RECORD_ID.match(record.ticket_id):",
+        "to": "        if False:",
+    },
+    {
         # F0.7. The round-5 merge gate's other open item. `_reconnect()` covers
         # a socket lost inside a RUNNING process; `start()` covered nothing, so
         # a restarted agent answered the next call with the previous process's

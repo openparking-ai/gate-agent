@@ -120,6 +120,27 @@ def _auth_token_file(tmp_path, mode):
     return lambda: read_secret_file(str(token), "--auth-token-file", None)
 
 
+def _signing_key_file(tmp_path, mode):
+    key = written(tmp_path, "tickets.key", "a-signing-key-long-enough-for-the-floor", mode)
+    return lambda: AgentConfig.from_dict(
+        agent_raw_for(tmp_path, tickets={"signing_key_file": str(key),
+                                         "directory": str(tmp_path / "tickets")})
+    )
+
+
+def _act_token_file(tmp_path, mode):
+    token = written(tmp_path, "lane.act-token", "an-act-token", mode)
+    key = written(tmp_path, "tickets-for-act.key", "a-signing-key-long-enough-for-the-floor",
+                  0o600)
+    return lambda: AgentConfig.from_dict(
+        agent_raw_for(
+            tmp_path,
+            lane_extra={"act_token_file": str(token)},
+            tickets={"signing_key_file": str(key), "directory": str(tmp_path / "tickets")},
+        )
+    )
+
+
 #: Keyed on the `where` the refusal names, which is the same key
 #: `config.SECRET_FILE_IS` is keyed on. The last test compares the two sets.
 CASES = {
@@ -129,6 +150,8 @@ CASES = {
     "[lanes.*].token_file": _lanes_token_file,
     "[intercoms.*].dial_secret_file": _dial_secret_file,
     "--auth-token-file": _auth_token_file,
+    "[tickets].signing_key_file": _signing_key_file,
+    "[lanes.*].act_token_file": _act_token_file,
 }
 
 
@@ -208,6 +231,9 @@ NOT_A_CREDENTIAL = {
     ("store.py", "_read_record"): "a capture's own sidecar, which holds no credential",
     ("store.py", "_write_atomic_body"): "a capture's image, and it is a WRITE",
     ("capture.py", "image"): "a capture's own image, served by `GET /v1/capture/images/<id>`",
+    ("tickets.py", "read"): "a ticket record, which holds no credential",
+    ("tickets.py", "purge"): "a ticket record's issued_at, to decide its age",
+    ("tickets.py", "write"): "a ticket record, and it is a WRITE",
 }
 
 

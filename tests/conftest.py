@@ -407,7 +407,7 @@ def agent_for(config, user_agent=None, clock=None, now=None):
     return agent
 
 
-def agent_raw_for(tmp_path, *, lane_extra=None, dial_secret_file=None) -> dict:
+def agent_raw_for(tmp_path, *, lane_extra=None, dial_secret_file=None, tickets=None) -> dict:
     """The smallest agent configuration `AgentConfig.from_dict` accepts, as a dict.
 
     Here rather than in one test file because the credential sweep needs to
@@ -429,6 +429,7 @@ def agent_raw_for(tmp_path, *, lane_extra=None, dial_secret_file=None) -> dict:
         "languages": {"driver": ["en"], "operator": "en"},
         "authorisations": {"open_now": True, "do_not_open": True},
         "escalation": {"human_sip_uri": "sip:duty@10.0.0.5"},
+        **({"tickets": tickets} if tickets else {}),
     }
 
 
