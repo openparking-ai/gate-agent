@@ -27,8 +27,20 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+
+def decided_at(age_seconds: float = 0.0) -> str:
+    """A `decision.at` this many seconds OLD, as a lane publishes it.
+
+    The agent's `[cases] decision_max_age_seconds` has a fixture input on both
+    sides of it because of this: `decided_at()` is fresh and
+    `decided_at(3600)` is an hour ago, and neither is a string anybody typed.
+    """
+    return (datetime.now(UTC) - timedelta(seconds=age_seconds)).isoformat()
+
 
 #: Every malfunction code, COPIED FROM `lane-controller/docs/CONTRACT.md`, from
 #: the `<!--payload:sets-->` block under "The closed sets". Not imported: an
@@ -99,6 +111,28 @@ class ForeignLane:
         self.requests: list[tuple[str, str]] = []
         #: What this lane says about one code, so a test can move it.
         self.states: dict[str, str] = {}
+        #: What this lane's last decision and current transit are, so a test can
+        #: move them. `None` for `decision` is what a lane that has decided
+        #: nothing serves -- it keeps no state store, so that is the honest
+        #: answer after a restart and not the same thing as "nothing has ever
+        #: happened here". Added for the agent round: the case a driver is told
+        #: is derived from exactly these two fields, so a fixture that could not
+        #: move them could not exercise a single row of that table.
+        self.decision: dict | None = {
+            "outcome": "fallback",
+            "reason": VENDOR_REASON,
+            "fallback": None,
+            "cause": None,
+            "presence": None,
+            # PRODUCED, not typed. The agent now branches on the AGE of this
+            # moment, so a fixed string is a fixture that drifts to the stale
+            # side of the threshold as the wall clock moves and can never land
+            # on the fresh side again. `decided_at()` is how a test asks for
+            # either.
+            "at": decided_at(),
+            "read_ref": None,
+        }
+        self.transit: dict = {"state": "none", "since": None}
         self.sources: dict[str, str] = {}
         self.never_alarm_override: dict[str, bool] = {}
         #: Whether this lane omits `never_alarm` entirely -- what a serialiser
@@ -168,19 +202,14 @@ class ForeignLane:
         return payload
 
     def state(self) -> dict:
-        return {
+        payload = {
             "contract_version": 1,
-            "decision": {
-                "outcome": "fallback",
-                "reason": VENDOR_REASON,
-                "fallback": None,
-                "cause": None,
-                "presence": None,
-                "at": "2026-08-30T14:03:11.482913+00:00",
-                "read_ref": None,
-            },
-            "transit": {"state": "none", "since": None},
+            "decision": self.decision,
+            "transit": self.transit,
         }
+        if _break("future_version"):
+            payload["contract_version"] = 99
+        return payload
 
     def health(self) -> dict:
         """Every code in the contract version this lane claims.

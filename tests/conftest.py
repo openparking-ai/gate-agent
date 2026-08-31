@@ -229,3 +229,166 @@ def capture_for(config, store=None, now=None, camera_factory=None):
     if camera_factory is not None:
         kwargs["camera_factory"] = camera_factory
     return CaptureProcess(config, store, now=now, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# The agent
+# ---------------------------------------------------------------------------
+
+
+def wav(path, seconds: float = 0.5, rate: int = 8000):
+    """A short mono 16-bit WAV at a real path.
+
+    Used for the per-intercom `name_audio`, which is a SITE's file: the package
+    ships no recording that can say the name of a door, so a test that wanted
+    one had to make it. Silence is enough here -- what is measured is which file
+    was played to which leg and in what order, and that is the path.
+    """
+    import wave
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(b"\x00\x00" * int(rate * seconds))
+    return path
+
+
+#: The dial secret the tests' declared intercom uses, and the account it makes.
+#: Long enough to pass the floor `config.py` refuses below, and obviously not a
+#: secret anybody generated -- what a fixture must not do is look like the real
+#: thing, and what it must do is exercise the same code path.
+DIAL_SECRET = "test-only-dial-secret-0000"
+INTERCOM_ACCOUNT = "agent-" + DIAL_SECRET
+#: A second one, for a test that needs two doors.
+OTHER_SECRET = "test-only-dial-secret-1111"
+OTHER_ACCOUNT = "agent-" + OTHER_SECRET
+
+
+def secret_file(path, secret: str = DIAL_SECRET):
+    """A dial-secret file with the permissions `config.py` insists on."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(secret + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def agent_config_for(
+    tmp_path,
+    *,
+    lane_url: str | None = None,
+    intercom: str = "sip:door1@10.0.0.9",
+    standalone: bool = False,
+    driver_languages=("en", "es-ES"),
+    operator_language: str = "en",
+    authorisations=("open_now", "open_and_flag", "do_not_open", "hold", "call_back"),
+    human_sip_uri: str = "sip:duty@10.0.0.5",
+    transfer_sip_uri: str | None = None,
+    no_answer_seconds: float = 30.0,
+    nothing_usable_seconds: float = 20.0,
+    hold_reprompt_seconds: float = 45.0,
+    audio_directory=None,
+    extra_intercoms=(),
+    name_audio_seconds: float = 0.5,
+    name_audio_rate: int = 8000,
+    name_audio_max_seconds: float = 10.0,
+    line_timeout_seconds: float = 10.0,
+    decision_max_age_seconds: float = 120.0,
+    account_user: str = INTERCOM_ACCOUNT,
+):
+    """An `AgentConfig` built the way `from_dict` would, without a TOML file.
+
+    The audio directory defaults to the one that SHIPPED with the package, so a
+    test exercises the files a site would get rather than files a test wrote --
+    a fixture of its own would make "every line has audio" a claim about the
+    fixture.
+    """
+    from gate_agent.config import AgentConfig, Intercom, UserAgentSettings
+    from gate_agent.config import Target as _Target
+    from gate_agent.contract import Authorisation, TargetKind
+
+    name_audio = wav(
+        tmp_path / "site" / "door1.wav",
+        seconds=name_audio_seconds,
+        rate=name_audio_rate,
+    )
+    lanes = ()
+    lane_name = None
+    if lane_url is not None and not standalone:
+        lane_name = "entry"
+        lanes = (
+            _Target(
+                name=lane_name,
+                kind=TargetKind.LANE,
+                url=lane_url.rstrip("/"),
+                poll_seconds=30.0,
+                timeout_seconds=5.0,
+            ),
+        )
+    intercoms = [
+        Intercom(
+            sip_uri=intercom,
+            lane=lane_name,
+            name_audio=name_audio,
+            account_user=account_user,
+        )
+    ]
+    intercoms.extend(extra_intercoms)
+    return AgentConfig(
+        agent_id=f"agent-{next(_ids)}",
+        site_id="site-1",
+        intercoms=tuple(intercoms),
+        lanes=lanes,
+        user_agent=UserAgentSettings(
+            kind="baresip",
+            host="127.0.0.1",
+            port=4444,
+            operator_aor="sip:agent-operator@10.0.0.20",
+        ),
+        driver_languages=tuple(driver_languages),
+        operator_language=operator_language,
+        authorisations=frozenset(Authorisation(one) for one in authorisations),
+        human_sip_uri=human_sip_uri,
+        audio_directory=audio_directory or _shipped_audio(),
+        transfer_sip_uri=transfer_sip_uri,
+        no_answer_seconds=no_answer_seconds,
+        nothing_usable_seconds=nothing_usable_seconds,
+        hold_reprompt_seconds=hold_reprompt_seconds,
+        decision_max_age_seconds=decision_max_age_seconds,
+        line_timeout_seconds=line_timeout_seconds,
+        name_audio_max_seconds=name_audio_max_seconds,
+    )
+
+
+def _shipped_audio():
+    from pathlib import Path
+
+    import gate_agent
+
+    return Path(gate_agent.__file__).resolve().parent / "audio"
+
+
+def agent_for(config, user_agent=None, clock=None, now=None):
+    """An `Agent` on a fake user agent and a clock a test can move.
+
+    The fake is told which accounts the configuration declares, so that
+    `Agent.start()`'s check finds them -- a test that means to measure the
+    refusal sets `held_accounts` on the fake instead.
+    """
+    from fake_ua import FakeUa
+    from gate_agent.agent import Agent
+
+    user_agent = user_agent or FakeUa()
+    if getattr(user_agent, "declared_accounts", None) == ():
+        user_agent.declared_accounts = tuple(
+            intercom.account_user for intercom in config.intercoms
+        )
+    agent = Agent(
+        config,
+        user_agent,
+        clock=clock or FakeClock(),
+        now=now or FakeUtc(),
+    )
+    agent.start()
+    return agent

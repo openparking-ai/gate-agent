@@ -23,6 +23,7 @@ from .lane import (
     VENDOR_CAVEAT,
     VENDOR_REASON,
     ForeignLane,
+    decided_at,
     make_server,
 )
 
@@ -32,5 +33,6 @@ __all__ = [
     "VENDOR_CAVEAT",
     "VENDOR_REASON",
     "ForeignLane",
+    "decided_at",
     "make_server",
 ]

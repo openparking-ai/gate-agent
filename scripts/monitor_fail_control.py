@@ -770,7 +770,12 @@ def stage() -> Path:
 
 def run(directory: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, "-m", "pytest", "-q"],
+        # `not sip` because the SIP measurements take a real baresip and real
+        # seconds, and none of the breaks below is about them -- running them
+        # under thirty breaks would add half an hour to a check whose subject is
+        # elsewhere. They carry their own controls; see
+        # `scripts/agent_fail_control.py` for the same note.
+        [sys.executable, "-m", "pytest", "-q", "-m", "not sip"],
         cwd=directory,
         capture_output=True,
         text=True,

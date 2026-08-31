@@ -35,7 +35,12 @@ from foreign_lane import ForeignLane
 from foreign_lane import make_server as foreign_server
 from gate_agent.config import DEFAULT_MAX_SNAPSHOT_BYTES_SETTING, RETENTION_DAYS_BOUNDS
 from gate_agent.contract import (
+    AUTHORISATION_DIGITS,
     CONTRACT_VERSION,
+    AgentCase,
+    AgentCode,
+    AgentEventKind,
+    Authorisation,
     CameraUnreachableCause,
     CaptureCode,
     CaptureReason,
@@ -112,6 +117,12 @@ ROUTE_PAYLOADS = {"monitor", "health", "events"}
 #: nobody checks is exactly the copy that drifts.
 CAPTURE_PAYLOADS = {"capture", "capture_health", "capture_records"}
 
+#: The agent's route payloads, checked in `tests/test_agent_contract.py`. Named
+#: here for the same reason the capture process's are: this file's "every block
+#: belongs to a route" assertion accounts for every block in the document rather
+#: than being loosened to ignore whatever it does not recognise.
+AGENT_PAYLOADS = {"agent", "agent_health", "agent_events"}
+
 
 def doc_payloads() -> dict[str, dict]:
     """Every `<!--payload:NAME-->` example in `docs/CONTRACT.md`, parsed."""
@@ -155,7 +166,7 @@ def test_the_document_shows_exactly_the_payloads_the_code_builds(watched):
     a field added, renamed or dropped in either goes red.
     """
     doc = doc_payloads()
-    assert set(doc) == ROUTE_PAYLOADS | CAPTURE_PAYLOADS | {"sets"}, (
+    assert set(doc) == ROUTE_PAYLOADS | CAPTURE_PAYLOADS | AGENT_PAYLOADS | {"sets"}, (
         "every route has a payload example, every example belongs to a route, and "
         f"`sets` is the closed-set block that is not a route; found {sorted(doc)}"
     )
@@ -507,7 +518,28 @@ PUBLISHED_SETS = {
     # a capture example is `null`. This block is the one place a number in this
     # document is held to the constant it came from.
     "max_snapshot_bytes_default": lambda: DEFAULT_MAX_SNAPSHOT_BYTES_SETTING,
+    # The agent's, added in the round that gave this package its third process.
+    # Same rule and same reason: a paging system, an operator console or a
+    # third-party intercom integration branches on these, and a document that
+    # withholds them moves the copy into the implementer's guess.
+    "agent_codes": lambda: [code.value for code in AgentCode],
+    "agent_cases": lambda: [case.value for case in AgentCase],
+    "authorisations": lambda: [value.value for value in Authorisation],
+    # NOT a set. It is the DIGIT-to-authorisation mapping, published because it
+    # is fixed across every site by decision -- the person keying it is often the
+    # same person across several garages at three in the morning.
+    "authorisation_digits": lambda: {
+        digit: value.value for digit, value in AUTHORISATION_DIGITS.items()
+    },
+    "agent_event_kinds": lambda: [kind.value for kind in AgentEventKind],
+    "shipped_languages": lambda: list(_shipped_languages()),
 }
+
+
+def _shipped_languages():
+    from gate_agent.lines import SHIPPED_LANGUAGES
+
+    return SHIPPED_LANGUAGES
 
 
 def test_the_document_publishes_every_closed_set_this_package_defines(watched):
