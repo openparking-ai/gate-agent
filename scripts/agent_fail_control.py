@@ -32,6 +32,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _control import intact, judge  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 
 BREAKS = [
@@ -581,25 +585,13 @@ def run(directory: Path) -> subprocess.CompletedProcess:
     )
 
 
-def tail(result: subprocess.CompletedProcess, lines: int = 1) -> str:
-    body = [line for line in result.stdout.strip().splitlines() if line.strip()]
-    return " | ".join(body[-lines:]) if body else "(no output)"
-
-
 failures = 0
 
 print("== control A: the suite must PASS intact ==")
 intact_dir = stage()
 try:
-    intact = run(intact_dir)
-    if intact.returncode == 0:
-        print(f"  control A OK — {tail(intact)}")
-    else:
-        print(
-            f"  CONTROL A FAILED — the suite does not pass even intact: {tail(intact)}",
-            file=sys.stderr,
-        )
-        print(intact.stdout, file=sys.stderr)
+    COLLECTED = intact(run(intact_dir))
+    if COLLECTED < 0:
         failures += 1
 finally:
     shutil.rmtree(intact_dir, ignore_errors=True)
@@ -613,22 +605,16 @@ for brk in BREAKS:
         if brk["from"] not in source:
             # A break whose anchor has moved applies nothing, and the run then
             # reports a passing suite as a failed control -- for the wrong
-            # reason. Named here so the two cannot be confused.
+            # reason. Named here so the two cannot be confused. The judgement
+            # below catches the OTHER shape of the same mistake: an anchor that
+            # is still there but whose replacement makes the suite ERROR.
             print(f"  {brk['name']:38} *** ANCHOR NOT FOUND in {brk['file']} ***",
                   file=sys.stderr)
             failures += 1
             continue
         path.write_text(source.replace(brk["from"], brk["to"], 1), encoding="utf-8")
-        broken = run(directory)
-        if broken.returncode == 0:
-            print(
-                f"  {brk['name']:38} *** PASSED WHEN {brk['why'].upper()} —"
-                " the suite is not measuring this ***",
-                file=sys.stderr,
-            )
+        if not judge(brk["name"], brk["why"], COLLECTED, run(directory), width=38):
             failures += 1
-        else:
-            print(f"  {brk['name']:38} fails as required when {brk['why']} — {tail(broken)}")
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 
