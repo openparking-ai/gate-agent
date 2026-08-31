@@ -157,9 +157,8 @@ BREAKS = [
         "name": "the_intercom_repr_shows_the_secret",
         "why": "every log line and traceback touching a configuration carries it",
         "file": "src/gate_agent/config.py",
-        "from": "            f\"name_audio={self.name_audio!r}, account_user=<not shown>)\"",
-        "to": "            f\"name_audio={self.name_audio!r}, "
-              "account_user={self.account_user!r})\"",
+        "from": '            "account_user=<not shown>)"',
+        "to": '            f"account_user={self.account_user!r})"',
     },
     {
         "name": "an_unrecognised_reason_is_mapped",
@@ -564,6 +563,94 @@ BREAKS = [
         "file": "src/gate_agent/lines.py",
         "from": 'SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es-ES")',
         "to": 'SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es")',
+    },
+    {
+        # F2. The display and the font.
+        "name": "an_idle_display_is_white",
+        "why": "a blank frame is a floodlight pointed at a windscreen at night",
+        "file": "src/gate_agent/display.py",
+        "from": "        self.show([[1] * width for _ in range(height)])",
+        "to": "        self.show([[0] * width for _ in range(height)])",
+    },
+    {
+        "name": "a_padded_stride_is_ignored",
+        "why": "a frame is written at the wrong stride, which is diagonal noise",
+        "file": "src/gate_agent/display.py",
+        "from": "            stride = max(int(published), stride)",
+        "to": "            stride = stride",
+    },
+    {
+        "name": "a_depth_this_build_cannot_write_is_accepted",
+        "why": "a monochrome frame goes to a screen whose channel order it has guessed",
+        "file": "src/gate_agent/display.py",
+        "from": "    if depth not in SUPPORTED_DEPTHS:",
+        "to": "    if False:",
+    },
+    {
+        "name": "the_symbol_is_scaled_by_a_fraction_of_a_module",
+        "why": "a module drawn 3.4 pixels wide is one a camera reads wrongly at its edges",
+        "file": "src/gate_agent/display.py",
+        "from": "    scale = max(1, int(short * SYMBOL_SHARE) // across)",
+        "to": "    scale = max(1, int(short * SYMBOL_SHARE * 1.4) // across)",
+    },
+    {
+        "name": "a_character_with_no_glyph_is_left_blank",
+        "why": "a hole in the frame instead of a startup refusal naming the string",
+        "file": "src/gate_agent/font.py",
+        "from": "    if character not in GLYPHS:\n        raise UndrawableCharacter(character)",
+        "to": '    if character not in GLYPHS:\n        return ("." * GLYPH_WIDTH,) * CELL_HEIGHT',
+    },
+    {
+        "name": "a_display_language_with_no_words_is_accepted",
+        "why": "a driver is shown a code with no instruction under it in their language",
+        "file": "src/gate_agent/config.py",
+        "from": "    missing = missing_display_text(driver_languages)\n    if missing:",
+        "to": "    missing = missing_display_text(driver_languages)\n    if False:",
+    },
+    {
+        "name": "a_display_nobody_declared_is_accepted",
+        "why": "a door publishes `has_display` and shows a driver nothing",
+        "file": "src/gate_agent/config.py",
+        "from": "            if display not in (displays or {}):",
+        "to": "            if False:",
+    },
+    {
+        # F2. The QR encoder. Every break here is one the independent decoder
+        # in `tests/test_qr.py` has to notice -- an encoder proven only by
+        # itself is a picture of a QR code.
+        "name": "the_mask_is_never_chosen",
+        "why": "one fixed mask is used, so a symbol a decoder cannot lock on to still ships",
+        "file": "src/gate_agent/qr.py",
+        "from": "        if best is None or score < best[0]:",
+        "to": "        if best is None:",
+    },
+    {
+        "name": "the_error_correction_is_dropped",
+        "why": "a symbol ships with no recovery, so a thumbprint loses a ticket",
+        "file": "src/gate_agent/qr.py",
+        "from": "    ec_blocks = [error_correction(block, ec_per_block) for block in blocks]",
+        "to": "    ec_blocks = [[0] * ec_per_block for _ in blocks]",
+    },
+    {
+        "name": "the_format_information_names_the_wrong_level",
+        "why": "a decoder unmasks with the wrong level and reads gibberish",
+        "file": "src/gate_agent/qr.py",
+        "from": "EC_M = 0b00",
+        "to": "EC_M = 0b01",
+    },
+    {
+        "name": "the_block_table_is_off_by_one",
+        "why": "the codewords no longer fill the symbol, and nothing said so",
+        "file": "src/gate_agent/qr.py",
+        "from": "    6: (16, ((4, 27),)),",
+        "to": "    6: (16, ((4, 28),)),",
+    },
+    {
+        "name": "a_payload_too_long_is_truncated",
+        "why": "a ticket is cut to fit, and the exit reads the remainder as a forgery",
+        "file": "src/gate_agent/qr.py",
+        "from": "    raise QrTooLong(\n        f\"a payload of ",
+        "to": "    return MAX_VERSION, picked\n    raise QrTooLong(\n        f\"a payload of ",
     },
     {
         # F1. A SOURCE property, and it has to be: `list(a) != list(b)` behaves

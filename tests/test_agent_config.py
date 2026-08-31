@@ -595,3 +595,121 @@ def test_the_signing_key_is_not_in_the_repr_of_the_settings(tmp_path):
     # THE CONTROL: the key really is the one loaded, so the absence above is
     # about the repr and not about a key that never arrived.
     assert tickets.signing_key.startswith(b"PLANTEDKEY")
+
+
+# ---------------------------------------------------------------------------
+# [displays] and [intercoms.<uri>] display
+# ---------------------------------------------------------------------------
+
+
+def a_display(tmp_path, width=800, height=480, depth=32):
+    """A framebuffer and its sysfs, as a driver presents them."""
+    sysfs = tmp_path / "sys" / "fb0"
+    sysfs.mkdir(parents=True, exist_ok=True)
+    (sysfs / "virtual_size").write_text(f"{width},{height}\n", encoding="ascii")
+    (sysfs / "bits_per_pixel").write_text(f"{depth}\n", encoding="ascii")
+    device = tmp_path / "fb0"
+    device.write_bytes(b"")
+    return device, sysfs
+
+
+def with_display(tmp_path, text: str, **screen) -> str:
+    device, sysfs = a_display(tmp_path, **screen)
+    return (
+        text.replace('lane = "entry"', 'lane = "entry"\ndisplay = "front"')
+        + f'\n[displays.front]\nframebuffer = "{device}"\nsysfs = "{sysfs}"\n'
+    )
+
+
+def test_a_declared_display_is_opened_and_its_geometry_read_at_startup(tmp_path):
+    """Read, never configured. A site that typed its own resolution would be a
+    site whose display is silently wrong the day somebody changes a cable."""
+    config = AgentConfig.from_file(
+        written(tmp_path, with_display(tmp_path, with_tickets(tmp_path), width=1024, height=600))
+    )
+    assert set(config.displays) == {"front"}
+    assert (config.displays["front"].geometry.width,
+            config.displays["front"].geometry.height) == (1024, 600)
+    assert config.intercoms[0].display == "front"
+
+
+def test_an_intercom_with_no_display_is_a_supported_configuration(tmp_path):
+    """Round 5 exactly: its cases go to a human and it offers no ticket."""
+    config = AgentConfig.from_file(written(tmp_path))
+    assert config.displays == {}
+    assert config.intercoms[0].display is None
+
+
+def test_an_intercom_pointing_at_a_display_nobody_declared_is_refused(tmp_path):
+    """It would publish `has_display` and show a driver nothing."""
+    text = with_display(tmp_path, with_tickets(tmp_path)).replace(
+        'display = "front"', 'display = "side"'
+    )
+    refused(tmp_path, text, "there is no [displays.side]")
+
+
+def test_a_display_with_a_depth_this_build_cannot_write_is_refused_at_startup(tmp_path):
+    """Not at the first arrival. An installer is standing there now; a driver
+    will not be until three in the morning."""
+    refused(
+        tmp_path,
+        with_display(tmp_path, with_tickets(tmp_path), depth=8),
+        "bits per pixel",
+    )
+
+
+def test_a_display_whose_geometry_cannot_be_read_is_refused_naming_the_file(tmp_path):
+    text = with_display(tmp_path, with_tickets(tmp_path))
+    (tmp_path / "sys" / "fb0" / "virtual_size").unlink()
+    refused(tmp_path, text, "virtual_size")
+
+
+def test_a_display_with_no_framebuffer_declared_is_refused(tmp_path):
+    """No default: a guessed device is a frame written to whatever else is on
+    that box."""
+    text = with_display(tmp_path, with_tickets(tmp_path))
+    device_line = [one for one in text.splitlines() if one.startswith("framebuffer")][0]
+    refused(tmp_path, text.replace(device_line + "\n", ""), "does not declare framebuffer")
+
+
+def test_a_display_makes_the_tickets_section_required_and_says_which_intercom(tmp_path):
+    """A display is a thing that SHOWS a ticket, so a site with one needs a key
+    to sign them with -- and the refusal names the declaration that did it."""
+    refused(tmp_path, with_display(tmp_path, BASE), "[tickets] is not declared")
+    refused(tmp_path, with_display(tmp_path, BASE), "declares display")
+
+
+def test_a_language_whose_display_line_this_build_lacks_is_refused(tmp_path, monkeypatch):
+    """A driver shown a code with no instruction under it in their language.
+
+    Refused at STARTUP rather than drawn as a blank: a blank is a driver told
+    nothing.
+    """
+    from gate_agent import lines
+
+    monkeypatch.setitem(lines.DISPLAY_TEXT["display.instruction"], "es-ES", "")
+    text = with_display(tmp_path, with_tickets(tmp_path)).replace(
+        'driver = ["en"]', 'driver = ["en", "es-ES"]'
+    )
+    refused(tmp_path, text, "no display text for")
+
+
+def test_a_display_line_the_font_cannot_draw_is_refused(tmp_path, monkeypatch):
+    """Never a blank and never a substitution. A character with no glyph would be
+    a HOLE in the frame at three in the morning."""
+    from gate_agent import lines
+
+    monkeypatch.setitem(
+        lines.DISPLAY_TEXT["display.instruction"], "en", "take a photo of the code"
+    )
+    refused(tmp_path, with_display(tmp_path, with_tickets(tmp_path)), "cannot draw")
+
+
+def test_a_site_with_no_display_is_not_asked_for_display_words(tmp_path, monkeypatch):
+    """THE CONTROL for the two refusals above: they fire only where something
+    will be drawn. A site running round 5's agent is not refused for a language
+    whose display line this package has not written."""
+    from gate_agent import lines
+
+    monkeypatch.setitem(lines.DISPLAY_TEXT["display.instruction"], "en", "")
+    assert AgentConfig.from_file(written(tmp_path)) is not None

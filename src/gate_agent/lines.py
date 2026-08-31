@@ -61,6 +61,29 @@ OPERATOR_LINES: tuple[str, ...] = (
 
 LINES: tuple[str, ...] = DRIVER_LINES + OPERATOR_LINES
 
+#: The lines that are DRAWN rather than spoken, one per declared driver
+#: language, on the display beside the ticket.
+#:
+#: **They are a separate set from `LINES` and they have no audio.** A sentence
+#: on a screen and a sentence in a call are different things: nobody plays this
+#: one, `scripts/build_audio.py` does not generate a file for it, and the
+#: manifest has no row for it. Folding it into `LINES` would have produced a WAV
+#: nothing plays and a licence row for a recording nobody hears.
+DISPLAY_LINES: tuple[str, ...] = ("display.instruction",)
+
+#: **UPPER CASE, and it is a decision.** The font this package ships draws upper
+#: case only -- see `font.py` for why, and the short version is that half a font
+#: is half the drawing and half the review. A driver reads this through a
+#: windscreen at a few metres, which is the case upper case is better at
+#: anyway. A character the font cannot draw is a STARTUP REFUSAL naming the line
+#: and the language, never a blank on a screen.
+DISPLAY_TEXT: dict[str, dict[str, str]] = {
+    "display.instruction": {
+        "en": "TAKE A PHOTO OF THIS CODE, THEN PRESS THE BUTTON",
+        "es-ES": "HAGA UNA FOTO DE ESTE CÓDIGO Y PULSE EL BOTÓN",
+    },
+}
+
 #: The languages this repository ships text and audio for. A site may declare
 #: only these; anything else is refused at startup with this list in the message,
 #: because a language declared with no lines behind it is a silence with a
@@ -316,6 +339,44 @@ def missing_text(driver_languages, operator_language) -> tuple[str, ...]:
     return tuple(missing)
 
 
+def missing_display_text(driver_languages) -> tuple[str, ...]:
+    """Every `(line, language)` this repository has no DISPLAY words for.
+
+    The same shape and the same reason as `missing_text`: an installer told
+    about one missing language at a time restarts the process once per line.
+    """
+    return tuple(
+        f"{line} [{language}]"
+        for line in DISPLAY_LINES
+        for language in driver_languages
+        if not DISPLAY_TEXT.get(line, {}).get(language)
+    )
+
+
+def undrawable_display_text(driver_languages) -> tuple[str, ...]:
+    """Every display line the FONT cannot draw, with the characters it lacks.
+
+    A separate question from having the words: a line can exist and still hold a
+    character this package has no glyph for, and that would be a hole in a frame
+    at three in the morning rather than a refusal at installation.
+    """
+    from .font import missing as missing_glyphs
+
+    out = []
+    for line in DISPLAY_LINES:
+        for language in driver_languages:
+            text = DISPLAY_TEXT.get(line, {}).get(language)
+            if not text:
+                continue
+            absent = missing_glyphs(text)
+            if absent:
+                out.append(
+                    f"{line} [{language}]: no glyph for "
+                    + ", ".join(repr(one) for one in absent)
+                )
+    return tuple(out)
+
+
 def audio_name(line: str, language: str) -> str:
     """The file a line's audio lives in, DERIVED from the key and the language.
 
@@ -327,11 +388,15 @@ def audio_name(line: str, language: str) -> str:
 
 
 __all__ = [
+    "DISPLAY_LINES",
+    "DISPLAY_TEXT",
     "DRIVER_LINES",
     "LINES",
     "OPERATOR_LINES",
     "SHIPPED_LANGUAGES",
     "TEXT",
     "audio_name",
+    "missing_display_text",
     "missing_text",
+    "undrawable_display_text",
 ]
