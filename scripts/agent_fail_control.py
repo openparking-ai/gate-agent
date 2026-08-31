@@ -104,11 +104,25 @@ BREAKS = [
         "to": "        intercom = next(iter(self._by_account.values()), None)",
     },
     {
-        "name": "a_dial_secret_may_be_world_readable",
-        "why": "an intercom's identity is readable by every account on the box",
+        # It used to be spelt `a_dial_secret_may_be_world_readable`, because the
+        # dial secret was the only key with a guard. The guard is now one
+        # function and every credential file goes through it, so this one break
+        # takes the permission check off all six at once -- and the suite has a
+        # refusal per key to go red.
+        "name": "a_credential_file_may_be_world_readable",
+        "why": "every credential this package reads may be read by every account on the box",
         "file": "src/gate_agent/config.py",
         "from": "    if mode & SECRET_FORBIDDEN_MODE:",
         "to": "    if False:",
+    },
+    {
+        "name": "a_credential_is_read_without_the_guard",
+        "why": "one key goes back to reading its own file, so the guard has a hole again",
+        "file": "src/gate_agent/config.py",
+        "from": '            token = read_secret_file(table["token_file"], '
+                'f"[lanes.{name}].token_file", relative_to)',
+        "to": '            token = Path(table["token_file"]).read_text('
+              'encoding="utf-8").strip()',
     },
     {
         "name": "a_dial_secret_may_be_short_enough_to_type",

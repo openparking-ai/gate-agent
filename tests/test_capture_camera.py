@@ -143,6 +143,7 @@ def test_a_credential_in_a_snapshot_url_is_refused_at_startup(tmp_path):
     """
     auth = tmp_path / "camera.auth"
     auth.write_text("operator:s3cret\n", encoding="utf-8")
+    auth.chmod(0o600)
     raw = {
         "capture": {
             "id": "capture-1",
@@ -180,6 +181,7 @@ def test_a_credential_as_a_value_is_refused_by_name(tmp_path):
     """`password = "..."` under a camera is the same failure, one level down."""
     auth = tmp_path / "camera.auth"
     auth.write_text("operator:s3cret\n", encoding="utf-8")
+    auth.chmod(0o600)
     raw = {
         "capture": {
             "id": "capture-1",
@@ -378,6 +380,7 @@ def test_a_snapshot_ceiling_that_is_not_below_max_bytes_is_refused_at_startup(tm
     """
     auth = tmp_path / "camera.auth"
     auth.write_text("operator:s3cret\n", encoding="utf-8")
+    auth.chmod(0o600)
     raw = {
         "capture": {
             "id": "capture-1",
