@@ -30,7 +30,7 @@ dependencies = []
 dev = [
   "pytest>=8",
   "ruff>=0.8",
-  "openparking-lane-controller @ git+https://github.com/openparking-ai/lane-controller@bdaed427c831fb8f0f392c7478146e266116efa0",
+  "openparking-lane-controller @ git+https://github.com/openparking-ai/lane-controller@ebc585d963e5a0bd5153a996409a119ebe3b0bb2",
 ]
 
 [project.scripts]
@@ -42,9 +42,22 @@ gate-agent = "gate_agent.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# The audio the agent plays is PART OF THE PACKAGE, not a repository asset that
+# happens to sit beside it. A file the agent refuses to start without cannot be
+# something `pip install` leaves behind, and a site's operator has no way to know
+# that ninety files were meant to arrive.
+gate_agent = ["audio/*/*.wav", "audio/MANIFEST.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
+# `sip` marks the tests that drive a REAL baresip against a real registrar over
+# real sockets. They are the only measurements in this suite that touch SIP at
+# all, and CI runs them with REQUIRE_SIP=1 -- which turns a missing baresip into
+# a failure rather than a skip, because a guarantee test that can skip silently
+# is not a guarantee.
+markers = ["sip: drives a real SIP user agent over real sockets"]
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,184 @@
+# The gate agent. Answers the intercom, says what happened, calls a person.
+#
+# IT OPENS NOTHING. Every authorisation below is a RECORD of what a person said.
+# There is no vend route in this package and none on the lane contract this build
+# reads, so `open_now` ends in an event, a message to the driver, and one fixed
+# sentence to the person who keyed it saying this version cannot move a barrier.
+#
+# Almost nothing here has a default, and the ones that do are published in
+# `docs/CONTRACT.md`. A defaulted intercom answers a door nobody declared; a
+# defaulted lane tells a driver about a barrier that is not theirs; a defaulted
+# language plays somebody a sentence in a language nobody at this site speaks.
+
+[agent]
+id = "agent-1"
+site_id = "site-1"
+# Optional. Defaults to the audio that shipped with the package, which is the
+# only default in this file that is safe: it is a directory this package
+# installed and whose every file it checks at startup. Point it somewhere else
+# if this site has recorded its own voice; a missing line is refused either way.
+# audio_directory = "/opt/openparking/audio"
+# event_window_depth = 256
+
+# --- the external SIP user agent -------------------------------------------
+# An INSTALL REQUIREMENT, not a dependency of this package: baresip runs as its
+# own process and this agent drives it over its `ctrl_tcp` control socket. The
+# version is checked at startup and a version this build was not tested against
+# is refused.
+#
+# The baresip side needs things that are easy to get wrong, and THREE OF THEM
+# ARE NOW CHECKED: the agent reads baresip's loaded configuration back out of
+# the running process at startup, over the same control socket, and refuses to
+# start naming the setting. That needs baresip's `debug_cmd` module, which
+# answers `config` and `modules` -- so it is an install requirement too, and the
+# agent refuses by name if it is missing.
+#   ctrl_tcp_listen        127.0.0.1:4444    # loopback. That socket can place a
+#                                            # call and bridge two of them.
+#                                            # NOT checked: the agent reaches it,
+#                                            # so it is on a socket by definition
+#   call_hold_other_calls  no                # CHECKED. Otherwise calling the
+#                                            # person puts the driver on hold
+#                                            # behind our back
+#   audio_source / audio_player              # CHECKED. NOT `aubridge`: it loops
+#                                            # the player into the source, which
+#                                            # bridges every call to every other
+#                                            # whether this agent asked or not
+#   modules                ctrl_tcp,         # CHECKED, by name. `mixausrc`
+#                          mixausrc,         # plays one file into ONE leg and
+#                          mixminus,         # `mixminus` IS the bridge.
+#                          aufile, account,
+#                          menu, debug_cmd
+#   sip_cuser_random       (leave unset)     # NOT checked: baresip 4.11.0 does
+#                                            # not report it on `config`. With
+#                                            # it on, every intercom's call is
+#                                            # answered `404 Not Found` -- it
+#                                            # fails CLOSED, so a door that
+#                                            # never works, never a door
+#                                            # anybody can open
+[user_agent]
+kind = "baresip"
+host = "127.0.0.1"
+port = 4444
+# The ONE account this agent DIALS OUT from. There is no driver account here:
+# every intercom has an account of its own -- see `dial_secret_file` below --
+# and the driver's leg is whichever of them the call arrived at. baresip
+# identifies the stream to play into by the local account, so this one must not
+# collide with any intercom's; startup refuses it if it does.
+operator_aor = "sip:agent-operator@10.0.0.20"
+# timeout_seconds = 5.0
+# The LONGEST gap between attempts to reopen the control socket after it is
+# lost. `ctrl_tcp` accepts exactly one client, and baresip restarts, so this is
+# not a rare path: without it a lost socket was a permanent outage that only a
+# human restarting the agent could repair. The first retry is a quarter of a
+# second away and the gap doubles up to this.
+# reconnect_seconds = 5.0
+
+# --- the intercoms, and which lane each one is -----------------------------
+# WHAT IDENTIFIES AN INTERCOM IS THE ADDRESS IT DIALS, NOT WHO IT SAYS IT IS.
+# Each one gets an account of its own on baresip whose user part is a long
+# random string only this site knows:
+#
+#   1. put the string in a file readable by nobody but the agent's user
+#      (`chmod 600`) and name that file in `dial_secret_file`;
+#   2. add `<sip:agent-<that string>@10.0.0.20>` to baresip's own `accounts`
+#      file -- the agent refuses to start if an account is missing, naming the
+#      intercom;
+#   3. program `sip:agent-<that string>@10.0.0.20` into the door station as the
+#      number it calls.
+#
+# From then on a call is that intercom if and only if it arrived AT that
+# account. A caller who writes any `From` header it likes reaches nothing,
+# because the secret is never in a header -- it is the number dialled. What this
+# does NOT protect against: anybody who can read the door station's own
+# configuration can call as that door.
+#
+# The table KEY is the label this site gives the door. It is what appears on
+# events and on the read surface and what a person reads; nothing is routed on
+# it, because it comes from a `From` header.
+#
+# `name_audio` is the recording the PERSON hears first, saying where the call is
+# from. It is the site's file: no sentence in this package can say the name of a
+# door, and somebody told a case without being told which barrier has been told
+# half of what they need.
+[intercoms."sip:door1@10.0.0.9"]
+lane = "entry"
+name_audio = "/opt/openparking/audio/site/door1.wav"
+dial_secret_file = "/etc/openparking/gate-agent/door1.dial-secret"
+
+# A standalone intercom: no lane, and every call is a human case from the first
+# second. NOT a degraded mode -- a garage with an intercom and no gate is the
+# whole product for that site.
+[intercoms."sip:lobby@10.0.0.11"]
+lane = "none"
+name_audio = "/opt/openparking/audio/site/lobby.wav"
+dial_secret_file = "/etc/openparking/gate-agent/lobby.dial-secret"
+
+# --- the lanes it reads -----------------------------------------------------
+# Read GET-only, through the lane contract. Every declared lane must have an
+# intercom pointing at it: a lane nobody ever answers a call about is far more
+# likely to be a mistyped URI above, in which case every call at that door is
+# refused.
+[lanes.entry]
+url = "http://127.0.0.1:8090"
+# token_file = "/etc/openparking/lane.token"
+# timeout_seconds = 10.0
+
+# --- languages --------------------------------------------------------------
+# DECLARED, both. `driver` is the ORDER a driver hears every sentence in: they
+# have no keypad and no way to choose, so each sentence plays in every language
+# here, one after the other. `operator` is the one language the person on the
+# phone hears.
+[languages]
+driver = ["en", "es-ES"]
+operator = "en"
+
+# --- what the person on the phone may authorise -----------------------------
+# Each a boolean, no default, at least one true. A site that enables none has
+# called somebody who can authorise nothing.
+#
+# The DIGITS are fixed and published: 1 open now, 2 open and flag, 3 do not
+# open, 4 hold, 5 transfer, 6 call back. A site enables a subset; it does not
+# renumber the set, because the person keying it is often the same person across
+# several garages at three in the morning.
+[authorisations]
+open_now = true
+open_and_flag = true
+do_not_open = true
+hold = true
+transfer = false
+call_back = true
+
+# --- how old a lane decision may be and still be about THIS driver ----------
+# A SETTING AND AN ASSUMPTION, said plainly: nothing has measured how long a
+# lane decision stays the same car's. Two minutes is drawn from somebody walking
+# from a stopped car to a door station and pressing a button, which is a guess
+# about people rather than a measurement of them. Past it the driver gets a
+# person -- which is what every case but one already gets -- and it is the only
+# guard in front of `nothing_to_do`, the one case that reaches nobody.
+# [cases]
+# decision_max_age_seconds = 120.0
+
+# --- speech ------------------------------------------------------------------
+# `line_timeout_seconds`: how long ONE line may go on being undelivered before
+# the agent stops waiting for it. A refusal is usually a call whose audio stream
+# is a fifth of a second away; what this bounds is the other cause -- a file the
+# user agent will not decode, an audio mode it will not play into -- where the
+# retry never succeeds. Past it the leg is `audio_playback_failed` and the case
+# goes to a person, or ends if the person cannot be spoken to either.
+#
+# `name_audio_max_seconds`: the longest the site's own `name_audio` may be. The
+# person's briefing waits for the whole of it and the driver waits for the
+# briefing.
+# [speech]
+# line_timeout_seconds = 10.0
+# name_audio_max_seconds = 10.0
+
+# --- the person -------------------------------------------------------------
+[escalation]
+human_sip_uri = "sip:duty@10.0.0.5"
+# Required if `transfer` above is true, and startup refuses the pair otherwise:
+# the option would be offered to somebody who could key it and reach nobody.
+# transfer_sip_uri = "sip:manager@10.0.0.5"
+# no_answer_seconds = 30.0
+# nothing_usable_seconds = 20.0
+# hold_reprompt_seconds = 45.0

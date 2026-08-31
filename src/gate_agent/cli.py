@@ -2,8 +2,9 @@
 
     gate-agent monitor --config monitor.toml
     gate-agent capture --config capture.toml
+    gate-agent agent   --config agent.toml
 
-**Two processes, beside each other, and neither can open a barrier.** The
+**Three processes, beside each other, and none of them can open a barrier.** The
 monitor watches whatever a site declares and tells a human what changed. The
 capture process photographs a lane on a timer and on that lane's events, and
 writes to its own disk. They are separate processes for the reason every module
@@ -33,10 +34,13 @@ import sys
 import threading
 from pathlib import Path
 
+from .agent import Agent, AudioMissing
+from .agent_service import AgentService
+from .agent_service import make_server as make_agent_server
 from .capture import CaptureProcess, UnsupportedLaneContract
 from .capture_service import CaptureService
 from .capture_service import make_server as make_capture_server
-from .config import CaptureConfig, ConfigError, MonitorConfig
+from .config import AgentConfig, CaptureConfig, ConfigError, MonitorConfig
 from .monitor import Monitor, UnsupportedContract
 from .service import (
     InsecureBind,
@@ -47,6 +51,8 @@ from .service import (
 )
 from .sinks import build as build_sink
 from .store import CaptureStore, StoreUnwritable
+from .ua import UaUnreachable, UaUnsupportedVersion
+from .ua_baresip import BaresipUa
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,7 +100,117 @@ def build_parser() -> argparse.ArgumentParser:
              "carry, INCLUDING the images. Required for any --host that is not loopback: off "
              "loopback this surface serves photographs of cars and when they were taken",
     )
+    agent = sub.add_parser(
+        "agent", help="answer the intercom, say what happened, and call a person"
+    )
+    agent.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="the agent's TOML configuration. Every intercom, every lane, both languages, "
+             "the person to call and what they may authorise are DECLARED -- there is no "
+             "default for any of them, because each one decides what somebody at a barrier "
+             "is told or what a person on a phone is allowed to say",
+    )
+    agent.add_argument("--host", default="127.0.0.1")
+    agent.add_argument("--port", type=int, default=8094)
+    agent.add_argument(
+        "--auth-token-file",
+        type=Path,
+        help="a file holding the shared token every route of this agent's own surface must "
+             "carry. Required for any --host that is not loopback: off loopback this "
+             "surface publishes which intercoms a site has and when nobody answered a call",
+    )
     return parser
+
+
+def cmd_agent(args) -> int:
+    token = _token(args)
+    try:
+        assert_bind_allowed(args.host, args.port, token)
+    except InsecureBind as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+
+    try:
+        config = AgentConfig.from_file(args.config)
+    except ConfigError as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+
+    ua = BaresipUa(
+        host=config.user_agent.host,
+        port=config.user_agent.port,
+        operator_aor=config.user_agent.operator_aor,
+        timeout=config.user_agent.timeout_seconds,
+        reconnect_seconds=config.user_agent.reconnect_seconds,
+    )
+    agent = Agent(config, ua)
+
+    reach = "local only by design" if is_loopback(args.host) else "EXPOSED"
+    print(f"gate-agent agent on http://{args.host}:{args.port}  ({reach})")
+    print(f"  site {config.site_id}, agent {config.agent_id}")
+    print(f"  answering: {', '.join(intercom.sip_uri for intercom in config.intercoms)}")
+    print(f"  languages: driver {', '.join(config.driver_languages)}; "
+          f"operator {config.operator_language}")
+    print(f"  calling:   {config.human_sip_uri}")
+    print("  may authorise: " + ", ".join(
+        value.value for value in sorted(config.authorisations, key=lambda one: one.value)
+    ))
+    if not any(intercom.lane for intercom in config.intercoms):
+        # Said at the moment somebody starts it, because "it answers the
+        # intercom" and "it reads a lane" are different facts and this is the
+        # configuration where they come apart. NOT a degraded mode.
+        print("  STANDALONE: no intercom has a lane, so every call is a human case")
+    print("  ONE CASE AT A TIME: a call arriving during a case is refused unanswered, "
+          "whoever it is from (486 Busy Here)")
+    print("  OPENS NOTHING: no vend route here, none at any lane on this contract version")
+
+    try:
+        agent.start()
+    except AudioMissing as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+    except UaUnsupportedVersion as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+    except UaUnreachable as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+
+    server = make_agent_server(
+        AgentService(agent), host=args.host, port=args.port, token=token
+    )
+    stop = threading.Event()
+    poller = threading.Thread(target=_agent_forever, args=(agent, stop), daemon=True)
+    poller.start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        stop.set()
+        server.server_close()
+        ua.close()
+    return 0
+
+
+def _agent_forever(agent: Agent, stop: threading.Event, tick: float = 0.2) -> None:
+    """Advance the dialogue five times a second.
+
+    Faster than the other two processes' loops, and it is the one number here
+    that is about a person rather than a machine: this is the granularity of
+    every gap between one sentence and the next, and a driver at a barrier hears
+    a one-second loop as a system that has stopped working.
+    """
+    while not stop.wait(tick):
+        try:
+            agent.poll()
+        except Exception:  # noqa: BLE001
+            # An agent that dies is an intercom nobody answers. Anything a poll
+            # raises is logged and the loop continues; what it could not do is
+            # already on the health route.
+            logging.getLogger(__name__).exception("an agent poll raised; continuing")
 
 
 def _token(args) -> str | None:
@@ -272,7 +388,9 @@ def _capture_forever(process: CaptureProcess, stop: threading.Event, tick: float
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args(argv)
-    return {"monitor": cmd_monitor, "capture": cmd_capture}[args.command](args)
+    return {"monitor": cmd_monitor, "capture": cmd_capture, "agent": cmd_agent}[
+        args.command
+    ](args)
 
 
 if __name__ == "__main__":

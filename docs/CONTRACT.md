@@ -363,10 +363,12 @@ without adding it here.
     "identity_service_unreachable",
     "platform_unreachable",
     "capture_unreachable",
+    "agent_unreachable",
     "lane_refused_us",
     "identity_service_refused_us",
     "platform_refused_us",
     "capture_refused_us",
+    "agent_refused_us",
     "target_contract_unsupported",
     "sink_delivery_failed",
     "lane_gone_quiet"
@@ -395,8 +397,69 @@ without adding it here.
     "lane_arrival",
     "lane_vend"
   ],
-  "retention_days_bounds": [1, 3650],
-  "max_snapshot_bytes_default": 33554432
+  "retention_days_bounds": [
+    1,
+    3650
+  ],
+  "max_snapshot_bytes_default": 33554432,
+  "agent_codes": [
+    "sip_registration_lost",
+    "ua_unreachable",
+    "ua_unsupported_version",
+    "call_from_undeclared_intercom",
+    "human_unreachable",
+    "audio_missing",
+    "audio_playback_failed",
+    "lane_unavailable"
+  ],
+  "agent_cases": [
+    "malfunction_active",
+    "identification_unavailable",
+    "plate_not_read",
+    "plate_unclear",
+    "vehicle_not_recognised",
+    "rules_unavailable",
+    "entry_refused",
+    "vehicle_not_detected",
+    "entry_not_confirmed",
+    "stale_decision",
+    "unrecognised_reason",
+    "lane_unavailable",
+    "standalone",
+    "nothing_to_do"
+  ],
+  "authorisations": [
+    "open_now",
+    "open_and_flag",
+    "do_not_open",
+    "hold",
+    "transfer",
+    "call_back"
+  ],
+  "authorisation_digits": {
+    "1": "open_now",
+    "2": "open_and_flag",
+    "3": "do_not_open",
+    "4": "hold",
+    "5": "transfer",
+    "6": "call_back"
+  },
+  "agent_event_kinds": [
+    "call_answered",
+    "case_spoken",
+    "human_called",
+    "authorisation_received",
+    "human_unreachable",
+    "nothing_usable",
+    "call_from_undeclared_intercom",
+    "call_refused_busy",
+    "case_not_spoken",
+    "call_ended"
+  ],
+  "shipped_languages": [
+    "en",
+    "es-ES"
+  ]
 }
 ```
 
@@ -1232,3 +1295,651 @@ were taken.**
 ---
 
 Built by 72 Knots Method by 72Knots.ai
+
+---
+
+# The gate agent
+
+The third process in this package, under the same `contract_version` as the two
+above. It answers the intercom, works out which lane the call belongs to, reads
+that lane's last decision through the lane contract, says what happened in every
+language the site declared, and when the case needs a person it calls one, stays
+in both calls, and records the authorisation they key.
+
+## It OPENS NOTHING, and that is what this version is for
+
+An **authorisation is a RECORD of what a person said. It is never an act.**
+`OPEN_NOW` ends in an event, a message to the driver, and one fixed sentence to
+the person who keyed it saying that this version cannot operate the barrier.
+
+That is not a promise about intention. There is no vend route on this surface;
+`ACT_ROUTES` is empty and every method other than `GET` is answered `405`. There
+is no vend route on the lane contract this build reads, and that contract's own
+`capabilities.can_vend` is `false`. And the only client in this package cannot
+build a request that is not a `GET`, which is swept out of the source and
+observed at the lane, not asserted here.
+
+`can_vend` on `GET /v1/agent` is **derived from an empty act table**, so it
+cannot say `false` while something in this package can act.
+
+## What has been measured, and what has not
+
+**The SIP path has been exercised against baresip 4.11.0, in CI, on a real
+socket:** a registrar built in the test suite, a second baresip instance placing
+a call as the intercom, a third answering as the person, real RTP between them,
+real RFC 4733 DTMF, and the audio each side received written to a file and
+measured. That test is what establishes that a call is answered, that the two
+legs are private until the agent bridges them, and that a digit arrives tagged
+with the leg it came in on.
+
+**It has never been run against an Axis, a 2N, or any other real intercom, and
+it cannot be here.** Call setup time, audio quality, echo, and DTMF detection
+through a door station's microphone and a real garage's network are **NOT
+MEASURED** — and neither is **whether a door station's call list advances on the
+`486 Busy Here` this agent sends when it is already on a case, or only on a
+no-answer timeout.** Nobody should read the CI result as a statement about any of
+them.
+
+**Install requirement, and this package cannot enforce it:** the intercom's own
+call list must name the AGENT FIRST and the human's number on no-answer. That is
+what makes a dead agent degrade to a plain intercom instead of to silence, and it
+is the whole of "a partial failure stays partial" at this seam. It is configured
+on the intercom, by whoever installs it.
+
+## The user agent is an install requirement, not a dependency
+
+SIP, RTP, DTMF and audio are an external user agent's job. This package is
+dependency-free and contains no SIP stack; it drives **baresip** over that
+program's `ctrl_tcp` control socket and holds only the dialogue state and the
+records. The version is read at startup and **a version this build was not
+tested against is refused** — the `schema_version` rule applied to a process,
+because a control vocabulary is not a versioned contract and a command that has
+grown a parameter is a call answered and then handled wrongly.
+
+Tested version: **baresip 4.11.0** (BSD-3-Clause). Debian and Ubuntu package
+older releases that do not carry the two modules this needs, so it is built from
+source at that tag on the target and on the CI runner.
+
+Seven things on the baresip side are load-bearing, and every one of them is
+configuration rather than code. **Four of them are now CHECKED, at startup, by
+reading the running process back** — `ctrl_tcp` answers `config` with the loaded
+settings, `modules` with the loaded module list, both from baresip's `debug_cmd`
+module (which is why that module is in the required list), and `reginfo` with
+every account it holds. The agent refuses to start on any of them, naming the
+setting or the intercom. Reproduce: `pytest -k baresip_configuration` and
+`pytest -k account`.
+
+| | checked at startup? | |
+|---|---|---|
+| `ctrl_tcp_listen 127.0.0.1:4444` | no — the agent reaches it, so it is on a socket by definition | Loopback. That socket can place a call, bridge two of them, and play audio at whoever is on the line. baresip's own default is every interface. |
+| `call_hold_other_calls no` | **yes**, read from `config` | baresip's default holds every other call when a new one is established, which would put the driver on hold the moment the agent calls the operator. |
+| an audio device that is **not** `aubridge` | **yes**, `audio_source` and `audio_player` read from `config` | baresip's own module documentation says what it is, verbatim: it "can be used to connect two audio devices together, so that all output to AUPLAY device is bridged as the input to a AUSRC device". That is every call bridged to every other one whether the agent asked or not. **What it then does to this agent is NOT MEASURED and no number here depends on it** — an earlier sentence claimed the operator heard the driver before `conference` was sent, and an independent session could not reproduce it. The refusal does not rest on that claim; it rests on what the module is. |
+| modules `ctrl_tcp`, `mixausrc`, `mixminus` (and `aufile`, `account`, `menu`, `debug_cmd`) | **yes** for the first three, read from `modules` | `mixausrc` is what plays one file into ONE leg; `mixminus` is what the bridge is; `debug_cmd` is what answers the two commands this check is made of. Without them the agent can answer a call and do nothing else. |
+| one account per declared intercom, named by its `dial_secret_file` | **yes**, read from `reginfo` at startup | It is what says which intercom a call is from. A missing one is refused by name — the intercom's name, never the secret's. |
+| `sip_cuser_random` **unset** | no — baresip 4.11.0 does not report it on `config` (measured; `filter_registrar` is in that output and this is not) | With it on, every account's contact user gets a random suffix and an INVITE aimed at the account's own user part is answered `404 Not Found` — measured, with the plain configuration as the control. **It fails CLOSED:** the intercom cannot get in at all, so this is a door that never works and never a door somebody else can open. |
+| **nothing else attached to that control socket** | no — it is not a setting | baresip's `ctrl_tcp` accepts exactly ONE client. A second connection — a console, a script, a monitoring tool — takes the agent's away. **The agent now REOPENS it:** see below. |
+
+### The control socket is reopened, and how long that takes is a setting
+
+A lost `ctrl_tcp` used to be a permanent outage. The socket was raised on and
+never replaced, so an ordinary `systemctl restart baresip`, a package upgrade, an
+OOM kill, or the second client above left the agent alive, its user agent
+registered, and every call ringing at a process that would never answer one —
+`ua_unreachable` `active` for the life of the process, with the only repair a
+human restarting the agent.
+
+`[user_agent] reconnect_seconds` (published default **5.0**, on `GET /v1/agent`)
+is the LONGEST gap between attempts to reopen it. The first retry is a quarter of
+a second away and the gap doubles up to the setting, so a service restart is
+recovered from in about a second and a user agent that is gone for good is not
+hammered once per poll for ever. `ua_unreachable` **recovers** on the reconnect.
+
+**What happens to the calls that were up.** Whatever case was in progress is
+gone — its legs were torn down or are beyond reach, and nothing can say what was
+said while nobody was listening — so the session is dropped with
+`case_not_spoken`, and every call the user agent is still holding is dealt with
+by the same rule any new call gets: one still **ringing** is answered, and
+anything else is released rather than left live to be conferenced into the next
+case.
+
+**One account per leg, and the legs are on different ones.** baresip identifies
+the audio stream to play into by the local account, so two calls on one account
+cannot be told apart — and the menu meant for the person on the phone would play
+to the driver at the barrier. The driver's leg sits on whichever intercom
+account the call arrived at (below); `[user_agent] operator_aor` is the one this
+agent dials OUT from, declared, and startup refuses it if it collides with any
+intercom's.
+
+## Which intercom a call is from
+
+**IT IS THE ADDRESS THE CALLER DIALLED. IT IS NOT WHO THE CALLER SAYS IT IS.**
+
+Each declared intercom gets an account of its own on the user agent, whose user
+part is a long random string the site generates once:
+`[intercoms.<sip-uri>] dial_secret_file` names a file holding it — a FILE, no
+default, and refused if anybody but its owner can read it, exactly like every
+other credential this package takes. The installer does three things once:
+writes the secret, adds `<sip:agent-<secret>@<the agent's host>>` to the user
+agent's own `accounts` file, and programs that same address into the door
+station as the number it calls. **A call is that intercom if and only if it
+arrived AT that account.**
+
+Why this and not the `From` header: baresip routes an inbound INVITE by the
+REQUEST-URI's user part and reports the account it chose on the control socket
+(measured on 4.11.0, with a registrar and without one), and the secret therefore
+never travels in a header a caller writes. It is the number dialled. A caller
+who asserts a declared door's own address of record — which used to be answered
+as that lane, ring a person, and write a complete authorisation record naming a
+barrier nobody was standing at — now reaches an account it cannot name, and the
+user agent answers it `404 Not Found` before this agent sees anything.
+
+**What this does NOT do, stated plainly because it is what an integrator needs
+to decide with.** A secret in a device's configuration is only as private as
+that device: anybody who can read the door station's own configuration can call
+as that door. That is a different exposure from a `From` header, which anybody
+on the same network can write without touching anything at all, but it is not
+nothing — and **nothing here measures it.** It is also not a secure channel:
+this is UDP SIP on the site's own network unless the site puts TLS under it, and
+an attacker who can READ the intercom's traffic can read the address it dials.
+What the mechanism removes is the attacker who can only SEND.
+
+`[intercoms.<sip-uri>] lane = "<lane name>"`, **per site, no default**, and
+startup refuses an intercom with no lane or a declared lane with no intercom. An
+agent that guessed which lane would be guessing which barrier somebody is
+standing at.
+
+**The table key is a LABEL.** It is what appears on events, on the read surface
+and in front of a person; it is what the `From` header is compared against for
+the record; and **nothing is routed on it.** It is recorded as
+`caller_stated_identity`, reduced by shape rather than character for character —
+a door station sends `"Door 1" <sip:door1@10.0.0.9:5060>;tag=…` on one call and
+the bare URI on the next, and two spellings of one claim would read as two
+callers.
+
+A call at an account no `[intercoms.*]` owns is **refused without being
+answered**. So is one the user agent refused itself. Both are an event
+(`call_from_undeclared_intercom`) and a code of the same name, carrying what the
+caller claimed to be and nothing else, because a claim is all there was. **No
+lane is read and none is guessed**, and nothing is played: this version has no
+sentence for a caller it cannot place, because answering one means speaking to
+somebody about a barrier it would have to guess at.
+
+**That is what happens when the agent is not already on a case.** The account is
+looked at only then — see "One case at a time" below: a live case refuses every
+new call, whoever it is from, before anybody's identity is read.
+
+**Startup refuses an intercom whose account the user agent is not holding**,
+naming that intercom and never the secret. Without it, a door the installer
+added to this file and forgot to add to the user agent's would be answered
+`404 Not Found` by baresip and reported nowhere, while this agent published a
+working surface.
+
+**`lane = "none"` is STANDALONE**, and it is a mode rather than a degraded
+configuration: a garage with an intercom and no lane is the whole product for
+that site, and every call there is a human case from the first second.
+`[lanes.none]` is refused by name so that one spelling cannot mean two things.
+
+## One case at a time
+
+`concurrent_cases` on `GET /v1/agent` is **1**, and it is a real limit rather
+than a policy: the user agent's bridge is site-wide, so a second case bridged
+while the first is open would put two strangers and two operators into one
+conversation.
+
+A call arriving during a case is **refused without being answered**, whoever it
+is from — the identity is not looked at first, because being undeclared is the
+default state of every caller on a network and the limit has to hold against all
+of them.
+
+**What the refusal IS, measured from the caller's side:** the agent hangs the
+unanswered call up, and baresip sends **`486 Busy Here` after `180 Ringing`**.
+That is read out of a second caller's own user agent, not out of ours. It is
+recorded as `call_refused_busy`, with the caller's identity on the record.
+
+**Whether a door station's call list advances on a `486` — rather than only on a
+no-answer timeout — is NOT MEASURED.** It is a property of an Axis or a 2N unit,
+and this package has never been run against either.
+
+## The case set, and how it is derived
+
+The case is a **pure function of what the lane published** — `GET /v1/lane/state`
+and `GET /v1/lane/health`, GET only, with the timeout that lane's target
+declares. It is **derived and never asked**: a driver at a barrier does not know
+whether the identification service is down or their plate was marginal, and a
+menu offering them the choice would be a guess with a keypad.
+
+The order matters and is part of the contract. Standalone first, because there is
+no lane to ask. Then whether the lane could be read at all. Then a malfunction,
+because a broken lane's last decision is not a fact about the vehicle standing at
+it. Then the outcome — and the transit decides something only under `allow`,
+because under `deny` and `no_vehicle` there was no vend for closing loops to have
+confirmed.
+
+| the lane says | case | ends with |
+|---|---|---|
+| any malfunction `active` whose `never_alarm` is `false` on the wire | `malfunction_active` | a person |
+| `outcome: fallback`, `reason: engine_unreachable` | `identification_unavailable` | a person |
+| `outcome: fallback`, `reason: no_plate_read` | `plate_not_read` | the instruction, then a person |
+| `outcome: fallback`, `reason: low_confidence` | `plate_unclear` | the instruction, then a person |
+| `outcome: fallback`, `reason: unknown_vehicle` | `vehicle_not_recognised` | a person |
+| `outcome: fallback`, `reason: stale_rules` | `rules_unavailable` | a person |
+| `outcome: deny` | `entry_refused` | a person |
+| `outcome: no_vehicle` | `vehicle_not_detected` | a person |
+| `outcome: allow`, transit `held` or `unconfirmable` | `entry_not_confirmed` | a person |
+| a decision whose `decision.at` is older than `[cases] decision_max_age_seconds` | `stale_decision` | a person |
+| a decision whose `decision.at` is missing, unparseable, or carries no timezone | `unrecognised_reason` | a person |
+| a `reason` outside the required subset, a decision the lane has not made, or any other answer this build will not interpret | `unrecognised_reason` | a person |
+| the lane did not answer, refused us, or speaks a version this build cannot read | `lane_unavailable` | a person |
+| `lane = "none"` | `standalone` | a person |
+| `outcome: allow`, transit `confirmed` or `pending` | `nothing_to_do` | one message, and the call ends |
+
+**`identification_unavailable` never mentions the plate.** A dead identification
+engine and a marginal read used to arrive as the same code; telling somebody to
+clean a number plate that nothing looked at is the standing acceptance of this
+project broken in the module's first sentence.
+
+### The decision has an AGE, and a stale one never ends a call
+
+`GET /v1/lane/state` publishes `decision.at`. The agent reads it, and the case
+function is given a clock, so the age of the decision is checked **before any
+outcome branch** — a decision the lane made for somebody else is not a fact about
+the driver standing at the barrier now, whatever it said.
+
+`[cases] decision_max_age_seconds`, per site, **published default 120**. It is a
+SETTING AND AN ASSUMPTION, and that is said rather than implied: **nothing has
+measured how long a lane decision stays the same car's.** Two minutes is drawn
+from a person walking from a stopped car to a door station and pressing a button,
+which is a guess about people and not a measurement of them. What is not a guess
+is which way the error falls — past the bound the driver gets a person, which is
+what every other case in the set already gets.
+
+**This is the only guard in front of `nothing_to_do`**, and `nothing_to_do` is
+the one case in the whole set that reaches nobody. Before it existed, a lane
+whose last decision was an hour-old `allow`/`confirmed` — which is exactly what a
+presence gate that does not arm leaves behind — told the next driver "this
+entrance has nothing outstanding for you" and hung up on them. `nothing_to_do` is
+now reachable only from a FRESH `allow` with transit `confirmed` or `pending`.
+
+> This is a COMPARISON ACROSS TWO CLOCKS: `decision.at` is read from the LANE's
+> clock and `now` from this process's. It is not a measured age. A NEGATIVE AGE
+> IS REACHABLE — a decision stamped after the moment this process reads it — and
+> it is treated as FRESH, because the alternative is sending a driver to a person
+> on the strength of a clock offset nobody has measured. Nothing here measures
+> the offset between the two, so nothing here can separate it from the age it is
+> trying to read. Where the two clocks are the same box, or are disciplined to
+> the same source, this is the cost of being a CONSUMER of the lane's contract
+> rather than something the lane calls.
+
+That sentence lives in `cases.DECISION_AGE_NOTE`, is published here from that one
+copy, and a value test holds the two together: editing either goes red. It is the
+capture process's `capture_minus_lane_event_ms` note applied to this field, and
+for the same reason.
+
+**A `decision.at` this build cannot read is `unrecognised_reason`, not fresh.** A
+missing stamp, one that does not parse, and one with no timezone all fall to the
+catch-all — the round-4 rule, and the same reason: a naive moment compared
+against an aware one is a guess about which machine it came from.
+
+**`vehicle_not_detected` is the case the intercom exists for.** The presence gate
+is unvalidated on real vehicles, and a real car it wrongly refuses has no other
+recourse: there is a driver at the barrier and the lane believes the lane is
+empty.
+
+**An unrecognised reason ESCALATES and is never mapped onto the nearest thing we
+know.** A lane that is not ours has its own vocabulary and will emit it. The lane
+contract requires a consumer to escalate on one it does not recognise, and this
+is that requirement implemented.
+
+`reason` is the one set the lane contract does **not** publish, so the required
+subset is a copy held in `cases.REQUIRED_FALLBACK_REASONS` and compared against
+the installed lane package by a test, in both directions.
+
+## Languages
+
+`[languages] driver = [...]` and `operator = "..."`, **declared per site, no
+default**, and startup refuses either if it is empty or names a language this
+build has no lines for.
+
+**The driver has no keypad**, so every sentence they hear plays in EVERY declared
+driver language, in the declared ORDER, one after the other. The person on the
+phone hears the operator language only; they are staff, and a menu played twice
+is a menu somebody keys over.
+
+**The language is PER CALL and can narrow mid-call.** Gokhan's spec: *"if the
+customer starts speaking in Spanish, no English, it should start Spanish from
+there."* One function does it — `Agent.set_language(call, language)` — and from
+the next sentence on, that call is spoken in that language and no other. A
+language the site did not declare is **refused**, not accepted and then found to
+have no audio: a switch that silently did nothing would leave a driver being
+spoken to in a language they have just said they do not have.
+
+**What NOTICES they switched is not in this version.** Hearing a language is
+automatic speech recognition, which is a later step and is gated on a
+measurement of narrowband SIP audio nobody has made. What is here is the state
+that step will set, so that step adds a detector and nothing else.
+
+**Every string is a value in the repository, per language, tested**, and the
+audio file for it is a file the package installs whose name derives from the
+line's key and the language. **A line with no words in a declared language, or
+no audio file, refuses startup** — not skipped, not substituted, not played in
+another language, because a driver who hears silence at a barrier has been told
+nothing and cannot tell it from a dead intercom.
+
+This version ships **English and Spanish**, end to end: text, audio, and the
+mechanism proven with two rather than described with one.
+
+### Where the audio comes from
+
+Every file is produced by `scripts/build_audio.py` from the text in
+`lines.TEXT`, and `audio/MANIFEST.json` records, per file, the exact text it was
+made from, its digest, its voice and its licence — so a sentence edited without
+regenerating its audio goes red rather than shipping a file that says the old
+thing.
+
+The synthesiser is **eSpeak NG** (GPL-3.0-or-later). It was chosen for the
+licence and not for the voice. The obvious alternative was disqualified by the
+licence of its **recorded corpus** — research use only, no redistribution — and
+eSpeak NG has no corpus at all: its own README says it "is not as natural or
+smooth as larger synthesizers which are based on human speech recordings", which
+is the same sentence read as a licence fact. It is machine speech. It is
+intelligible at 8 kHz over a narrowband call, which is the property this job
+needs, and a site that wants a voice replaces the files — the manifest records
+what each one has to say.
+
+**Who wrote the WORDS, and from what**, is a row per language in the manifest —
+`text_provenance` — and every file names its row. The manifest recorded the
+voice, the tool and the tool's licence for the AUDIO and nothing at all about the
+TEXT, which is the thing the audio is only a rendering of. Both rows say what was
+NOT done as plainly as what was: the English and the Spanish were written by the
+software that wrote the rest of this package, and neither has been through a
+professional editor, a translation service, or a native speaker.
+
+**The Spanish ships as `es-ES`, not `es`.** It is Castilian — `matrícula`,
+`aparcamiento`, `almohadilla`, `Pulse` — and under a generic tag a garage in
+Texas or Bogotá would declare "Spanish", get this, and hear several words that
+are wrong for its drivers. A regional tag is the one thing that makes that
+visible in the site's own configuration file.
+
+The name of a DOOR is not in this repository and cannot be: `[intercoms.<uri>]
+name_audio` is a file the SITE supplies, played to the person on the phone
+before the case, and startup refuses an intercom without one. It is also the one
+audio file this package does not produce, so it is the one whose properties are
+checked rather than known: **8 kHz, mono, 16-bit** like everything else the agent
+plays, and no longer than `[speech] name_audio_max_seconds` (published default
+**10.0**). The person's briefing waits for the whole of it, and a driver at the
+barrier waits for the briefing.
+
+### A line that cannot be played is a code, a timer and a true record
+
+Playing a file can be REFUSED by the user agent. Usually that is benign and a
+fifth of a second from resolving — the call's audio stream has not come up yet —
+so the line is kept and retried. What had no answer was the other cause: a file
+the user agent will not decode, an audio mode it will not play into, a mixer
+stuck in a mode it cannot leave. Retried for ever, that is a driver in an
+answered call hearing nothing, with no timer, no code, and a log saying their
+case was spoken. **Measured on this build: thirty-three hours of it, and a clean
+health surface throughout.**
+
+`[speech] line_timeout_seconds`, per site, **published default 10.0**. The clock
+starts when a line becomes DUE rather than when it is first refused, because a
+leg whose media never comes up is never even attempted and to the driver that is
+the same silence. Past it:
+
+| the leg | what happens |
+|---|---|
+| the driver's | `audio_playback_failed` `active`, subject `driver`. The case is still a case, so it goes to **the person** — briefed the same way, and timed the same way. |
+| the person's | `audio_playback_failed` `active`, subject `operator`. Nothing is left that can tell anybody anything, so the case ends with **`case_not_spoken`** and the driver's call is RELEASED rather than held open in silence. |
+
+`SPEAKING_CASE` and `BRIEFING` are both bounded by this. Neither used to be:
+both advanced only on a leg falling silent, which a queue that never drains never
+does.
+
+**`case_spoken` is written when the last file of the case has FINISHED playing**,
+never when it is queued. It used to be written at the moment the first file was
+put on the queue, which is a claim about a queue — and it stayed true in the log
+through the thirty-three hours above.
+
+> **The finish is timed from the file's own measured duration, not from a signal
+> the user agent sends, and that is a MEASUREMENT rather than a choice.** baresip
+> 4.11.0 emits **no** playback-complete event for `mixausrc_enc_start`, the verb
+> every sentence here is played with: its `mixausrc` module logs the end of a
+> file at debug level and raises no `bevent`, and `BEVENT_END_OF_FILE` is emitted
+> only from the call's own audio-device error handler, which this path does not
+> go through. Measured on a live call, with the positive control that DTMF events
+> arrived on the same drained control socket in the same window. The duration is
+> read out of each file at startup, which is a property of something this package
+> ships and can measure.
+
+## The person, the bridge, and the authorisation set
+
+`[escalation] human_sip_uri` is declared, with no default.
+
+The agent places a **second call** to that address and stays in both. Before
+bridging it plays the person the intercom's `name_audio` and the case in the
+operator language — **the lane and the case, and nothing else. No plate.** This
+agent never reads a plate: `GET /v1/lane/state` carries `read_ref` and not a
+plate, and this package does not read even that, so there is none here to leave
+out.
+
+Then the menu, then the bridge. Everything before the bridge is private to one
+leg, which is what lets the person be told the case without the driver hearing
+it.
+
+**The digits are fixed and published**, and a site enables a subset rather than
+renumbering the set — the person keying it is often the same person across
+several garages at three in the morning, and a mapping that moved between sites
+would be a wrong decision made by muscle memory.
+
+| digit | authorisation | what it does in THIS version |
+|---|---|---|
+| 1 | `open_now` | records it; the person hears the one fixed sentence saying this version cannot operate the barrier |
+| 2 | `open_and_flag` | the same, and the record carries the value |
+| 3 | `do_not_open` | records it; the driver is told |
+| 4 | `hold` | records it, and the driver is re-prompted every `hold_reprompt_seconds` |
+| 5 | `transfer` | records it. Needs `[escalation] transfer_sip_uri`, and startup refuses the pair otherwise rather than quietly not offering an option a site switched on |
+| 6 | `call_back` | records the number keyed, ending with `#`. Digits only |
+
+`[authorisations]` is a block of booleans, **no default**, and a site that
+enables none is refused: a person called who can authorise nothing has been rung
+for nothing. **Only what is enabled is offered**, and a digit outside the enabled
+set is re-prompted twice and then treated as nothing usable — never mapped onto
+the nearest enabled thing.
+
+**Two timers, both per-site settings with published defaults, and both
+assumptions** — nothing here measures how long a person takes to reach a phone:
+
+- `no_answer_seconds`, default **30.0** — the person did not pick up. The driver
+  is told, `human_unreachable` is recorded and the code of the same name goes
+  `active`.
+- `nothing_usable_seconds`, default **20.0** — no digit this site accepts. Same
+  shape.
+- `hold_reprompt_seconds`, default **45.0** — how often a driver on hold is told
+  they are still on hold, because silence on a door station is indistinguishable
+  from a dead intercom.
+
+**Neither timer opens anything, and neither does any authorisation.**
+
+## `GET /v1/agent` — who it is, and what it answers
+
+<!--payload:agent-->
+```json
+{
+  "agent_id": "agent-1",
+  "site_id": "site-1",
+  "contract_version": 1,
+  "can_vend": false,
+  "intercoms": [
+    {
+      "sip_uri": "sip:door1@10.0.0.9",
+      "lane": "entry"
+    }
+  ],
+  "user_agent": {
+    "kind": "baresip",
+    "version": "4.11.0",
+    "reconnect_seconds": 5.0,
+    "tested_versions": [
+      "4.11.0"
+    ],
+    "registered": true
+  },
+  "languages": {
+    "driver": [
+      "en",
+      "es-ES"
+    ],
+    "operator": "en"
+  },
+  "authorisations": [
+    "open_now",
+    "open_and_flag",
+    "do_not_open",
+    "hold",
+    "call_back"
+  ],
+  "event_window_depth": 256,
+  "concurrent_cases": 1,
+  "escalation": {
+    "no_answer_seconds": 30.0,
+    "nothing_usable_seconds": 20.0,
+    "hold_reprompt_seconds": 45.0,
+    "transfer_declared": false
+  },
+  "cases": {
+    "decision_max_age_seconds": 120.0
+  },
+  "speech": {
+    "line_timeout_seconds": 10.0,
+    "name_audio_max_seconds": 10.0
+  }
+}
+```
+
+`user_agent.version` is what the UA reported about itself and is `null` before it
+has answered once; `tested_versions` is what this build will start on. The
+control socket's address is **not** published: it is a local socket, and
+publishing where a process's control channel lives is publishing a way in.
+
+`authorisations` is what this site enabled, in the order of the closed set.
+
+## `GET /v1/agent/health` — every code, every time
+
+<!--payload:agent_health-->
+```json
+{
+  "contract_version": 1,
+  "codes": [
+    {
+      "code": "sip_registration_lost",
+      "subject": "sip:agent@10.0.0.20",
+      "state": "ok",
+      "source": "measured",
+      "never_alarm": false
+    }
+  ]
+}
+```
+
+Entries are in the **lane's shape** — `state`, `source`, `never_alarm` on the
+wire — so a monitor reads this with the code that already reads a lane and a
+capture process. One reader, one passthrough rule, and no third dialect for
+`never_alarm` to be read wrong in.
+
+One entry per `(code, subject)`, and **every member of the set ships on every
+response**: a code that is absent reads to a consumer exactly like a code that is
+fine. A code with no subject yet ships once, `unknown`, under this agent's own
+id, and `lane_unavailable` ships once per **declared** lane whether or not a call
+has been taken at it.
+
+| code | subject | what it means |
+|---|---|---|
+| `sip_registration_lost` | this agent | **This is the lane contract's `intercom_registration_lost`, measured where it can be measured.** A lane cannot see whether the agent is registered; the agent can. Both documents say so, in the same words. The subject is the agent rather than an account: it holds one account per intercom now and their user parts are the dial secrets, so naming them here would publish every one of them. Any account the user agent reports in error makes this `active`. `unknown` until the UA has said something — including the whole of a standalone site, which has no registrar to register with — because a registration nobody has heard about is not one known to be lost, and publishing the second pages somebody to a working site |
+| `ua_unreachable` | this agent | the user agent's control socket did not answer. The agent is up and cannot answer a call |
+| `ua_unsupported_version` | this agent | the UA is a version this build was not tested against |
+| `call_from_undeclared_intercom` | this agent | a call arrived at an account no `[intercoms.*]` owns, or the user agent refused one outright because it named no account it holds. **The subject is the agent and not the caller**: the caller's identity is a string the caller wrote, so keying the code on it would let anybody who can dial this agent add a row per identity they invented. It clears when a call at a DECLARED account is answered — which is a measurement, not a timer — and is `unknown` until either happens |
+| `human_unreachable` | the escalation address | the person did not answer inside `no_answer_seconds`. **It recovers**: the next call they answer clears it, because a code that could only ever go one way is a latch that reads like a state |
+| `audio_missing` | the line, or the file | a file the agent reaches for is not there. Startup refuses on this, so on a running agent it is a file that has gone missing since |
+| `lane_unavailable` | the lane's name | per declared lane |
+
+Nothing here is `never_alarm`: every member is a reason somebody at a barrier
+cannot be helped.
+
+## `GET /v1/agent/events?since=N` — what it did
+
+<!--payload:agent_events-->
+```json
+{
+  "contract_version": 1,
+  "cursor": 2,
+  "reset": false,
+  "dropped": 0,
+  "events": [
+    {
+      "cursor": 1,
+      "kind": "call_answered",
+      "site_id": "site-1",
+      "agent_id": "agent-1",
+      "intercom": "sip:door1@10.0.0.9",
+      "lane": "entry",
+      "case": null,
+      "authorisation": null,
+      "human": null,
+      "at": "2026-08-30T14:00:00+00:00",
+      "keyed": null,
+      "caller_stated_identity": "sip:door1@10.0.0.9"
+    }
+  ]
+}
+```
+
+The same cursor shape and the same semantics as the lane's, the monitor's and the
+capture process's, field for field, so one consumer holds one policy for all of
+them: monotonic within one run, not durable across a restart, `reset` when
+`since` is ahead of the cursor or behind the oldest event still held, and
+`dropped` counting what the window evicted.
+
+**There is no field here for a plate, and there is no plate to put in one.**
+`keyed` is the only value on this surface a caller supplies — the call-back
+number — and it is **digits only, refused otherwise**, because a field a caller
+fills is the field a plate ends up in.
+
+`intercom` and `human` are addresses a site declared, not people: this surface
+says which door and which rota, and whoever wants to know who was on shift asks
+the rota. `intercom` is the site's own LABEL for the door — the
+`[intercoms.<sip-uri>]` key — and on a refusal it is this agent's id, because
+there is no door to name.
+
+**`caller_stated_identity` is a CLAIM and its name says so.** It is the `From`
+header of the call, reduced to `sip:user@host`. Anybody who can send an INVITE
+can write any value in it, so nothing is decided by it: what identified the
+intercom is the ACCOUNT the call arrived at, which never appears on this surface
+because its user part is a secret. On a refusal it is the whole record of who
+tried, and it is worth exactly what a stranger's word is worth.
+
+## Running it
+
+```sh
+gate-agent agent --config agent.toml
+```
+
+Binds `127.0.0.1:8094`. **Local by design.** Off loopback it refuses to start
+without a credential — the same rule and the same words as the other two
+surfaces, imported rather than restated. The exposure here is its own kind: this
+publishes which intercoms a site has, which of its lanes cannot be read, and when
+a person was called and did not answer, which is a timetable of when nobody is
+watching a garage.
+
+## What is NOT here, stated rather than left to be discovered
+
+- **No act surface, and no route that changes anything.** Not on this agent, and
+  not on the lane contract this build reads.
+- **No display code and no SMS.** A `plate_not_read` case speaks the instruction
+  and then reaches a person, because there is no completion path in this version
+  for a driver to use.
+- **No voice recognition.** Nothing here listens to what a driver says; the case
+  is derived from the lane, never asked.
+- **No state store.** The event window is a catch-up buffer, not a record. What
+  happened at a site durably is whatever a monitor's sinks delivered and whatever
+  the platform holds.
+- **No measurement of a real intercom.** Stated at the top of this section, and
+  it is the sentence to read before any of the others.
