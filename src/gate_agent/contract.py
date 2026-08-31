@@ -1475,6 +1475,18 @@ class AgentEventKind(StrEnum):
     #: a reader can act on rather than a gap in the log.
     CASE_NOT_SPOKEN = "case_not_spoken"
     CALL_ENDED = "call_ended"
+    #: The calls a PREVIOUS agent process left up, released at startup with how
+    #: many there were. `Agent._reconnect()` has always dealt with the calls a
+    #: lost control socket left behind; `Agent.start()` dealt with nothing, so
+    #: an agent that died with two legs up left baresip holding both and a
+    #: restarted process ANSWERED THE NEXT CALL WITH THE ORPHANS STILL LIVE --
+    #: the user agent's bridge is site-wide, so the previous driver and the
+    #: previous operator were conferenced into a stranger's case.
+    #:
+    #: Written only when there was at least one. A record of nothing having
+    #: happened, on every start of every agent for ever, is noise in the window
+    #: that holds what did.
+    LEFTOVER_CALLS_RELEASED = "leftover_calls_released"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1742,6 +1754,11 @@ class AgentEvent:
     #: CLAIM, never a check: anybody who can send an INVITE can write any value
     #: here. `null` when the user agent did not report one.
     caller_stated_identity: str | None = None
+    #: HOW MANY calls a previous process had left up, on `leftover_calls_released`
+    #: and `null` on every other kind. A count and not a list: the call ids are
+    #: the previous process's bookkeeping and mean nothing to a reader of this
+    #: surface, and what a site needs to know is that there were some.
+    released: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in tuple(kind.value for kind in AgentEventKind):
@@ -1756,6 +1773,24 @@ class AgentEvent:
             value.value for value in Authorisation
         ):
             raise ValueError(f"{self.authorisation!r} is not an authorisation in this contract")
+        if self.released is not None and (
+            not isinstance(self.released, int)
+            or isinstance(self.released, bool)
+            or self.released < 1
+        ):
+            raise ValueError(
+                f"released must be a whole number of calls, at least one, or null, got "
+                f"{self.released!r}. It is written only when there were leftovers, so a zero "
+                "here would be a record of nothing having happened."
+            )
+        if (self.released is not None) != (
+            self.kind == AgentEventKind.LEFTOVER_CALLS_RELEASED.value
+        ):
+            raise ValueError(
+                "released belongs on leftover_calls_released and on no other kind, and that "
+                "kind carries it: a count on another event has nothing to count, and that "
+                "event without one says only that something happened."
+            )
         if self.keyed is not None and (not self.keyed or not self.keyed.isdigit()):
             raise ValueError(
                 f"keyed must be digits or null, got {self.keyed!r}. It is the only value on "

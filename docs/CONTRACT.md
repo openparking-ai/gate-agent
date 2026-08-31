@@ -454,7 +454,8 @@ without adding it here.
     "call_from_undeclared_intercom",
     "call_refused_busy",
     "case_not_spoken",
-    "call_ended"
+    "call_ended",
+    "leftover_calls_released"
   ],
   "shipped_languages": [
     "en",
@@ -1886,7 +1887,8 @@ cannot be helped.
       "human": null,
       "at": "2026-08-30T14:00:00+00:00",
       "keyed": null,
-      "caller_stated_identity": "sip:door1@10.0.0.9"
+      "caller_stated_identity": "sip:door1@10.0.0.9",
+      "released": null
     }
   ]
 }

@@ -131,9 +131,14 @@ class FakeUa:
 
     def hangup(self, call_id: str) -> None:
         self.commands.append(("hangup", call_id))
+        # AND THE CALL IS GONE. A fake that recorded the command and went on
+        # holding the call could not measure a release at all: every assertion
+        # about what is still up would read the same before and after.
+        self.held = [one for one in self.held if one.call_id != call_id]
 
     def hangup_all(self) -> None:
         self.commands.append(("hangup_all", ""))
+        self.held = []
 
     #: The calls this fake is holding, for a test that asks what a reopened
     #: control socket found. Set by a test; empty otherwise.

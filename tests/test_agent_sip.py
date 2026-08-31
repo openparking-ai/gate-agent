@@ -677,3 +677,100 @@ def test_the_control_socket_comes_back_and_the_next_call_is_answered(world, tmp_
         finally:
             caller.close()
             ua.close()
+
+
+@pytest.mark.sip
+def test_a_restarted_agent_releases_the_calls_the_previous_one_left(world, tmp_path):
+    """F0.7, against a real baresip holding two real calls the agent did not make.
+
+    The round-5 merge gate measured this and left it open. An agent that dies
+    with two legs up leaves baresip holding both -- baresip is a separate
+    program, it stays registered, and it keeps the calls -- and a RESTARTED
+    agent enumerated nothing, so it answered the next call with the orphans
+    still live:
+
+        after the agent dies -> person's calls: ['93567246...']
+                                intercom's calls: ['16d885aa...']
+        restarted agent's session: None    (nothing enumerated, hung up)
+        NEW call answered by the restarted agent: True
+            the leftover person leg is still up: ['93567246...']
+
+    This lane's bridge is SITE-WIDE, so those two were about to be conferenced
+    into a stranger's case.
+
+    `_reconnect()` covers a socket lost inside a RUNNING process. That is a
+    different trigger and could never cover this one: a new process has no
+    socket to lose.
+    """
+    _root, _registrar, ours, intercom, person, _stranger, _forger = world
+    first, first_ua = agent_on(world, tmp_path)
+    caller = Ctrl(intercom.ctrl_port)
+    other = Ctrl(person.ctrl_port)
+    try:
+        pump(first, lambda: first_ua.registered() is True, seconds=30)
+
+        # TWO REAL LEGS, up on the real user agent, made by the agent's own
+        # dialogue: an inbound call from the intercom, and the outbound call to
+        # the person that the case then places.
+        caller.command("dial", f"sip:{INTERCOM_ACCOUNT}@127.0.0.1:{ours.sip_port}")
+        pump(first, lambda: first.session is not None, seconds=30)
+        pump(
+            first,
+            lambda: first.session is not None and first.session.operator_call is not None,
+            seconds=45,
+        )
+        pump(first, lambda: len(first_ua.calls()) >= 2, seconds=30)
+        before = [one.call_id for one in first_ua.calls()]
+        assert len(before) >= 2, before
+
+        # THE AGENT DIES. Its socket goes; baresip does not, and it keeps both.
+        first_ua.close()
+        assert ours.process.poll() is None, "baresip died; this measures the wrong thing"
+
+        # A SECOND AGENT PROCESS starts against the same user agent.
+        second, second_ua = agent_on(world, tmp_path)
+        try:
+            # THE PROBE: both legs are gone, and the count is on the record.
+            deadline = time.time() + 30
+            while time.time() < deadline and second_ua.calls():
+                second.poll()
+                time.sleep(0.2)
+            assert not second_ua.calls(), (
+                f"the restarted agent left {len(second_ua.calls())} call(s) up: "
+                f"{[one.call_id for one in second_ua.calls()]}"
+            )
+            released = [
+                event
+                for event in second.events(0).to_dict()["events"]
+                if event["kind"] == "leftover_calls_released"
+            ]
+            assert len(released) == 1, second.events(0).to_dict()["events"]
+            assert released[0]["released"] == len(before), (released, before)
+            # It carries a COUNT and no call ids: the previous process's
+            # bookkeeping means nothing to a reader of this surface.
+            assert "call_id" not in json.dumps(released[0])
+            for call_id in before:
+                assert call_id not in json.dumps(released[0])
+
+            # AND THE NEXT CALL IS A CLEAN CASE. This is the harm: it used to be
+            # answered with the orphans still live, and the bridge is site-wide.
+            pump(second, lambda: second_ua.registered() is True, seconds=30)
+            caller.command("dial", f"sip:{INTERCOM_ACCOUNT}@127.0.0.1:{ours.sip_port}")
+            pump(second, lambda: second.session is not None, seconds=30)
+            assert second.session.intercom.sip_uri == "sip:door1@127.0.0.1"
+            live = {one.call_id for one in second_ua.calls()}
+            assert not (live & set(before)), (
+                f"a leg from the previous process is in the new case: {sorted(live & set(before))}"
+            )
+        finally:
+            try:
+                second_ua.hangup_all()
+            finally:
+                second_ua.close()
+    finally:
+        caller.close()
+        other.close()
+        try:
+            first_ua.close()
+        except Exception:  # noqa: BLE001
+            pass

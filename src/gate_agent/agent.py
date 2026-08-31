@@ -226,21 +226,79 @@ class Agent:
     # -- startup -----------------------------------------------------------
 
     def start(self) -> None:
-        """Measure every audio file, then check the UA. In that order.
+        """Measure every audio file, take the user agent, and CLEAR IT DOWN.
 
         The files first, because a missing one is a configuration this process
         must not run on and it costs nothing to find out; the UA second, because
-        finding out means opening a socket to another process.
+        finding out means opening a socket to another process; and then every
+        call that user agent is still holding, because they are not ours.
         """
         self._measure_audio()
         self._code(AgentCode.AUDIO_MISSING, self.config.agent_id, HealthState.OK)
         for leg in UaLeg:
             self._code(AgentCode.AUDIO_PLAYBACK_FAILED, leg.value, HealthState.OK)
         self.ua.start()
+        self._release_leftover_calls()
         self._check_accounts()
         self._ua_version = self.ua.version()
         self._code(AgentCode.UA_UNREACHABLE, self.config.agent_id, HealthState.OK)
         self._code(AgentCode.UA_UNSUPPORTED_VERSION, self.config.agent_id, HealthState.OK)
+
+    def _release_leftover_calls(self) -> None:
+        """Hang up every call the user agent is holding, before answering any.
+
+        **They belong to a process that is gone.** An agent that dies with two
+        legs up leaves baresip holding both, and the user agent outlives it: it
+        is a separate program, it stays registered, and it keeps the calls. A
+        restarted agent used to enumerate nothing, so it answered the next call
+        with the orphans still live -- and this user agent's bridge is
+        SITE-WIDE, so the previous driver and the previous operator were
+        conferenced into a stranger's case. Measured at the round-5 merge gate:
+
+            after the agent dies -> person's calls: ['93567246...']
+                                    intercom's calls: ['16d885aa...']
+            restarted agent's session: None    (nothing enumerated, hung up)
+            NEW call answered by the restarted agent: True
+                the leftover person leg is still up: ['93567246...']
+
+        `_reconnect()` has always done this for a socket lost INSIDE a running
+        process. That is a different trigger and it could never cover this one:
+        a new process has no socket to lose.
+
+        **Every one of them goes, including a ringing one.** `_reconnect()`
+        answers a ringing call, because there the agent was up when it arrived
+        and somebody may still be at the barrier holding on. Here the agent has
+        just started: nothing knows how long that call has been ringing, no
+        session exists behind it, and its lane read would be one this process
+        never made. Answering it would be speaking to somebody about a case
+        assembled out of nothing. It is released, and their intercom's own call
+        list takes them to a person -- which is what a dead agent does anyway,
+        and it is the install requirement this module already states.
+
+        A user agent that cannot be enumerated does NOT stop the agent starting.
+        An agent that refuses to start because it could not ask is an intercom
+        nobody answers, which is worse than the leftovers; it is logged, and the
+        next `poll()` reports the socket through `ua_unreachable` as it always
+        has.
+        """
+        try:
+            leftover = list(self.ua.calls())
+        except UaUnreachable as exc:
+            log.error("could not ask the user agent what it is holding: %s", exc)
+            return
+        released = 0
+        for call in leftover:
+            try:
+                self.ua.hangup(call.call_id)
+            except UaUnreachable as exc:
+                log.error("could not release the leftover call %s: %s", call.call_id, exc)
+                continue
+            released += 1
+        if released:
+            log.warning(
+                "released %d call(s) the user agent was still holding at startup", released
+            )
+            self._record(AgentEventKind.LEFTOVER_CALLS_RELEASED, released=released)
 
     def _check_accounts(self) -> None:
         """Every declared intercom's account must be one the user agent holds.
@@ -1024,6 +1082,7 @@ class Agent:
             at=self._now(),
             keyed=fields.get("keyed"),
             caller_stated_identity=fields.get("caller_stated_identity"),
+            released=fields.get("released"),
         )
         if len(self._log) == self._log.maxlen:
             self._dropped += 1

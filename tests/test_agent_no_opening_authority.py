@@ -39,15 +39,16 @@ from serving import serving
 PACKAGE = Path(gate_agent.__file__).resolve().parent
 INTERCOM = "sip:door1@10.0.0.9"
 
-#: The whole seam. Seven verbs and two accessors, and NONE of them opens
-#: anything. `accounts` is the one this round added: it asks which local
+#: The whole seam, and NONE of them opens anything. `accounts` asks which local
 #: accounts the user agent holds, which is what says which intercom a call is
-#: from, and it can no more open a barrier than `version` can.
+#: from; `calls` asks which calls it is holding RIGHT NOW, which is what says
+#: whether a previous process left any -- and neither can open a barrier any
+#: more than `version` can.
 #: Written here rather than derived from the class, because the point is to
 #: notice a verb being ADDED -- an expectation derived from the thing under test
 #: cannot.
 SEAM = {
-    "start", "version", "registered", "poll", "accounts",
+    "start", "version", "registered", "poll", "accounts", "calls",
     "answer", "dial", "play", "stop_playing", "bridge", "hangup", "hangup_all",
 }
 

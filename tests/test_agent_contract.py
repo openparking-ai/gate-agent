@@ -1005,3 +1005,88 @@ def test_the_adapter_turns_a_404_into_an_event_and_leaves_the_rest_alone(tmp_pat
         "param": "486 Max Calls", "from": "sip:door1@10.0.0.9",
     })
     assert tuple(made._events) == ()
+
+
+def test_a_starting_agent_releases_the_calls_a_previous_process_left(tmp_path):
+    """F0.7. `start()` enumerated NOTHING, and the leftovers were bridged.
+
+    The round-5 merge gate measured it and left it open. baresip is a separate
+    program: it outlives the agent, stays registered, and keeps the calls. A
+    restarted agent answered the next call with the previous process's legs
+    still live, and this user agent's bridge is SITE-WIDE -- so the previous
+    driver and the previous operator were about to be conferenced into a
+    stranger's case.
+
+    `_reconnect()` covers a socket lost inside a RUNNING process. It could never
+    cover this: a new process has no socket to lose.
+
+    The SIP suite runs this against a real baresip holding two real calls
+    (`test_a_restarted_agent_releases_the_calls_the_previous_one_left`). This is
+    the same property where the fail-control can reach it -- that script runs
+    `-m "not sip"`, so a guarantee measured only over there is one no control
+    proves.
+    """
+    from conftest import agent_config_for, agent_for
+    from fake_ua import FakeUa
+    from gate_agent.contract import AgentEventKind
+    from gate_agent.ua import UaCall
+
+    ua = FakeUa()
+    # WHAT THE PREVIOUS PROCESS LEFT: one leg at the door and one at the person,
+    # and one of them still ringing -- a ringing call is the one `_reconnect()`
+    # ANSWERS, so if `start()` shared that rule it would answer this one.
+    ua.held = [
+        UaCall(call_id="left-driver", peer_uri="sip:door1@10.0.0.9", ringing=False,
+               account_user=INTERCOM_ACCOUNT),
+        UaCall(call_id="left-operator", peer_uri="sip:duty@10.0.0.5", ringing=False,
+               account_user="agent-operator"),
+        UaCall(call_id="left-ringing", peer_uri="sip:door1@10.0.0.9", ringing=True,
+               account_user=INTERCOM_ACCOUNT),
+    ]
+    agent = agent_for(agent_config_for(tmp_path, standalone=True), ua)
+
+    # ALL THREE ARE GONE, the ringing one included: nothing here knows how long
+    # it has been ringing, no session exists behind it, and its lane read would
+    # be one this process never made.
+    assert not ua.calls(), [one.call_id for one in ua.calls()]
+    assert [command for command in ua.commands if command[0] == "answer"] == []
+    assert agent.session is None
+
+    # AND THE COUNT IS ON THE RECORD, once, with no call id in it.
+    events = agent.events(0).to_dict()["events"]
+    kind = AgentEventKind.LEFTOVER_CALLS_RELEASED.value
+    released = [one for one in events if one["kind"] == kind]
+    assert len(released) == 1, events
+    assert released[0]["released"] == 3
+    for call_id in ("left-driver", "left-operator", "left-ringing"):
+        assert call_id not in json.dumps(released[0])
+
+    # THE HARM: the next call is a clean case with nothing of the old one in it.
+    ua.incoming("sip:door1@10.0.0.9", call_id="new-1", account_user=INTERCOM_ACCOUNT)
+    agent.poll()
+    assert agent.session is not None and agent.session.driver_call == "new-1"
+    # Nothing the previous process left is still up. Asserted this way round
+    # rather than as an equality with the new call: `FakeUa.incoming` does not
+    # put the arriving call into `held`, so an equality here would be a claim
+    # about the fake's bookkeeping instead of about the leftovers.
+    assert not {one.call_id for one in ua.calls()} & {
+        "left-driver", "left-operator", "left-ringing"
+    }
+
+
+def test_an_agent_that_starts_on_a_quiet_user_agent_records_nothing(tmp_path):
+    """THE CONTROL for the test above: no leftovers, no event.
+
+    A record of nothing having happened, on every start of every agent for ever,
+    is noise in the window that holds what did -- and it would make the count
+    above a field that is always there rather than a fact about a restart.
+    """
+    from conftest import agent_config_for, agent_for
+    from fake_ua import FakeUa
+    from gate_agent.contract import AgentEventKind
+
+    ua = FakeUa()
+    agent = agent_for(agent_config_for(tmp_path, standalone=True), ua)
+    kinds = [event["kind"] for event in agent.events(0).to_dict()["events"]]
+    assert AgentEventKind.LEFTOVER_CALLS_RELEASED.value not in kinds, kinds
+    assert [command for command in ua.commands if command[0] == "hangup"] == []
