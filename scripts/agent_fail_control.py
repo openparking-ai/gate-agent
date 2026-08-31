@@ -566,6 +566,19 @@ BREAKS = [
         "to": 'SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es")',
     },
     {
+        # F0.6. The flake that turned `main` red on a tree CI had already
+        # passed twice: a handler thread still inside `do_GET` when the
+        # interpreter finalises, killed mid-write, exit 134 after every test
+        # passed. Restoring the daemon default takes `server_close()`'s
+        # tracking away and the control in
+        # `tests/test_no_handler_thread_survives.py` goes red.
+        "name": "a_handler_thread_may_outlive_its_test",
+        "why": "handler threads are daemons again, so server_close() has nothing to join",
+        "file": "tests/serving.py",
+        "from": "    server.daemon_threads = False",
+        "to": "    server.daemon_threads = True",
+    },
+    {
         "name": "the_text_has_no_provenance",
         "why": "who wrote the words, and whether anybody reviewed them, is unrecorded again",
         "file": "src/gate_agent/audio/MANIFEST.json",
