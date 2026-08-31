@@ -40,7 +40,13 @@ from .agent_service import make_server as make_agent_server
 from .capture import CaptureProcess, UnsupportedLaneContract
 from .capture_service import CaptureService
 from .capture_service import make_server as make_capture_server
-from .config import AgentConfig, CaptureConfig, ConfigError, MonitorConfig
+from .config import (
+    AgentConfig,
+    CaptureConfig,
+    ConfigError,
+    MonitorConfig,
+    read_secret_file,
+)
 from .monitor import Monitor, UnsupportedContract
 from .service import (
     InsecureBind,
@@ -214,24 +220,23 @@ def _agent_forever(agent: Agent, stop: threading.Event, tick: float = 0.2) -> No
 
 
 def _token(args) -> str | None:
-    """The shared token, read from the file that holds it.
+    """The shared token, THROUGH THE ONE GUARDED READER.
 
-    An empty or whitespace-only file is not a token and is refused rather than
-    read as "no token configured" -- which would be a truncated file silently
-    turning the credential off on the one bind that requires one.
+    It used to read the file itself, which is how the one credential a person
+    passes on a command line was the one credential with no permission check on
+    it: an unreadable file, an empty file and a world-readable file were three
+    different outcomes and only two of them were refused.
+
+    `read_secret_file` refuses all three, names what this file is, and is the
+    only thing in this package that reads a credential off a disk.
     """
     if not args.auth_token_file:
         return None
     try:
-        raw = args.auth_token_file.read_text(encoding="utf-8")
-    except OSError as exc:
-        print(f"could not read {args.auth_token_file}: {exc}", file=sys.stderr)
+        return read_secret_file(str(args.auth_token_file), "--auth-token-file", None)
+    except ConfigError as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
         raise SystemExit(2) from exc
-    token = raw.strip()
-    if not token:
-        print(f"{args.auth_token_file} holds no token", file=sys.stderr)
-        raise SystemExit(2)
-    return token
 
 
 def cmd_monitor(args) -> int:

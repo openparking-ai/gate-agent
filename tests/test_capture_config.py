@@ -28,8 +28,16 @@ from gate_agent.config import (
 
 @pytest.fixture
 def auth(tmp_path):
+    """A camera credential with the permissions `config.py` insists on.
+
+    `0600` because every credential this package reads is refused at anything
+    wider. A fixture at the default `0644` would exercise a path the product
+    refuses -- see `test_a_camera_auth_file_readable_by_anybody_is_refused`,
+    which is the one place that writes the wider mode on purpose.
+    """
     path = tmp_path / "camera.auth"
     path.write_text("operator:s3cret\n", encoding="utf-8")
+    path.chmod(0o600)
     return path
 
 
@@ -153,10 +161,12 @@ def test_an_auth_file_that_is_not_user_colon_password_is_refused(tmp_path, auth)
     """Empty read as "no credential" turns authentication off where it mattered."""
     for body in ("", "   \n", "operator\n", ":s3cret\n", "operator:\n"):
         auth.write_text(body, encoding="utf-8")
+        auth.chmod(0o600)
         with pytest.raises(ConfigError):
             CaptureConfig.from_dict(raw_for(tmp_path, auth))
     # A password with a colon in it is a password, and the split is on the FIRST.
     auth.write_text("operator:a:b:c\n", encoding="utf-8")
+    auth.chmod(0o600)
     camera = CaptureConfig.from_dict(raw_for(tmp_path, auth)).cameras[0]
     assert (camera.username, camera.password) == ("operator", "a:b:c")
 

@@ -454,7 +454,7 @@ def test_an_empty_dial_secret_file_is_refused(tmp_path):
         AgentConfig.from_file(
             written(tmp_path, BASE.replace("DIAL_SECRET_FILE", str(path)))
         )
-    assert "holds no token" in str(raised.value)
+    assert "holds no credential" in str(raised.value)
 
 
 def test_two_intercoms_sharing_a_dial_secret_are_refused(tmp_path):

@@ -159,6 +159,110 @@ CREDENTIAL_VALUE_KEYS = {
     "dial_secret": "dial_secret_file",
 }
 
+#: The permission bits a file holding ANY credential this package reads may not
+#: have. `0o077` is group and other, so what is required is `0600` or `0400`.
+#:
+#: **It used to guard one key.** `[intercoms.<uri>] dial_secret_file` had it
+#: from the round that made a dial secret an intercom's identity, and nothing
+#: else did -- so a lane's bearer token, the platform's operator token, the
+#: webhook's token, a camera's password and the shared token on the read
+#: surfaces could all be world-readable, and this package would start on them
+#: without a word. A credential every account on the box can read is a
+#: credential every account on the box holds, and which credential it is only
+#: changes what they can do with it.
+SECRET_FORBIDDEN_MODE = 0o077
+
+#: WHAT EACH CREDENTIAL FILE IS, one sentence per key, keyed by the `where` the
+#: refusal names. Read into the refusal message so a person who has just been
+#: told to `chmod 600` something is also told what they are protecting -- and
+#: kept HERE, in one mapping, so a key that gains a credential file without a
+#: sentence is a key somebody has to write one for.
+#:
+#: The key is the `where` with its per-site parts collapsed: `[lanes.*]` covers
+#: `[lanes.entry]` and every other, because the sentence is about the KIND of
+#: credential and not about one site's name for it.
+SECRET_FILE_IS: dict[str, str] = {
+    "[targets.*].token_file": (
+        "the credential this monitor presents to that target. The platform's is an OPERATOR "
+        "token: it reads every garage's devices."
+    ),
+    "[sinks.webhook].token_file": (
+        "the credential this monitor presents to the paging system it POSTs to."
+    ),
+    "[cameras.*].auth_file": (
+        "a camera's `user:password`. Anybody who can read it can photograph whatever that "
+        "camera sees."
+    ),
+    "[lanes.*].token_file": (
+        "the credential this agent presents to that lane's READ routes."
+    ),
+    "[intercoms.*].dial_secret_file": (
+        "the identity of an intercom. Anybody who can read it can call this agent as that "
+        "door and have a person dispatched to a barrier nobody is standing at."
+    ),
+    "--auth-token-file": (
+        "the shared token this process's own read surface requires. It publishes which of a "
+        "site's lanes are broken and when a human was called and did not answer."
+    ),
+}
+
+
+def _secret_file_is(where: str) -> str:
+    """The one sentence for this key, with a site's own names collapsed out.
+
+    `[lanes.entry].token_file` and `[intercoms.'sip:door1@x'].dial_secret_file`
+    are the same KIND of credential as every other lane's and every other
+    door's, so the mapping is keyed on the kind. A `where` with no sentence is a
+    programming error here rather than a silent blank in a refusal, so it says
+    so out loud.
+    """
+    collapsed = re.sub(r"^\[([a-z_]+)\.[^\]]+\]", r"[\1.*]", where)
+    return SECRET_FILE_IS.get(collapsed, SECRET_FILE_IS.get(where, ""))
+
+
+def read_secret_file(value, where: str, relative_to: Path | None) -> str:
+    """A credential, out of the file that holds it, WITH THE PERMISSION GUARD.
+
+    THE ONE PLACE this package reads a credential from a disk.
+    `tests/test_config.py` sweeps the source and requires it: a second reader
+    would be a second place for the guard to be missing, which is exactly how
+    this ended up guarding one key out of six.
+
+    Three refusals, in this order:
+
+      * **not a path.** A credential is never a value in a configuration file:
+        a value here is a value in every backup of that file and in everything
+        anybody pastes it into.
+      * **readable by more than its owner.** `0o077` is group and other, so
+        `0600` or `0400`. What the file IS travels in the message from
+        `SECRET_FILE_IS`, because "chmod 600 it" without saying what is at stake
+        is an instruction somebody works around.
+      * **empty or whitespace-only.** Refused rather than read as "no credential
+        configured", which is a truncated file silently turning authentication
+        off on exactly the target that needed it.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{where} must be a path to a file holding the credential")
+    path = _resolve(value.strip(), relative_to)
+    try:
+        mode = path.stat().st_mode
+    except OSError as exc:
+        raise ConfigError(f"{where}: could not read {path}: {exc}") from exc
+    if mode & SECRET_FORBIDDEN_MODE:
+        what = _secret_file_is(where)
+        raise ConfigError(
+            f"{where}: {path} is readable by more than its owner ({mode & 0o777:04o}). "
+            f"This file holds {what} `chmod 600` it."
+        )
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"{where}: could not read {path}: {exc}") from exc
+    token = raw.strip()
+    if not token:
+        raise ConfigError(f"{where}: {path} holds no credential")
+    return token
+
 
 class ConfigError(ValueError):
     """A configuration this monitor will not run on, named at startup.
@@ -512,28 +616,6 @@ def _refuse_userinfo(url: str, where: str) -> None:
         )
 
 
-def _read_token(value, where: str, relative_to: Path | None) -> str:
-    """A credential, out of the file that holds it.
-
-    An empty or whitespace-only file is refused rather than read as "no
-    credential configured", which is a truncated file silently turning
-    authentication off on exactly the target that needed it.
-    """
-    if not isinstance(value, str) or not value.strip():
-        raise ConfigError(f"{where} must be a path to a file holding the token")
-    path = Path(value)
-    if not path.is_absolute() and relative_to is not None:
-        path = relative_to / path
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConfigError(f"{where}: could not read {path}: {exc}") from exc
-    token = raw.strip()
-    if not token:
-        raise ConfigError(f"{where}: {path} holds no token")
-    return token
-
-
 def _positive(value, where: str, default: float) -> float:
     if value is None:
         return default
@@ -589,7 +671,7 @@ def _targets(
         _refuse_userinfo(url, f"[targets.{kind.value}].url")
         token = None
         if "token_file" in table:
-            token = _read_token(
+            token = read_secret_file(
                 table["token_file"], f"[targets.{kind.value}].token_file", relative_to
             )
         garage_id = None
@@ -708,7 +790,7 @@ def _sinks(raw: dict, relative_to: Path | None) -> tuple[object, ...]:
         sinks.append(
             WebhookSinkConfig(
                 url=url,
-                token=_read_token(
+                token=read_secret_file(
                     webhook["token_file"], "[sinks.webhook].token_file", relative_to
                 ),
             )
@@ -787,16 +869,9 @@ def _read_camera_auth(value, where: str, relative_to: Path | None) -> tuple[str,
     challenge this process cannot meet is a camera that reads as refusing us,
     which sends a human to the wrong machine.
     """
-    if not isinstance(value, str) or not value.strip():
-        raise ConfigError(f"{where} must be a path to a file holding `user:password`")
-    path = Path(value)
-    if not path.is_absolute() and relative_to is not None:
-        path = relative_to / path
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConfigError(f"{where}: could not read {path}: {exc}") from exc
-    line = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+    raw = read_secret_file(value, where, relative_to)
+    path = _resolve(value.strip(), relative_to)
+    line = raw.splitlines()[0].strip() if raw else ""
     if ":" not in line:
         raise ConfigError(
             f"{where}: {path} does not hold `user:password` on its first line. An empty or "
@@ -945,12 +1020,6 @@ MINIMUM_DIAL_SECRET = 16
 #: an address -- a `;` starts a parameter, an `@` ends the user part -- and an
 #: address that means something else is an intercom that can never call in.
 DIAL_SECRET_SHAPE = re.compile(r"\A[A-Za-z0-9._~-]+\Z")
-
-#: The permission bits a file holding a dial secret may not have. The secret IS
-#: the intercom's identity, so a world- or group-readable one is an identity
-#: every account on the box can assert.
-SECRET_FORBIDDEN_MODE = 0o077
-
 
 @dataclass(frozen=True, slots=True, repr=False)
 class Intercom:
@@ -1176,7 +1245,7 @@ def _agent_lanes(raw: dict, relative_to: Path | None) -> tuple[Target, ...]:
         _refuse_userinfo(url, f"[lanes.{name}].url")
         token = None
         if "token_file" in table:
-            token = _read_token(table["token_file"], f"[lanes.{name}].token_file", relative_to)
+            token = read_secret_file(table["token_file"], f"[lanes.{name}].token_file", relative_to)
         lanes.append(
             Target(
                 name=name,
@@ -1336,18 +1405,9 @@ def _dial_secret(value, sip_uri: str, relative_to: Path | None) -> str:
             f"`sip:{ACCOUNT_USER_PREFIX}<that string>@<this agent's host>` into the unit."
         )
     path = _resolve(value.strip(), relative_to)
-    try:
-        mode = path.stat().st_mode
-    except OSError as exc:
-        raise ConfigError(f"{where}: could not read {path}: {exc}") from exc
-    if mode & SECRET_FORBIDDEN_MODE:
-        raise ConfigError(
-            f"{where}: {path} is readable by more than its owner "
-            f"({mode & 0o777:04o}). This file holds the identity of an intercom: anybody "
-            "who can read it can call this agent as that door and have a person dispatched "
-            "to a barrier nobody is standing at. `chmod 600` it."
-        )
-    secret = _read_token(str(path), where, None)
+    # THE SAME GUARD AS EVERY OTHER CREDENTIAL. This key had one of its own
+    # first, and for a whole round it was the only key that had one at all.
+    secret = read_secret_file(str(path), where, None)
     if len(secret) < MINIMUM_DIAL_SECRET:
         raise ConfigError(
             f"{where}: the secret in {path} is {len(secret)} characters. This build refuses "
