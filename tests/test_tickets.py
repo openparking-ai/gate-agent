@@ -547,3 +547,54 @@ def test_the_signature_is_compared_in_constant_time():
         and isinstance(node.left, ast.Name)
         and node.left.id in signature_names
     ]
+
+
+def test_the_document_publishes_the_vector_this_build_produces():
+    """The vector in `docs/CONTRACT.md` is THIS one, character for character.
+
+    A format described in prose is a format two implementations disagree about,
+    and the exit that will read these tickets is a later round in a process that
+    does not exist yet. So the document carries the exact bytes -- and this is
+    what stops the document's copy and the code's coming apart, which is the
+    failure this project has had reported against it more than once.
+    """
+    from pathlib import Path
+
+    document = (
+        Path(__file__).resolve().parent.parent / "docs" / "CONTRACT.md"
+    ).read_text(encoding="utf-8")
+    block = document.split("<!--payload:ticket-vector-->", 1)[1].split("```", 2)[1]
+
+    published = {}
+    for line in block.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0] in (
+            "key", "ticket_ref", "site", "lane", "issued_at", "canonical", "payload"
+        ):
+            published[parts[0]] = parts[1].strip()
+            last = parts[0]
+        elif line.strip() and published:
+            # A continuation line: the long values are wrapped in the document
+            # so the page does not scroll sideways.
+            published[last] += line.strip()
+
+    assert published["key"] == VECTOR_KEY.decode("ascii")
+    assert published["ticket_ref"] == VECTOR_TICKET.ticket_ref
+    assert published["site"] == VECTOR_TICKET.site
+    assert published["lane"] == VECTOR_TICKET.lane
+    assert published["issued_at"] == VECTOR_TICKET.issued_at
+    assert published["canonical"] == VECTOR_CANONICAL.hex()
+    assert published["payload"] == VECTOR_PAYLOAD
+    # AND THE DOCUMENT'S OWN VALUES REPRODUCE IT, through the shipped code,
+    # from the strings a reader would type -- which is the whole point of
+    # publishing a vector rather than describing a format.
+    from_the_document = Ticket(
+        ticket_ref=published["ticket_ref"],
+        ticket_id="",
+        site=published["site"],
+        lane=published["lane"],
+        issued_at=published["issued_at"],
+    )
+    assert payload_for(
+        from_the_document, published["key"].encode("ascii")
+    ) == published["payload"]
