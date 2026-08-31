@@ -120,6 +120,28 @@ def _auth_token_file(tmp_path, mode):
     return lambda: read_secret_file(str(token), "--auth-token-file", None)
 
 
+def _relay_credentials_file(tmp_path, mode):
+    credentials = written(tmp_path, "relay.auth", "root:s3cret", mode)
+    # `[tickets]` comes with it: a standalone relay moves a barrier with no lane
+    # behind it, so this agent's own record is the only thing that says it
+    # happened -- and the configuration requires the section that makes one.
+    key = written(tmp_path, "relay-tickets.key", "a-signing-key-long-enough-000000", 0o600)
+    return lambda: AgentConfig.from_dict(
+        agent_raw_for(
+            tmp_path,
+            standalone=True,
+            tickets={"signing_key_file": str(key), "directory": str(tmp_path / "tickets")},
+            relay={
+                "kind": "axis_vapix",
+                "url": "http://10.0.0.9",
+                "port": 1,
+                "pulse_ms": 500,
+                "credentials_file": str(credentials),
+            },
+        )
+    )
+
+
 def _signing_key_file(tmp_path, mode):
     key = written(tmp_path, "tickets.key", "a-signing-key-long-enough-for-the-floor", mode)
     return lambda: AgentConfig.from_dict(
@@ -152,6 +174,7 @@ CASES = {
     "--auth-token-file": _auth_token_file,
     "[tickets].signing_key_file": _signing_key_file,
     "[lanes.*].act_token_file": _act_token_file,
+    "[intercoms.*].relay.credentials_file": _relay_credentials_file,
 }
 
 

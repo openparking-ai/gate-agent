@@ -156,8 +156,8 @@ BREAKS = [
         "name": "the_intercom_repr_shows_the_secret",
         "why": "every log line and traceback touching a configuration carries it",
         "file": "src/gate_agent/config.py",
-        "from": '            "account_user=<not shown>)"',
-        "to": '            f"account_user={self.account_user!r})"',
+        "from": '            f"relay={self.relay!r}, account_user=<not shown>)"',
+        "to": '            f"relay={self.relay!r}, account_user={self.account_user!r})"',
     },
     {
         "name": "an_unrecognised_reason_is_mapped",
@@ -569,6 +569,51 @@ BREAKS = [
         "file": "src/gate_agent/lines.py",
         "from": 'SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es-ES")',
         "to": 'SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es")',
+    },
+    {
+        # F6. The standalone relay, and the invariant it has to meet.
+        "name": "the_relay_pulses_before_the_record_is_written",
+        "why": "a barrier opens with nothing written down, which is the invariant broken",
+        "file": "src/gate_agent/agent.py",
+        "from": "        pending = self._mint_standalone(session.intercom)",
+        "to": "        pending = None",
+    },
+    {
+        "name": "a_relay_may_sit_beside_a_lane",
+        "why": "two things open one barrier and the lane has no record of one of them",
+        "file": "src/gate_agent/config.py",
+        "from": "    if lane != STANDALONE:",
+        "to": "    if False:",
+    },
+    {
+        "name": "the_relay_action_is_not_percent_encoded",
+        "why": "a `/` reaches the wire as a path separator and the request misses the CGI",
+        "file": "src/gate_agent/relay.py",
+        "from": '        query = "action=" + urllib.parse.quote(action, safe="")',
+        "to": '        query = "action=" + urllib.parse.quote(action)',
+    },
+    {
+        "name": "any_body_from_the_relay_is_a_success",
+        "why": "a login page answering 200 is read as a barrier that was asked to open",
+        "file": "src/gate_agent/relay.py",
+        "from": "        if body.strip():",
+        "to": "        if False:",
+    },
+    {
+        "name": "a_relay_kind_this_build_cannot_drive_is_accepted",
+        "why": "a 2N unit is sent Axis's own CGI and the site is told it opened",
+        "file": "src/gate_agent/relay.py",
+        "from": "    if relay.kind != AXIS_VAPIX:",
+        "to": "    if False:",
+    },
+    {
+        "name": "the_relay_credential_is_in_the_repr",
+        "why": "a password that pulses a barrier reaches every traceback and log line",
+        "file": "src/gate_agent/relay.py",
+        "from": '            f"pulse_ms={self.pulse_ms!r}, username={self.username!r}, "\n'
+                '            "password=<not shown>)"',
+        "to": '            f"pulse_ms={self.pulse_ms!r}, username={self.username!r}, "\n'
+              '            f"password={self.password!r})"',
     },
     {
         # F3-F5. The ticket, the press and the vend. Every break here is one
