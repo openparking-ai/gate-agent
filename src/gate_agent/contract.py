@@ -1576,7 +1576,28 @@ class AgentEventKind(StrEnum):
     VEND_REFUSED = "vend_refused"
     #: A STANDALONE intercom's own relay was pulsed, on a human's word. Carries
     #: the intercom, the port and the milliseconds -- and no credential.
+    #:
+    #: **Written only AFTER the unit answered as the document says.** It used to
+    #: be written before the request went out and stood whether the unit
+    #: refused, answered something else, or was not there at all -- so the one
+    #: machine-readable account of a barrier at a site with no platform said the
+    #: relay was pulsed when it was not.
     RELAY_PULSED = "relay_pulsed"
+    #: The relay did NOT pulse, and `cause` says why in the words the relay
+    #: module used. Its own kind rather than an absence, because the absence of
+    #: `relay_pulsed` is also what a call that never reached `OPEN_NOW` looks
+    #: like, and a site with no platform has this event and nothing else.
+    RELAY_PULSE_FAILED = "relay_pulse_failed"
+    #: The driver was shown a code and TOLD SO in the call they were already on.
+    #: A ticket minted while somebody is on the phone is one the screen cannot
+    #: tell them about, and a press that confirmed it would vend a code they
+    #: never photographed.
+    TICKET_ON_SCREEN = "ticket_on_screen"
+    #: A declared screen's driver now says it is a different size. The frame is
+    #: re-rendered at the new geometry; the old one was being written at the old
+    #: stride, which a driver sees as diagonal noise while the agent believes a
+    #: code is up.
+    DISPLAY_GEOMETRY_CHANGED = "display_geometry_changed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1936,9 +1957,20 @@ class AgentEvent:
     #: the join to that record.
     lane_event_cursor: int | None = None
     #: WHICH PORT of an intercom's relay was pulsed, and for how long, on
-    #: `relay_pulsed`. No credential, ever.
+    #: `relay_pulsed` and on `relay_pulse_failed`. No credential, ever.
     relay_port: int | None = None
     relay_ms: int | None = None
+    #: WHY the pulse did not happen, on `relay_pulse_failed`: the sentence the
+    #: relay module raised, which names the unit's own answer or its silence.
+    #: **Never a credential** -- the two refusals are built from a status, a
+    #: challenge's scheme and its missing fields, and never from the password
+    #: they authenticate with.
+    cause: str | None = None
+    #: WHICH SCREEN, and what its driver now says it is, on
+    #: `display_geometry_changed`. The geometry is `<width>x<height>@<bpp>`,
+    #: which is what decides the stride a frame is written at.
+    display: str | None = None
+    geometry: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in tuple(kind.value for kind in AgentEventKind):
@@ -1985,6 +2017,29 @@ class AgentEvent:
                 "released belongs on leftover_calls_released and on no other kind, and that "
                 "kind carries it: a count on another event has nothing to count, and that "
                 "event without one says only that something happened."
+            )
+        if self.cause is not None and self.kind != AgentEventKind.RELAY_PULSE_FAILED.value:
+            raise ValueError(
+                f"{self.kind!r} carries no cause in this contract. A cause belongs to the "
+                "one event that says something did not happen."
+            )
+        if self.kind == AgentEventKind.RELAY_PULSE_FAILED.value and not self.cause:
+            raise ValueError(
+                "relay_pulse_failed must say why. An event recording that a barrier did not "
+                "move, with no cause on it, sends nobody anywhere."
+            )
+        if (self.display is not None or self.geometry is not None) and (
+            self.kind != AgentEventKind.DISPLAY_GEOMETRY_CHANGED.value
+        ):
+            raise ValueError(
+                f"{self.kind!r} carries no display or geometry in this contract."
+            )
+        if self.kind == AgentEventKind.DISPLAY_GEOMETRY_CHANGED.value and not (
+            self.display and self.geometry
+        ):
+            raise ValueError(
+                "display_geometry_changed names the screen and what it now says it is. "
+                "Either alone cannot be acted on."
             )
         if self.keyed is not None and (not self.keyed or not self.keyed.isdigit()):
             raise ValueError(

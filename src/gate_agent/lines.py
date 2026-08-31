@@ -55,7 +55,20 @@ DRIVER_LINES: tuple[str, ...] = (
     "ticket.confirmed",
     "ticket.vend_commanded",
     "ticket.vend_refused",
+    #: What a driver is told when the code went up WHILE THEY WERE ON THE PHONE.
+    #: The screen is where a driver looks, and it is enough on its own -- until
+    #: they are already in a call, at which point nothing has told them the code
+    #: is behind them. Without this, the press that followed confirmed a ticket
+    #: they had never seen and never photographed, and they drove in with a stay
+    #: whose only identity was a reference nobody held.
+    "ticket.on_screen",
 )
+
+#: The line for a refusal code this build has no words for. Named here so the
+#: agent, the line set and the test that keys them one-to-one all read the same
+#: string -- and so that "unknown" cannot quietly become one of the lane's own
+#: codes without the test noticing.
+UNKNOWN_REFUSAL = "operator.vend_refused.unknown"
 
 #: The lines the OPERATOR hears, in the operator language only.
 OPERATOR_LINES: tuple[str, ...] = (
@@ -65,12 +78,26 @@ OPERATOR_LINES: tuple[str, ...] = (
     "operator.menu_callback_number",
     "operator.cannot_open",
     "operator.vend_commanded",
+    #: SAID BEFORE THE CODE'S OWN SENTENCE, on every refused vend. A person
+    #: briefed as an ordinary case, with no line saying a ticket was confirmed
+    #: and refused, is a person who has to ask the driver over an intercom at
+    #: three in the morning -- and who is then offered `OPEN_NOW`, which will
+    #: meet the same refusal.
+    "operator.ticket_refused",
     #: Why this call was already in progress when the person picked up.
     "operator.help_after_ticket",
     #: ONE SENTENCE PER PUBLISHED REFUSAL CODE, derived from the set rather than
     #: listed: a code the lane can answer and this build has no words for would
     #: be a person told "it was refused" and not told what to do about it.
     *(f"operator.vend_refused.{code}" for code in VEND_REFUSALS),
+    #: AND THE ONE FOR A CODE THAT IS NOT IN THAT SET. The set above is OUR
+    #: lane's, checked equal to its enum in both directions -- which is the
+    #: right check for our lane and no check at all for the third-party seat
+    #: this module is built to sit in (SETTLED 1). A foreign lane answers its
+    #: own vocabulary, and the person used to be told nothing at all about the
+    #: refusal: no sentence existed, so `()` was passed and the briefing was an
+    #: ordinary case.
+    UNKNOWN_REFUSAL,
 )
 
 LINES: tuple[str, ...] = DRIVER_LINES + OPERATOR_LINES
@@ -350,10 +377,23 @@ TEXT: dict[str, dict[str, str]] = {
         "en": "The entrance did not accept that. I am connecting you to a person.",
         "es-ES": "La entrada no lo ha aceptado. Le paso con una persona.",
     },
+    # Said IN THE CALL, about a code that went up during it. It says where to
+    # look, what to do, and that the button is what completes it -- because the
+    # press is what binds the ticket to this arrival.
+    "ticket.on_screen": {
+        "en": "There is a code on the screen. Take a photo of it, then press the button "
+              "again.",
+        "es-ES": "Hay un código en la pantalla. Hágale una foto y pulse el botón otra vez.",
+    },
     # --- the ticket, to the operator --------------------------------------
     "operator.vend_commanded": {
         "en": "The barrier has been asked to open.",
         "es-ES": "Se ha pedido que se abra la barrera.",
+    },
+    # ALWAYS, on any refused vend, before whatever the code's own sentence is.
+    "operator.ticket_refused": {
+        "en": "This driver's ticket was refused by the entrance.",
+        "es-ES": "La entrada ha rechazado el ticket de este conductor.",
     },
     "operator.help_after_ticket": {
         "en": "This driver was given a ticket a moment ago and has called back.",
@@ -398,6 +438,14 @@ TEXT: dict[str, dict[str, str]] = {
     "operator.vend_refused.busy": {
         "en": "The entrance is already opening for somebody.",
         "es-ES": "La entrada ya se está abriendo para alguien.",
+    },
+    # AND THE REFUSAL THIS BUILD HAS NO WORDS FOR. It says exactly that and
+    # claims nothing else: a lane that is not ours has its own vocabulary, and
+    # guessing at which of ours it meant would tell a person to do something
+    # about a fault this build invented for them.
+    UNKNOWN_REFUSAL: {
+        "en": "The entrance gave a reason I have no words for.",
+        "es-ES": "La entrada ha dado un motivo para el que no tengo palabras.",
     },
 }
 

@@ -598,3 +598,97 @@ def test_the_document_publishes_the_vector_this_build_produces():
     assert payload_for(
         from_the_document, published["key"].encode("ascii")
     ) == published["payload"]
+
+
+# ---------------------------------------------------------------------------
+# ONE SPELLING PER TICKET
+# ---------------------------------------------------------------------------
+
+
+def test_a_ticket_has_exactly_one_accepted_spelling():
+    """The six-row table, and only the first row is accepted.
+
+    `verify` re-encodes and compares to make the textual form canonical, and its
+    own comment says why: *a ticket with more than one spelling is one the exit
+    could file twice*. The comparison happened AFTER `payload.strip().upper()`,
+    so exactly the spellings that survived the normalisation survived the check
+    -- lower case, mixed case and surrounding whitespace all verified, and one
+    ticket had four spellings instead of one.
+    """
+    ticket = Ticket(
+        ticket_ref="K7M2QRTX",
+        ticket_id="",
+        site="site-1",
+        lane="entry",
+        issued_at="2026-08-31T14:03:11+00:00",
+    )
+    payload = payload_for(ticket, VECTOR_KEY)
+    # AS MINTED: accepted, and it is the control that the others are refused for
+    # their spelling rather than because verification is broken.
+    assert verify(payload, VECTOR_KEY).ticket_ref == "K7M2QRTX"
+
+    padded = payload + "=" * (-len(payload) % 8)
+    flipped = payload[:-1] + ("A" if payload[-1] != "A" else "B")
+    table = {
+        "lower case": payload.lower(),
+        "mIxEd case": payload[:4].lower() + payload[4:],
+        "leading whitespace": " " + payload,
+        "trailing whitespace": payload + " ",
+        "= padded": padded,
+        "last character flipped": flipped,
+    }
+    for name, spelling in table.items():
+        assert spelling != payload, name
+        with pytest.raises(BadTicket):
+            verify(spelling, VECTOR_KEY)
+
+
+def test_the_normalisation_is_what_made_three_more_spellings_verify():
+    """THE CONTROL: put `strip().upper()` back and the table above accepts four
+    of its six rows."""
+    ticket = Ticket(
+        ticket_ref="K7M2QRTX",
+        ticket_id="",
+        site="site-1",
+        lane="entry",
+        issued_at="2026-08-31T14:03:11+00:00",
+    )
+    payload = payload_for(ticket, VECTOR_KEY)
+
+    def normalising(text: str, key: bytes):
+        return verify(text.strip().upper(), key)
+
+    accepted = [
+        one
+        for one in (payload.lower(), payload[:4].lower() + payload[4:], " " + payload)
+        if _accepts(normalising, one)
+    ]
+    assert len(accepted) == 3, "the control did not reproduce the defect"
+
+
+def _accepts(verifier, payload) -> bool:
+    try:
+        verifier(payload, VECTOR_KEY)
+    except BadTicket:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# THE FIELD RULE, AT STARTUP AS WELL AS AT THE MINT
+# ---------------------------------------------------------------------------
+
+
+def test_a_field_holding_the_separator_is_refused_and_the_refusal_names_it():
+    """One function, used by the mint and by the configuration reader, so the
+    two cannot come apart about what a field may hold."""
+    from gate_agent.tickets import FIELD_ALPHABET, check_field
+
+    with pytest.raises(BadTicket) as refused:
+        check_field("site\nwith-a-newline", "[agent].site_id")
+    assert "[agent].site_id" in str(refused.value)
+    assert FIELD_ALPHABET in str(refused.value)
+    # THE CONTROL: everything else a site might name itself is accepted, which
+    # is the whole alphabet this build publishes.
+    for value in ("site-1", "Gokhan's garage", "estacionamiento nº 3", "site\ttab"):
+        check_field(value, "[agent].site_id")

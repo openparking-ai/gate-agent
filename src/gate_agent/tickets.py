@@ -43,9 +43,13 @@ order and no other:
     <lane>
     <issued_at>
 
-A field holding a `\\n` is refused at mint time rather than escaped: an escape is
-a second rule to get wrong, and no site's own name for itself or for a lane has
-a newline in it.
+A field holding a `\\n` is refused rather than escaped: an escape is a second
+rule to get wrong, and no site's own name for itself or for a lane has a newline
+in it. **The refusal is at STARTUP as well as at the mint** -- `check_field` is
+one function and the configuration is put through it for the `site_id`, every
+lane name and every intercom URI -- because a site that only found out at the
+mint started, published a healthy surface, and refused its first ticket at three
+in the morning.
 
 The signature is `HMAC-SHA256(key, canonical)`, 32 bytes, appended to the
 canonical bytes. The QR payload is `base32(canonical || signature)`, RFC 4648,
@@ -115,6 +119,14 @@ TICKET_FORMAT = "OPT1"
 #: The separator, and the one character a field may not contain.
 FIELD_SEPARATOR = "\n"
 
+#: What a ticket field may hold: **any UTF-8 except the separator**. It is that
+#: wide on purpose -- a `site_id` and a lane name are the site's own strings and
+#: this package does not get to narrow somebody's name for their own garage --
+#: and it is checked in ONE function so the mint and the startup refusal cannot
+#: come to disagree about it.
+FIELD_ALPHABET = "any UTF-8 character except a newline (0x0a)"
+
+
 #: The shortest signing key this build will start on. **A FLOOR THIS REPOSITORY
 #: CHOSE, NOT A MEASUREMENT**, and it is the same shape of claim as the dial
 #: secret's: what makes a key unguessable is that it was generated at RANDOM,
@@ -175,6 +187,21 @@ class BadTicket(Exception):
     anybody deciding to put it there. The lane's own contract makes the same
     choice in the same words.
     """
+def check_field(value: str, what: str) -> None:
+    """Refuse a value a ticket field cannot hold, NAMING the field.
+
+    Called at the mint, where it has always been, and now also at STARTUP for
+    every configured value that ends up in one -- the `site_id`, every lane
+    name, every intercom URI. The mint-time check alone meant a site named with
+    a newline started, published a healthy surface, and refused its first
+    ticket at three in the morning with a traceback in a log.
+    """
+    if FIELD_SEPARATOR in value:
+        raise BadTicket(
+            f"{what} contains the separator. A ticket's canonical form is "
+            "newline-separated and a field is never escaped: an escape is a second rule "
+            f"to get wrong. A field holds {FIELD_ALPHABET}."
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,14 +224,12 @@ class Ticket:
     def canonical(self) -> bytes:
         """The exact bytes the signature covers. One definition, both ways."""
         fields = (TICKET_FORMAT, self.ticket_ref, self.site, self.lane, self.issued_at)
-        for field in fields:
-            if FIELD_SEPARATOR in field:
-                raise BadTicket(
-                    "a ticket field contains the separator. The canonical form is "
-                    "newline-separated and a field is never escaped: an escape is a second "
-                    "rule to get wrong, and no site's name for itself or for a lane has a "
-                    "newline in it."
-                )
+        for name, field in zip(
+            ("the format tag", "ticket_ref", "site", "lane", "issued_at"),
+            fields,
+            strict=True,
+        ):
+            check_field(field, f"a ticket's {name}")
         return FIELD_SEPARATOR.join(fields).encode("utf-8")
 
 
@@ -249,18 +274,27 @@ def verify(payload: str, key: bytes) -> Ticket:
     """
     if not isinstance(payload, str) or not payload:
         raise BadTicket("the payload is empty")
-    text = payload.strip().upper()
+    # EXACTLY AS MINTED. No `strip()`, no `upper()`: the comparison below makes
+    # the textual form canonical, and normalising before it meant the check
+    # measured only the spellings that survived the normalisation. Measured on
+    # the shipped vector: lower case, mixed case and surrounding whitespace all
+    # verified, so one ticket had three more spellings than the one it is
+    # supposed to have -- and it is the exit keying on the string it decoded
+    # that files a stay twice.
+    text = payload
     try:
         raw = base64.b32decode(text + "=" * (-len(text) % 8))
     except (ValueError, TypeError) as exc:
         raise BadTicket("the payload is not base32") from exc
     if len(raw) <= hashlib.sha256().digest_size:
         raise BadTicket("the payload is too short to hold a signature and a ticket")
-    # ONE SPELLING PER TICKET. Base32 pads the last group with bits that carry
-    # nothing, and `b32decode` does not care what they are -- so several
-    # different strings decode to the same bytes and every one of them would
-    # verify. Measured on the shipped vector: the last character has three such
-    # bits, and flipping it left the ticket valid.
+    # ONE SPELLING PER TICKET, and it is the whole of the check: base32 pads
+    # the last group with bits that carry nothing, and `b32decode` does not care
+    # what they are -- so several different strings decode to the same bytes and
+    # every one of them would verify. Measured on the shipped vector: the last
+    # character has three such bits, and flipping it left the ticket valid.
+    # Case and whitespace are refused by the same comparison, now that nothing
+    # normalises the input before it reaches this line.
     #
     # It is not a forgery -- the decoded bytes are identical, so the signature is
     # over the same ticket -- but it means a ticket has more than one textual
@@ -269,9 +303,10 @@ def verify(payload: str, key: bytes) -> Ticket:
     # found. Re-encoding and comparing makes the form canonical.
     if base64.b32encode(raw).decode("ascii").rstrip("=") != text:
         raise BadTicket(
-            "the payload is not the canonical encoding of the ticket it holds. Base32 pads "
-            "its last group with bits that carry nothing, and a ticket with more than one "
-            "spelling is one the exit could file twice."
+            "the payload is not the canonical encoding of the ticket it holds. It is "
+            "compared EXACTLY as minted -- unpadded, upper case, nothing round it -- "
+            "because base32 pads its last group with bits that carry nothing, and a "
+            "ticket with more than one spelling is one the exit could file twice."
         )
     canonical, signature = raw[:-32], raw[-32:]
     expected = hmac.new(key, canonical, hashlib.sha256).digest()
@@ -326,9 +361,33 @@ VOIDED = "voided"
 VOID_REASONS: tuple[str, ...] = (
     "window_elapsed",
     "presence_lost",
+    #: A NEW DECISION, OR A RESET CURSOR, and nothing else. It used to be
+    #: written for every outcome that was not a vend -- a lane that refused, a
+    #: lane that could not be reached, an act token the lane would not accept --
+    #: so the record asserted a cause that had not happened in six of the seven
+    #: ways a press can end. Each of those has its own reason below.
     "lane_decided_again",
     "restarted",
     "display_unavailable",
+    #: The LANE considered the completion and said no, with its own code in
+    #: `lane_answer`. A 409 from the vend route.
+    "lane_refused",
+    #: The lane did not answer the vend at all, or answered a 5xx. There is no
+    #: `lane_answer`, because there was no answer.
+    "lane_unreachable",
+    #: The lane would not consider the completion: a 401, a 403 or a 404 on the
+    #: vend route. A different fact and a different machine from a refusal.
+    "act_refused",
+    #: A STANDALONE relay that did not pulse. The record is the only thing that
+    #: says what happened at a site with no lane, so a pulse that failed has to
+    #: be on it rather than left as an `issued` record nothing resolves.
+    "relay_failed",
+    #: A record found `confirmed` at startup whose vend could not be settled by
+    #: the replay: the lane refused it, could not be reached, or answered
+    #: something else. **It is not "the barrier did not open"** -- it is "this
+    #: build cannot say either way", which is why it is its own reason and why
+    #: `lane_answer` carries whatever the lane did say.
+    "outcome_unknown",
 )
 
 #: A ticket id is uppercase hex, and a record is named by it. The same shape
@@ -365,6 +424,18 @@ class TicketRecord:
     #: re-derived and not translated -- a lane that is not ours has its own
     #: vocabulary and this is where it survives.
     lane_answer: str | None = None
+    #: WHEN THE DRIVER WAS TOLD this code is on the screen, and `None` while
+    #: they have not been. A press confirms only a ticket with this set: a
+    #: ticket minted behind a driver who is already on the phone is one they
+    #: never saw and never photographed, and vending it hands them a stay whose
+    #: only identity is a reference nobody holds.
+    told_at: str | None = None
+    #: The LANE'S OWN `decision.at` this ticket was minted against, kept because
+    #: the vend echoes it -- and because a restart has to be able to replay a
+    #: `confirmed` ticket's vend with the same idempotency key AND the same
+    #: decision. `None` for a standalone ticket, which has no lane and no
+    #: decision behind it.
+    decision_at: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -480,6 +551,17 @@ class TicketStore:
         )
 
 
+def told(record: TicketRecord, at: str) -> TicketRecord:
+    """The moment the driver was told the code is on the screen.
+
+    Written at the issue where nobody is on the phone -- the screen is where a
+    driver looks -- and when the sentence saying so has FINISHED where somebody
+    is. It is not a state: a ticket is `issued` either way, and this is the
+    field the press is checked against.
+    """
+    return replace(record, told_at=at)
+
+
 def confirmed(record: TicketRecord, at: str) -> TicketRecord:
     return replace(record, state=CONFIRMED, confirmed_at=at)
 
@@ -506,6 +588,7 @@ def is_ticket_id(value) -> bool:
 
 __all__ = [
     "CONFIRMED",
+    "FIELD_ALPHABET",
     "DEFAULT_CONFIRM_WINDOW_S",
     "DEFAULT_HELP_WINDOW_S",
     "DEFAULT_RETENTION_DAYS",
@@ -523,7 +606,9 @@ __all__ = [
     "Ticket",
     "TicketRecord",
     "TicketStore",
+    "check_field",
     "confirmed",
+    "told",
     "is_ticket_id",
     "mint",
     "payload_for",

@@ -50,11 +50,19 @@ from .lines import (
     missing_text,
     undrawable_display_text,
 )
-from .relay import PORTS, RELAY_KINDS, Relay
+from .relay import (
+    DEFAULT_ANSWER_MARGIN_S,
+    PORTS,
+    PULSE_MS_BOUNDS,
+    RELAY_KINDS,
+    Relay,
+)
 from .tickets import (
     DEFAULT_CONFIRM_WINDOW_S,
     DEFAULT_HELP_WINDOW_S,
     MINIMUM_SIGNING_KEY,
+    BadTicket,
+    check_field,
 )
 from .tickets import DEFAULT_RETENTION_DAYS as DEFAULT_TICKET_RETENTION_DAYS
 from .ua_baresip import (
@@ -1428,6 +1436,7 @@ class AgentConfig:
             if intercom.relay is not None
         )
         tickets = _tickets(_table(raw, "tickets", required=False), relative_to, needed_by)
+        _refuse_unticketable_fields(str(agent["site_id"]), lanes, intercoms)
         return cls(
             agent_id=str(agent["id"]),
             site_id=str(agent["site_id"]),
@@ -1670,6 +1679,7 @@ def _intercoms(
         intercoms.append(Intercom(sip_uri=sip_uri, lane=None if lane == STANDALONE else lane,
                                   name_audio=path, account_user=account_user,
                                   display=display, relay=relay))
+    _one_display_per_lane(intercoms)
     orphans = sorted(names - claimed)
     if orphans:
         raise ConfigError(
@@ -1680,6 +1690,70 @@ def _intercoms(
             "was mistyped, in which case every call at that door is refused."
         )
     return tuple(intercoms)
+
+
+def _refuse_unticketable_fields(site_id: str, lanes, intercoms) -> None:
+    """Every configured value that ends up IN A TICKET, checked at STARTUP.
+
+    `site`, `lane` and -- for a standalone door, whose ticket names the door
+    because there is no lane -- the intercom's URI. The canonical form is
+    newline-separated and a field holding the separator is refused at the mint;
+    nothing checked the configuration, so a site named with a newline started,
+    published a healthy surface, and refused its FIRST TICKET at three in the
+    morning, with a traceback in a log, `_advance()` skipped for that poll, and
+    nothing on the health surface saying why.
+
+    The same shape as the font check beside it: a character the shipped font
+    cannot draw is a startup refusal naming the line and the language, and this
+    is a startup refusal naming the field. One function does the checking
+    (`tickets.check_field`), so the rule cannot come apart from the mint's.
+    """
+    for value, what in (
+        (site_id, "[agent].site_id"),
+        *((lane.name, f"[lanes.{lane.name!r}]'s name") for lane in lanes),
+        *(
+            (intercom.sip_uri, f"[intercoms.{intercom.sip_uri!r}]'s URI")
+            for intercom in intercoms
+        ),
+    ):
+        try:
+            check_field(value, what)
+        except BadTicket as exc:
+            raise ConfigError(f"{exc} Refusing to start.") from exc
+
+
+def _one_display_per_lane(intercoms) -> None:
+    """Two intercoms with a screen at one lane is REFUSED, naming both.
+
+    A pending ticket is one per LANE, and every screen at that lane was shown
+    it -- so one code stood on two door stations, and a press at either
+    confirmed it and opened the barrier. What the design says a press proves is
+    that somebody at THAT barrier pressed; with two of them it proved that
+    somebody at one of these barriers did, and whoever photographed the second
+    screen was holding the first driver's ticket.
+
+    Refused at startup rather than resolved at runtime because there is no
+    resolution: which of two screens a code should be on is a question about a
+    building, and the site is the only one that can answer it. A second intercom
+    at the same lane with NO display is fine and is the ordinary two-door lane:
+    the ticket is bound to the one screen that shows it, and a press at the
+    other door is the round-5 path.
+    """
+    seen: dict[str, str] = {}
+    for intercom in intercoms:
+        if intercom.lane is None or not intercom.display:
+            continue
+        first = seen.get(intercom.lane)
+        if first is not None:
+            raise ConfigError(
+                f"[intercoms.{first!r}] and [intercoms.{intercom.sip_uri!r}] both declare a "
+                f"display and both name lane {intercom.lane!r}. A lane has ONE pending "
+                "ticket, so the same code would stand on both screens and a press at either "
+                "would confirm it -- whoever photographed the second screen would be holding "
+                "the first driver's ticket. Give the lane one screen; a second door with no "
+                "display answers as it did in round 5."
+            )
+        seen[intercom.lane] = intercom.sip_uri
 
 
 def _relay(raw, sip_uri: str, lane: str, relative_to: Path | None):
@@ -1730,6 +1804,23 @@ def _relay(raw, sip_uri: str, lane: str, relative_to: Path | None):
             "and a number this package chose would be a guess about somebody else's "
             "equipment written into every installation."
         )
+    if not PULSE_MS_BOUNDS[0] <= pulse <= PULSE_MS_BOUNDS[1]:
+        # BOUNDED, and it is the only per-site number in this round that was
+        # neither a published default nor a declared value inside anything. The
+        # HTTP timeout is derived from it, so an unbounded pulse is an unbounded
+        # time for which this process holds a connection open for one press.
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}.relay].pulse_ms is {pulse} and this build takes "
+            f"{PULSE_MS_BOUNDS[0]} to {PULSE_MS_BOUNDS[1]} milliseconds. Below the first "
+            "there is no contact anything could mean; past the second is a barrier this "
+            "build should not be driving, because the request that pulses it is held open "
+            "for the whole of it."
+        )
+    margin = _positive(
+        raw.get("answer_margin_s"),
+        f"[intercoms.{sip_uri!r}.relay].answer_margin_s",
+        DEFAULT_ANSWER_MARGIN_S,
+    )
     if "credentials_file" not in raw:
         raise ConfigError(
             f"[intercoms.{sip_uri!r}.relay] does not declare credentials_file. It is the "
@@ -1747,6 +1838,7 @@ def _relay(raw, sip_uri: str, lane: str, relative_to: Path | None):
         pulse_ms=pulse,
         username=username,
         password=password,
+        answer_margin_s=margin,
     )
 
 

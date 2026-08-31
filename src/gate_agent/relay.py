@@ -82,6 +82,28 @@ PORTS = (1, 2)
 #: A response larger than this is not the documented empty body.
 MAX_RESPONSE_BYTES = 4096
 
+#: What `pulse_ms` may be. **BOUNDED, and both ends are refusals a site earns at
+#: startup rather than discoveries at a barrier.** One millisecond is the
+#: shortest contact anything could mean; ten seconds is the longest this build
+#: will hold a door station's HTTP connection open for one press, and past it a
+#: site has a barrier this build should not be driving. There is still no
+#: DEFAULT -- the barrier's own specification decides the value inside these --
+#: and the bounds are published in `docs/CONTRACT.md`.
+PULSE_MS_BOUNDS = (1, 10_000)
+
+#: How much longer than the pulse itself this build waits for the unit to
+#: answer. **AN ASSUMPTION, and stated as one**: nothing here has driven a real
+#: unit, so nothing has measured whether an Axis unit answers the request
+#: immediately or holds the connection for the whole contact. Five seconds is
+#: drawn from an HTTP request on a LAN, which is a guess about a network rather
+#: than a measurement of this device.
+#:
+#: The timeout is DERIVED from it -- `pulse_ms / 1000 + answer_margin_s` -- and
+#: that derivation is the point: a hard-coded 5.0 reported a unit mid-pulse on a
+#: legal six-second barrier as a relay that could not be REACHED, while the
+#: barrier was very probably opening.
+DEFAULT_ANSWER_MARGIN_S = 5.0
+
 
 class RelayUnreachable(Exception):
     """The unit did not answer. A human is told, and nothing moved."""
@@ -125,37 +147,101 @@ class Relay:
     pulse_ms: int
     username: str
     password: str
+    #: How long past the pulse this build waits for the unit to answer.
+    #: Published default, per site, because the number it is added to is the
+    #: site's own.
+    answer_margin_s: float = DEFAULT_ANSWER_MARGIN_S
+
+    @property
+    def timeout(self) -> float:
+        """The HTTP timeout, DERIVED. One place, and it is here.
+
+        A unit that holds the connection for the length of the contact is
+        answering, not silent, and a fixed timeout shorter than the contact
+        reported it as unreachable while the barrier moved. **Whether a real
+        unit does hold it is NOT MEASURED** and is on the January list.
+        """
+        return self.pulse_ms / 1000 + self.answer_margin_s
 
     def __repr__(self) -> str:
         return (
             f"Relay(kind={self.kind!r}, url={self.url!r}, port={self.port!r}, "
-            f"pulse_ms={self.pulse_ms!r}, username={self.username!r}, "
-            "password=<not shown>)"
+            f"pulse_ms={self.pulse_ms!r}, answer_margin_s={self.answer_margin_s!r}, "
+            f"username={self.username!r}, password=<not shown>)"
         )
+
+
+class _Answered(urllib.request.BaseHandler):
+    """Records that the unit ANSWERED, whatever it answered.
+
+    The two exceptions this module raises differ on exactly one fact -- did
+    anything come back from that address -- and that fact was being INFERRED
+    from the exception class, which is where `qop="auth-int"` was reported as a
+    relay that could not be reached. It is measured here instead: every
+    response passes through this handler, including a `401`, and the flag says
+    what the class cannot.
+
+    `handler_order` is below `HTTPErrorProcessor`'s 1000 so this runs before the
+    processor that turns a non-2xx into an `HTTPError`.
+    """
+
+    handler_order = 100
+
+    def __init__(self) -> None:
+        self.seen = False
+
+    def http_response(self, request, response):
+        self.seen = True
+        return response
+
+    https_response = http_response
 
 
 class AxisRelay:
     """Pulses one Axis output port. HTTP Digest, through the one opener."""
 
-    def __init__(self, relay: Relay, timeout: float = 5.0) -> None:
+    def __init__(self, relay: Relay, timeout: float | None = None) -> None:
         self.relay = relay
-        self.timeout = timeout
+        # DERIVED from the pulse unless a caller names one, and the only caller
+        # that names one is a test measuring the derivation itself.
+        self.timeout = relay.timeout if timeout is None else timeout
         manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
         manager.add_password(None, relay.url, relay.username, relay.password)
-        # DIGEST FIRST, and Basic behind it, exactly as the camera does: a unit
-        # that offers Digest is answered with Digest, and Basic is what an older
-        # one challenges with. The opener comes from `redirects.build_opener`,
+        # DIGEST ONLY. Basic used to sit behind it, and a unit challenging
+        # `Basic` was answered with the credential in a header that is base64 of
+        # `user:password` -- on a device wired to a barrier, over a LAN, with
+        # nothing saying it had happened. It is now a REFUSAL that names the
+        # scheme, because a unit challenging Basic is a unit whose configuration
+        # somebody has to change. The opener comes from `redirects.build_opener`,
         # so this one does not follow a `Location` -- and the request it would
         # follow one on is the retry that carries the credential.
+        self._answered = _Answered()
         self._opener = build_opener(
-            urllib.request.HTTPDigestAuthHandler(manager),
-            urllib.request.HTTPBasicAuthHandler(manager),
+            urllib.request.HTTPDigestAuthHandler(manager), self._answered
         )
 
     def pulse(self) -> None:
-        """One pulse, or one of the two refusals. Nothing else happens here.
+        """One pulse, or one of the two refusals. **Nothing else leaves here.**
 
         **It does not decide anything.** The human decided; this is the wire.
+
+        **EVERY exception is mapped**, and that is the round-7 change rather
+        than a tidy-up. This used to catch four classes, and `urllib`'s own auth
+        machinery raises a bare `ValueError` for a challenge it cannot parse --
+        a `Digest` with no `realm` is one -- so a unit on the site's LAN could
+        raise straight out of `poll()`, past the caller, into the loop's blanket
+        handler: the barrier did not move, the operator who had just authorised
+        it was told NOTHING, and `relay_pulsed` stood on the event stream. Four
+        surfaces and one of them right.
+
+        The split is the one the two exceptions already publish, and it is kept
+        exactly: **did the unit answer?** Silence is `RelayUnreachable`.
+        Anything it answered that this build cannot use is `RelayRefusedUs`
+        NAMING the reason -- a `401` that survives the credential, a `Basic`
+        challenge, `qop="auth-int"`, a challenge with no realm, a challenge this
+        build cannot parse at all, a body where the document says empty. They
+        send somebody to different places, which is why the distinction is
+        load-bearing enough to be worth this paragraph.
         """
         action = pulse_action(self.relay.port, self.relay.pulse_ms)
         # `quote` with NO safe characters, because `:`, `/` and `\` are exactly
@@ -164,16 +250,40 @@ class AxisRelay:
         query = "action=" + urllib.parse.quote(action, safe="")
         url = f"{self.relay.url.rstrip('/')}{PORT_CGI}?{query}"
         request = urllib.request.Request(url, method="GET")
+        self._answered.seen = False
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 body = response.read(MAX_RESPONSE_BYTES + 1)
                 status = response.status
         except urllib.error.HTTPError as exc:
+            raise RelayRefusedUs(_http_reason(exc), exc.code) from exc
+        except Exception as exc:  # noqa: BLE001
+            # NOTHING LEAVES HERE UNNAMED, and which of the two it is comes off
+            # the MEASUREMENT above rather than off the exception's class.
+            #
+            # `qop="auth-int"` is the case that made the difference matter:
+            # urllib raises a bare `URLError` from inside its own auth handler,
+            # AFTER the unit's 401 arrived, and reading the class alone reported
+            # a unit that had answered as one that could not be reached --
+            # sending somebody to look at a network instead of at the device.
+            if _timed_out(exc):
+                # SILENCE, whatever came before it. A unit that challenged and
+                # then said nothing inside the derived timeout has not answered
+                # the request that matters, and the repair is the one silence
+                # names. This is the case the timeout is DERIVED for: a unit
+                # holding the connection for a six-second contact.
+                raise RelayUnreachable(f"the relay could not be reached: {exc}") from exc
+            if self._answered.seen:
+                raise RelayRefusedUs(
+                    f"the relay answered something this build cannot use: {exc}"
+                ) from exc
+            if isinstance(exc, urllib.error.URLError | TimeoutError | OSError):
+                raise RelayUnreachable(f"the relay could not be reached: {exc}") from exc
+            log.exception("the relay at %s raised %s", self.relay.url, type(exc).__name__)
             raise RelayRefusedUs(
-                f"the relay answered HTTP {exc.code} to a pulse", exc.code
+                f"the relay raised {type(exc).__name__} before it answered, which this "
+                f"build has no answer for: {exc}"
             ) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise RelayUnreachable(f"the relay could not be reached: {exc}") from exc
         if status != 200:
             raise RelayRefusedUs(f"the relay answered HTTP {status} to a pulse", status)
         if body.strip():
@@ -188,7 +298,61 @@ class AxisRelay:
             )
 
 
-def build(relay: Relay, timeout: float = 5.0) -> AxisRelay:
+def _timed_out(exc: BaseException) -> bool:
+    """Whether this is a deadline that passed, wrapped or not."""
+    return isinstance(exc, TimeoutError) or isinstance(
+        getattr(exc, "reason", None), TimeoutError
+    )
+
+
+def _http_reason(exc: urllib.error.HTTPError) -> str:
+    """What to say about an HTTP answer this build will not act on.
+
+    A `401` that reached here survived the credential, so the useful thing is
+    the CHALLENGE the unit sent: `Basic` names a unit whose configuration has to
+    change, and `qop="auth-int"` names one this build does not speak to. Both
+    used to arrive as a bare status, and one of them arrived as `unreachable`.
+    """
+    challenge = None
+    try:
+        challenge = exc.headers.get("WWW-Authenticate")
+    except AttributeError:
+        pass
+    if exc.code != 401 or not challenge:
+        return f"the relay answered HTTP {exc.code} to a pulse"
+    parts = challenge.split(None, 1)
+    scheme = parts[0] if parts else ""
+    if scheme.lower() != "digest":
+        return (
+            f"the relay challenged {scheme!r} and this build answers Digest only. A "
+            "credential that opens a barrier is not sent under a scheme that carries it "
+            "in the clear."
+        )
+    fields = {
+        key.strip().lower(): value.strip().strip('"')
+        for key, _, value in (
+            part.partition("=") for part in (parts[1] if len(parts) > 1 else "").split(",")
+        )
+        if value
+    }
+    missing = [name for name in ("realm", "nonce") if name not in fields]
+    if missing:
+        # urllib answers a challenge it cannot read by sending nothing at all,
+        # so the retry never carries a credential and the unit's second 401 is
+        # the only thing that arrives. Reported as a missing credential, it sent
+        # somebody to a password file about a unit whose challenge is malformed.
+        return (
+            "the relay's Digest challenge names no "
+            + " and no ".join(missing)
+            + ", so there is nothing to compute a response from"
+        )
+    return (
+        "the relay answered HTTP 401 to every attempt; the credential in this site's "
+        "file is not one it accepts"
+    )
+
+
+def build(relay: Relay, timeout: float | None = None) -> AxisRelay:
     """The one relay this version builds, refused by name for anything else."""
     if relay.kind != AXIS_VAPIX:
         raise ValueError(
@@ -202,9 +366,11 @@ def build(relay: Relay, timeout: float = 5.0) -> AxisRelay:
 
 __all__ = [
     "AXIS_VAPIX",
+    "DEFAULT_ANSWER_MARGIN_S",
     "MAX_RESPONSE_BYTES",
     "PORTS",
     "PORT_CGI",
+    "PULSE_MS_BOUNDS",
     "RELAY_KINDS",
     "AxisRelay",
     "Relay",

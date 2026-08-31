@@ -474,7 +474,22 @@ without adding it here.
     "ticket_voided",
     "vend_commanded",
     "vend_refused",
-    "relay_pulsed"
+    "relay_pulsed",
+    "relay_pulse_failed",
+    "ticket_on_screen",
+    "display_geometry_changed"
+  ],
+  "void_reasons": [
+    "window_elapsed",
+    "presence_lost",
+    "lane_decided_again",
+    "restarted",
+    "display_unavailable",
+    "lane_refused",
+    "lane_unreachable",
+    "act_refused",
+    "relay_failed",
+    "outcome_unknown"
   ],
   "shipped_languages": [
     "en",
@@ -1401,8 +1416,19 @@ OPT1
 <issued_at>
 ```
 
-A field containing a `\n` is refused at mint time rather than escaped: an escape
-is a second rule to get wrong.
+**A field holds any UTF-8 except the separator, and that is the whole
+alphabet** — a `site_id` and a lane name are the site's own strings and this
+package does not narrow somebody's name for their own garage. A field containing
+a `\n` is refused rather than escaped: an escape is a second rule to get wrong.
+
+**AND THE REFUSAL IS AT STARTUP.** `[agent] site_id`, every `[lanes.<name>]` name
+and every `[intercoms.<uri>]` key are put through the same one function the mint
+uses, and a value that cannot be a ticket field is a **startup refusal naming the
+field** — the same shape as the font check, which refuses a language whose
+sentence the shipped font cannot draw. Checking only at the mint meant a site
+named with a newline started, published a healthy surface, and refused its FIRST
+TICKET at three in the morning: a traceback per arrival, no ticket ever issued,
+the poll's `_advance()` skipped, and nothing on the health surface saying why.
 
 The signature is `HMAC-SHA256(key, canonical)` — 32 bytes — appended to the
 canonical bytes. **The QR payload is `base32(canonical || signature)`,
@@ -1410,6 +1436,13 @@ RFC 4648, unpadded, uppercase**, and `verify` refuses a payload that is not the
 canonical encoding of the ticket it holds: base32 pads its last group with bits
 that carry nothing, so without that check one ticket has several spellings and
 an exit keying on the string it decoded could file one stay twice.
+
+**It is compared EXACTLY as minted.** The comparison used to happen after
+`strip().upper()`, so precisely the spellings that survived the normalisation
+survived the check: lower case, mixed case and surrounding whitespace all
+verified, and one ticket had four spellings instead of one. There is no
+normalisation before the check now — a padded payload, a lower-case payload and
+a payload with a space round it are each refused.
 
 **Why base32 rather than the fields themselves.** QR's ALPHANUMERIC mode holds
 45 characters — `0-9 A-Z $ % * + - . / :` and space — and is about half the size
@@ -1482,6 +1515,22 @@ is a code shown at a barrier somebody is not standing at. **An intercom with
 none offers no ticket** and its cases go to a person exactly as they did in
 round 5.
 
+**ONE DISPLAY PER LANE, refused at startup naming both URIs.** A pending ticket
+is one per lane and every screen at that lane was shown it, so two intercoms
+with displays on one lane put one code on two door stations and a press at
+either confirmed it. A second intercom at that lane with NO display is the
+ordinary two-door lane and is accepted: the ticket is bound to the one screen
+that shows it, and a press at the other door is round 5.
+
+**THE GEOMETRY IS RE-READ AND THE FRAME RE-WRITTEN ON EVERY LANE POLL WHILE A
+TICKET IS UP.** Reading it once at startup is the same defect the document
+argues against, one step later: from the moment somebody changes a cable, the
+frame goes on being written at the old stride, which is diagonal noise on the
+panel while the agent believes a code is up. A screen that cannot be asked, or
+that refuses the write, voids the ticket `display_unavailable`, raises that code
+and sends the next press to a person; a screen that has CHANGED is re-rendered
+at the new geometry and records `display_geometry_changed`.
+
 **The frame**: the QR filling the short side less a margin, the `ticket_ref`
 printed under it, and one instruction line per declared driver language. **Upper
 case only** — a decision, because this repository has to be able to CHECK every
@@ -1492,14 +1541,27 @@ substitution, which is a driver told something else.
 
 **Idle is a BLACK frame, and so is exit.** Not a logo and not a clock: a screen
 showing anything invites a driver to read it, and there is nothing to say
-between arrivals.
+between arrivals. **The exit half is built rather than described**: the agent
+process blanks every declared screen in one `finally`, and `SIGTERM` — which is
+how a service manager stops this — raises into it, as `SIGINT` and a
+`KeyboardInterrupt` already did. It used to be published here and implemented
+nowhere, so an ordinary `systemctl restart gate-agent` during a package upgrade
+left the last ticket on the screen.
 
-**A CRASH LEAVES THE LAST FRAME UP.** A framebuffer holds what was written to
-it and nothing repaints it, so a process that dies mid-window leaves a ticket on
-the screen. **That ticket can never be vended**: a restarted agent starts with
-no pending tickets, so the press that would confirm it goes to a person. The
-harm is a driver photographing a code that will not work, and the answer they
-get is a human.
+**A KILLED PROCESS LEAVES THE LAST FRAME UP.** A framebuffer holds what was
+written to it and nothing repaints it, so a process that dies without unwinding
+leaves a ticket on the screen. **That ticket can never be vended**: no pending
+ticket survives a restart, the record is settled `restarted` at the next start,
+and the press that would have confirmed it goes to a person.
+
+**So after a crash a driver may be holding a photograph of a `restarted`
+ticket.** It is not an exit token and it never was one: its record says
+`voided/restarted`, the exit will read that, and **the exit for that stay is a
+human's**. If the person then keys `OPEN_NOW`, a NEW ticket is minted for the
+completion — the lane's completion names an identity and there has to be one to
+name — so that stay has two records, one voided and one vended, and the vended
+one is the stay. The driver holds the other. That is stated here rather than
+left for an exit round to discover.
 
 ### The QR encoder is ours, and something else proves it
 
@@ -1537,24 +1599,41 @@ load-bearing:
 | | |
 |---|---|
 | a NEW decision | not a decision already in the window when this process started |
-| its derived case is one of four | `identification_unavailable`, `plate_not_read`, `plate_unclear`, `vehicle_not_recognised` — the cases where the lane made a decision and could not say who this vehicle is |
+| **the DECISION's** case is one of four | `identification_unavailable`, `plate_not_read`, `plate_unclear`, `vehicle_not_recognised` — the cases where the lane made a decision and could not say who this vehicle is |
+| the decision is not stale | past `[cases] decision_max_age_seconds` it was made for somebody else, and a ticket against it is a code on a screen for a car that has gone |
 | `decision.presence` is **`true`** | **`null` is not `true`.** An unmeasured presence is every lane by default (SETTLED 3f), and one putting a code on a screen is this project's own fraud arriving through a display instead of a loop |
 | the intercom at that lane declares a display | a ticket nobody can see is a stay nobody can prove |
 | `[tickets]` is declared | there is a key to sign one with |
+
+**THE HEALTH IS NOT ON THAT LIST, and that is the round-7 correction.** Whether
+a ticket is OFFERED and what a driver HEARS are two questions
+(`cases.offers_ticket` and `cases.derive`), and they used to be one. `derive()`
+answers `malfunction_active` for any active non-`never_alarm` code before it
+looks at the decision — which is right for the sentence a driver hears, and was
+wrong for the offer: **a lane whose identification engine is down answers
+`engine_unreachable` AND carries `identity_service_down` active in the same
+breath.** That is the ordinary state, not an exotic one; it is the case round 6
+changed the lane for; and it offered no ticket at all. Fifteen of the sixteen
+codes the lane vends on suppressed one, including `disk_nearly_full` and
+`outbox_depth_growing`, which are a disk and a queue.
 
 **Why the other cases are not on it**, one by one: `entry_refused` — the lane
 knows who this is and said no, and only a human overturns a rule.
 `vehicle_not_detected` — the lane believes the lane is empty, and the vend
 route's first refusal is that same loop read. `entry_not_confirmed` — a vend
-already happened. `malfunction_active`, `lane_unavailable`, `stale_decision`,
-`unrecognised_reason` — the lane cannot be believed about this vehicle.
-`standalone` — no lane, no loop, no presence source at all. `nothing_to_do` —
-the driver already got in.
+already happened. `lane_unavailable`, `stale_decision`, `unrecognised_reason` —
+the lane cannot be believed about this vehicle. `standalone` — no lane, no loop,
+no presence source at all. `nothing_to_do` — the driver already got in.
+`malfunction_active` is on that list **for the spoken case only**: the offer is
+decided by the decision.
 
 **`vend_blocking` is NOT copied.** The lane publishes that subset in its
 document's closed-sets block; `GET /v1/lane` does not serve it, and this build
-does not hold a second copy of it. A ticket is offered and the lane's own
-`malfunction_active` refusal reaches the person with its code.
+does not hold a second copy of it. **So a blocking malfunction is the LANE'S
+refusal to give, and it gives it at the vend**: the ticket is offered, the press
+reaches `POST /v1/lane/vend`, the lane answers `409 malfunction_active` naming
+the code, and the person hears that a ticket was refused and why. That is the
+ordinary path for those five and not a caveat about a rare one.
 
 **A ticket is VOIDED**, with the reason on the record and on
 `ticket_voided`, when:
@@ -1563,18 +1642,63 @@ does not hold a second copy of it. A ticket is offered and the lane's own
 |---|---|
 | `window_elapsed` | `[tickets] confirm_window_s`, **published default 90.0** — an ASSUMPTION: nothing has measured how long a driver takes to photograph a code and press a button |
 | `presence_lost` | the lane says the car has gone, with no new decision behind it |
-| `lane_decided_again` | a new decision, or a reset cursor. The ticket named the previous decision's moment and the lane refuses a completion naming anything else |
-| `restarted` | **no pending ticket survives a restart, by design** — see the crash paragraph above |
-| `display_unavailable` | the screen refused the frame, so no ticket is offered at all |
+| `lane_decided_again` | a new decision, or a reset cursor. **That and nothing else.** The ticket named the previous decision's moment and the lane refuses a completion naming anything else |
+| `restarted` | **no pending ticket survives a restart, by design** — and the record is now settled to say so at the next start, which is where this reason is written |
+| `display_unavailable` | the screen refused the frame or its geometry could not be read — at the mint, or on any later poll while the code was up |
+| `lane_refused` | the lane considered the completion and said no. Its own code is in `lane_answer`, verbatim |
+| `lane_unreachable` | the lane did not answer the vend, or answered a 5xx. There is no `lane_answer`, because there was no answer |
+| `act_refused` | a 401, a 403 or a 404 on the vend route: the lane would not consider it at all |
+| `relay_failed` | STANDALONE — the intercom's own relay did not pulse. `relay_pulse_failed` carries the cause |
+| `outcome_unknown` | a `confirmed` record found at startup whose vend could not be settled. **Not "it did not open"** — "this build cannot say either way", and `lane_answer` carries whatever the lane did say |
+
+**Six of these are round 7's, and five of them replace one wrong answer.**
+`lane_decided_again` used to be written for every outcome that was not a vend —
+a lane that refused with its own code, a lane that could not be reached, an act
+token the lane would not accept — so the record asserted a cause that had not
+happened in six of the seven ways a press can end, confidently, in the one place
+a standalone site keeps. `lane_answer` carried the truth beside it in four of
+them and `null` in two.
+
+**`lane_answer`** is what the lane said, verbatim and never translated: its
+refusal `code` on a 409, or its `event_cursor` on a 202. A lane that is not ours
+has its own vocabulary and this is where it survives.
 
 ## The press, and the help that follows it
 
-**An inbound call at an intercom whose lane has a PENDING ticket is the driver's
-confirmation.** The agent answers, records `ticket_confirmed`, says
-`ticket.confirmed`, and commands the vend with
+**An inbound call at the intercom whose screen holds a PENDING ticket the driver
+HAS BEEN TOLD ABOUT is the driver's confirmation.** The agent answers, records
+`ticket_confirmed`, says `ticket.confirmed`, and commands the vend with
 `authorised_by = display_code_confirmed`, `identity = {kind: "ticket",
 ticket_ref}`, `decision_at` **echoed** from the decision the ticket was minted
 against, and `Idempotency-Key = ticket_id`.
+
+**Every clause of that sentence is a refusal of something that used to happen.**
+
+**"the intercom whose screen holds it"** — a pending ticket is one per LANE, and
+every screen at that lane was shown it. Two intercoms with displays on one lane
+is now a STARTUP REFUSAL naming both, because a press at either confirmed the
+one code and whoever photographed the second screen was holding the first
+driver's ticket. A second door at that lane with no display is fine and is
+ordinary: its press is round 5 exactly.
+
+**"HAS BEEN TOLD ABOUT"** — the ticket path runs on `[lanes.*] poll_seconds`, so
+a driver can press in the gap between the lane deciding and the poll that mints.
+What used to happen there was: a person was dialled while a valid, unexpired
+ticket was on the screen a metre from the driver, minted in the same poll, with
+neither of them told it was there — and the driver's NEXT press then vended a
+code they had never seen and never photographed. They drove in with a stay whose
+only identity was a reference nobody held.
+
+So **the press mints when the poll has not**: if a ticket is offered at that lane
+and none is pending, the agent mints one ON THE PRESS, shows it, says
+`ticket.on_screen` — *there is a code on the screen; photograph it and press
+again* — and **rings nobody**. A ticket the poll mints WHILE a call is up at that
+lane's intercom is spoken in that call the same way instead of dialling. Every
+ticket record carries **`told_at`**: set at the issue where nobody is on the
+phone, because the screen is where a driver looks, and set when
+`ticket.on_screen` has FINISHED where somebody is. **A press confirms only a
+ticket with `told_at` set** — otherwise it is that sentence again, and the next
+press confirms.
 
 **What a press proves, exactly: that somebody at that barrier pressed.** Not
 that a CAR is there — that is the lane's question, read off its loop at vend
@@ -1589,9 +1713,20 @@ served to the caller. The cursor is the join to that record and is what this
 agent keeps.
 
 **A `409`** is `vend_refused` with the LANE'S OWN code on the record, never
-translated, and the case goes to a person who is told which refusal it was —
-one sentence per published refusal code, and a test requires the set of
-sentences to equal the set of codes.
+translated, and the case goes to a person who is **always told two things**:
+`operator.ticket_refused` — *this driver's ticket was refused by the entrance* —
+and then the sentence for that code, or `operator.vend_refused.unknown` — *the
+entrance gave a reason I have no words for* — where this build has none.
+
+**The second half of that is the third-party seat, and it was missing.** The
+sentence table is set-equal to OUR lane's `VendRefusal`, which is the right check
+for our lane and no check at all for a lane that is not ours (SETTLED 1). A
+foreign lane refusing with its own word reached a person who was briefed as an
+ordinary case: not told a ticket had been confirmed, not told it had been
+refused, and then offered `OPEN_NOW`. **The menu still offers `OPEN_NOW`**, and
+it will meet the same refusal unless the cause has changed — the lane applies its
+refusals to a human's completion exactly as it does to a driver's, which is the
+whole design and not an oversight.
 
 **A `401`, `403` or `404`** is `lane_act_refused`, which is a different fact and
 a different machine: the lane would not consider the request at all, because the
@@ -1599,11 +1734,21 @@ act token is wrong or that lane is an older build with no such route.
 
 ### Help is the next press
 
-**A call from the same intercom within `[tickets] help_window_s` of a
-confirmation — published default 60.0, an ASSUMPTION — is HELP.** It is the
-round-5 case path, with the person told that a ticket was just confirmed and
-what the vend answered, before the menu. **It is never a second vend**: the
-lane's `already_completed` is the backstop, not the design.
+**A call at the same intercom within `[tickets] help_window_s` of a
+confirmation — published default 60.0, an ASSUMPTION — is HELP, and the window
+belongs to THAT TICKET.** It is the round-5 case path, with the person told that
+a ticket was just confirmed and what the vend answered, before the menu. **It is
+never a second vend**: the lane's `already_completed` is the backstop, not the
+design.
+
+**A NEW DECISION AT THAT LANE, OR A NEW TICKET, ENDS IT.** The window used to be
+a moment and a pair of sentences keyed on the DOOR, with nothing tying either to
+a ticket, an arrival or a driver — so thirty seconds after one driver vended, the
+NEXT car's driver, with a ticket of their own on the screen, was briefed to the
+operator with *"this driver was given a ticket a moment ago"* and *"the barrier
+has been asked to open"*. Both were false about the person on the line, their own
+ticket was never confirmed, and it expired unvended while they were on the phone.
+The operator decides whether to open a barrier on that briefing.
 
 **The window rests on CALL COUNT**, which is nothing this agent reads from the
 button itself. **Whether a given door station places a second call while the
@@ -1658,6 +1803,53 @@ wearing the same name as a tested one — plus `url`, `port` (1 or 2),
 long a contact must close for a barrier to accept it is that BARRIER's
 specification.
 
+**`pulse_ms` is BOUNDED: 1 to 10000, refused at startup outside it.** It was the
+one per-site number in this round that was neither a published default nor a
+declared value inside anything, and the request that pulses the relay is held
+open for the whole of it.
+
+**THE HTTP TIMEOUT IS DERIVED**: `pulse_ms / 1000 + [intercoms.<uri>.relay]
+answer_margin_s`, **published default 5.0 and an ASSUMPTION** — nothing here has
+driven a real unit, so nothing has measured whether one answers immediately or
+holds the connection for the contact. It used to be a hard-coded 5.0 s no site
+could change, so a legal six-second barrier was reported as a relay that could
+not be REACHED — while the unit was mid-pulse and the barrier very probably
+opening, with `relay_pulsed` already on the event stream. Three surfaces, three
+answers, and the gate open. **Whether a unit does hold the connection is on the
+January list.**
+
+**THE PULSE RUNS ON ITS OWN THREAD.** `poll()` used to make the request itself,
+so for its whole length the agent played nothing, answered nothing and followed
+no lane — on the one path in this repository that moves a barrier. The outcome is
+collected on a later poll and the operator is told then;
+`[escalation] nothing_usable_seconds` bounds how long they wait, and past it they
+are told this agent cannot say the barrier opened, which is what it can support.
+
+**`relay_pulsed` IS WRITTEN ONLY AFTER THE UNIT ANSWERED AS THE DOCUMENT SAYS**,
+and a pulse that did not happen writes **`relay_pulse_failed`** with the cause
+and the port, and takes the ticket record to `relay_failed`. It used to be
+recorded BEFORE the request and stood whether the unit refused, answered
+something else or was not there at all — and at a standalone site
+`/v1/agent/events` is the only machine-readable account of a barrier there is.
+A pulse the unit accepted takes the record to `vended`, with no `lane_answer`,
+because there is no lane here and nothing answered but the relay.
+
+**The operator ALWAYS hears one of two sentences** — `operator.vend_commanded`
+or `operator.cannot_open` — and every exception the relay can raise is mapped to
+one of them. `urllib`'s own auth machinery raises for a challenge it cannot
+parse, and a `Digest` challenge with no `realm` used to raise straight out of
+`poll()`: the barrier did not move, the person who had just authorised it was
+told nothing, the call was torn down in silence, neither relay code fired, and
+`relay_pulsed` stood. Four surfaces and the only correct one was the log.
+
+**Digest only.** A unit challenging `Basic` is `relay_refused_us` naming the
+scheme: a credential that opens a barrier is not sent under one that carries it
+in the clear. `qop="auth-int"`, a challenge with no `realm` or no `nonce`, a
+`401` that survives the credential, and a `200` with a body are all
+`relay_refused_us` naming the reason — **the unit ANSWERED**, which is a
+different repair from silence, and the two are told apart by whether a response
+was seen rather than by which exception class arrived.
+
 **What Axis documents**, quoted from *"Input and outputs | Axis developer
 documentation"* (`https://developer.axis.com/vapix/network-video/input-and-outputs/`,
 read 2026-08-31):
@@ -1683,9 +1875,20 @@ wire is `action=<P>%3A%2F<N>%5C`. A body where the document says empty is
 reported open on somebody else's web server.
 
 **THE WHOLE RELAY PATH IS NOT MEASURED AGAINST A DEVICE.** What is tested is a
-fake that answers as the document says. Nobody has driven a real unit, seen a
-real barrier, or found out what one does with a `pulse_ms` its own barrier
-disagrees with.
+fake that answers as the document says and **verifies the digest** — realm,
+nonce, qop and the computed response — across the seven challenges above.
+Nobody has driven a real unit, seen a real barrier, or found out what one does
+with a `pulse_ms` its own barrier disagrees with.
+
+**AND AT A STANDALONE SITE, THE FOUR CODES THIS ROUND ADDS REACH NOBODY UNLESS
+A `gate-agent monitor` PROCESS IS RUNNING.** `display_unavailable`,
+`lane_act_refused`, `relay_unreachable` and `relay_refused_us` are on
+`GET /v1/agent/health`, which is local-only by design; the thing that reads a
+health surface and tells a human is the monitor, and it is a separate process
+with its own configuration and its own sinks. Standalone is the mode with no
+platform and often no second process. Nothing in this round requires a monitor at
+a standalone site — it is said here so that a site running the agent alone knows
+that its relay failing is a code nobody is watching.
 
 ## The four modes
 
@@ -1727,6 +1930,7 @@ one.
 | **a real intercom's second press** | The help window rests on the door station placing a SECOND CALL. Whether a given unit will while the first is still up is a property of that unit |
 | **whether a door station's call list advances** | On the `486 Busy Here` this agent sends when it is already on a case, or only on a no-answer timeout |
 | **the relay, at all** | No Axis unit has been driven by this code. What a real one does with a `pulse_ms` its own barrier disagrees with, and whether that barrier accepts the pulse, are both unknown |
+| **whether the unit holds the HTTP connection for the pulse** | The timeout is DERIVED as `pulse_ms / 1000 + answer_margin_s` precisely because nobody knows. If a unit answers immediately the margin is the whole of it; if it holds the connection for the contact, the derivation is what stops a six-second barrier being reported as a relay that could not be reached |
 | **the barrier** | `boom_did_not_rise` is `no_source` on the lane's health surface. **Nothing in this estate has watched a barrier move**, which is why every sentence here says `commanded` |
 | **call setup, audio and DTMF on real hardware** | Measured against baresip on a socket; never against an Axis, a 2N or any other door station, over a real garage's network |
 | **how long any of the windows should be** | `confirm_window_s` 90, `help_window_s` 60, `poll_seconds` 2, `decision_max_age_seconds` 120. All four are drawn from what people plausibly do and none is a measurement of what they do |
@@ -2293,7 +2497,10 @@ cannot be helped.
       "reason": null,
       "lane_event_cursor": null,
       "relay_port": null,
-      "relay_ms": null
+      "relay_ms": null,
+      "cause": null,
+      "display": null,
+      "geometry": null
     }
   ]
 }

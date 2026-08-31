@@ -6,12 +6,15 @@ is the whole of what this needs. A windowing system on a box in a gate housing
 is a second thing to start, a second thing to crash and a second thing to
 update, and none of it draws anything this cannot.
 
-**The geometry is READ, never configured.** `/sys/class/graphics/<fb>/virtual_size`
-and `bits_per_pixel` are what the driver says the screen is. A site that typed
-its own resolution would be a site whose display is silently wrong on the day
-somebody changes a cable, and a frame written at the wrong stride is not a
-smaller picture -- it is diagonal noise. An unreadable geometry is a STARTUP
-REFUSAL, naming the file.
+**The geometry is READ, never configured, and read AGAIN.**
+`/sys/class/graphics/<fb>/virtual_size` and `bits_per_pixel` are what the driver
+says the screen is. A site that typed its own resolution would be a site whose
+display is silently wrong on the day somebody changes a cable, and a frame
+written at the wrong stride is not a smaller picture -- it is diagonal noise. An
+unreadable geometry is a STARTUP REFUSAL, naming the file. **Reading it once was
+the same defect one step later**: from the moment the mode changed, this wrote
+the old stride to a panel expecting a new one, and nothing noticed -- so it is
+re-read on every poll a ticket is up.
 
 **Monochrome, and that is what makes the pixel format not matter.** White is
 every bit set and black is every bit clear at 16, 24 and 32 bits per pixel, so
@@ -28,14 +31,25 @@ through a windscreen.
 
 **Idle is a black frame, and so is exit.** Not a logo, not a clock: a screen
 showing anything at all invites a driver to read it, and there is nothing to
-say between arrivals. On exit the frame is blacked in a `finally`.
+say between arrivals. **On exit the frame is blacked**, and that is now built
+rather than described: `cli.py` blanks every declared screen in a `finally`
+that `SIGTERM`, `SIGINT` and a `KeyboardInterrupt` all reach. It used to be
+written here and nowhere else, so an ordinary `systemctl restart` during a
+package upgrade left the last ticket on the screen for ever.
 
 **A CRASH LEAVES THE LAST FRAME UP, and that is stated rather than pretended
 away.** A framebuffer holds what was written to it; nothing repaints it. So a
-process that dies mid-window leaves a ticket on the screen -- and **that ticket
-can never be vended**, because a restarted agent starts with no pending tickets
-and the press that would confirm it goes to a person. The harm is a driver
-photographing a code that will not work, and the answer they get is a human.
+process that is KILLED mid-window leaves a ticket on the screen -- and **that
+ticket can never be vended**: a restarted agent reconciles its store, voids that
+record `restarted`, and the press that would have confirmed it goes to a person.
+The harm is a driver photographing a code that will not work, and the answer
+they get is a human.
+
+**AND A SCREEN THAT DIES BETWEEN FRAMES IS NOTICED.** The geometry is re-read
+and the frame re-written on every poll a ticket is up, so a display that fails
+one second after a code went on it is a voided ticket and an active
+`display_unavailable` rather than a code the driver cannot see, a health surface
+saying `ok`, and a press that vends it anyway.
 """
 
 from __future__ import annotations
@@ -267,13 +281,36 @@ def to_bytes(bitmap, geometry: Geometry) -> bytes:
     return bytes(out)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class Display:
-    """One declared screen. Its geometry was read at startup."""
+    """One declared screen, and the geometry it is CURRENTLY read to have.
+
+    **Not frozen, and the mutable field is the geometry**, because the driver's
+    answer is not a constant: `virtual_size` changes when somebody changes a
+    cable or a resolution, and a frame written at the old stride is diagonal
+    noise rather than a smaller picture. Read at startup and RE-READ on every
+    poll a ticket is up -- see `Agent._reassert`, which is the only thing that
+    writes to this field.
+    """
 
     name: str
     framebuffer: Path
     geometry: Geometry
+    #: Where the driver publishes what this screen is. Kept so the geometry can
+    #: be read again from the same place it was read the first time; `None`
+    #: means "derive it from the device's own name", which is what a real
+    #: installation does.
+    sysfs: Path | None = None
+
+    def reread_geometry(self) -> Geometry:
+        """Ask the driver again, and adopt what it says. Returns the geometry.
+
+        Raises `DisplayUnavailable` if the driver can no longer be asked, which
+        is the same fact to a driver at a barrier as a screen that refuses a
+        write: there is no code to photograph.
+        """
+        self.geometry = read_geometry(self.framebuffer, self.sysfs)
+        return self.geometry
 
     def show(self, bitmap) -> None:
         try:
@@ -303,7 +340,12 @@ def open_display(name: str, framebuffer: Path, sysfs: Path | None = None) -> Dis
     somebody is installing it.
     """
     geometry = read_geometry(framebuffer, sysfs)
-    display = Display(name=name, framebuffer=Path(framebuffer), geometry=geometry)
+    display = Display(
+        name=name,
+        framebuffer=Path(framebuffer),
+        geometry=geometry,
+        sysfs=Path(sysfs) if sysfs is not None else None,
+    )
     display.blank()
     return display
 

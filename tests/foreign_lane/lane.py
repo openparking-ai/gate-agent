@@ -95,6 +95,10 @@ VENDOR_CAVEAT = (
 #: not in our `Fallback` and never will be.
 VENDOR_REASON = "barrier_operator_intervened"
 
+#: The one route a consumer may POST to, copied from the document the same way
+#: everything else here is.
+VEND_PATH = "/v1/lane/vend"
+
 
 def _break(name: str) -> bool:
     """Whether the fail-control asked for this payload to be broken.
@@ -161,6 +165,26 @@ class ForeignLane:
         #: an ordinary page without checking are "the cursor went backwards" and
         #: "it went backwards and did not say so", and this is the second.
         self.suppress_reset = False
+        #: Whether this lane has an ACT SURFACE AT ALL. **Default False, which
+        #: is the lane this stub has always been** -- every existing test that
+        #: sweeps for a POST reaching a lane still measures a lane that refuses
+        #: one. A test that needs a third party who CAN vend turns it on, and
+        #: that fixture had to exist: `tests/foreign_lane` published
+        #: `can_vend: false` and refused every POST, so no test in the suite
+        #: drove a lane that is not ours through a refusal in ITS OWN
+        #: vocabulary -- which is the seat SETTLED 1 requires this module to sit
+        #: in, and the one place the agent had no words for what it was told.
+        self.can_vend = False
+        #: What its vend route answers: `None` is a `202`, and a string is a
+        #: `409` with that code. **The code is this vendor's own**, and the
+        #: point of the fixture is that it need not be one of ours.
+        self.vend_refusal: str | None = None
+        #: The malfunction the refusal names, where it names one.
+        self.vend_malfunction: str | None = None
+        #: Every completion that reached it: the body, and the idempotency key.
+        self.vends: list[dict] = []
+        #: What this lane's 202 carries as its cursor.
+        self.vend_cursor = 8
         #: How many events this lane can still serve behind its cursor, and what
         #: `GET /v1/lane` publishes as `event_window_depth`. Published from the
         #: same attribute the eviction uses, so a test that widens the window
@@ -206,7 +230,7 @@ class ForeignLane:
                 "has_identity_service": False,
                 "has_platform": False,
                 "has_display": False,
-                "can_vend": False,
+                "can_vend": self.can_vend,
             },
         }
         if _break("future_version"):
@@ -315,7 +339,45 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    do_POST = _refuse  # noqa: N815
+    def do_POST(self) -> None:  # noqa: N802
+        """The vend route, and ONLY where this lane says it has one.
+
+        A lane with `can_vend` false answers `405` to everything, exactly as it
+        always did -- so the sweeps that require no POST to reach a lane are
+        measuring the same fixture they were.
+        """
+        if not self.lane.can_vend or urlparse(self.path).path != VEND_PATH:
+            return self._refuse()
+        self._record()
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            body = {}
+        self.lane.vends.append(
+            {"body": body, "idempotency_key": self.headers.get("Idempotency-Key")}
+        )
+        if self.lane.vend_refusal is not None:
+            return self._json(
+                409,
+                {
+                    "contract_version": CONTRACT_VERSION,
+                    "code": self.lane.vend_refusal,
+                    "error": "this lane will not complete that",
+                    "malfunction": self.lane.vend_malfunction,
+                },
+            )
+        return self._json(
+            202,
+            {
+                "contract_version": CONTRACT_VERSION,
+                "vend_commanded": True,
+                "event_cursor": self.lane.vend_cursor,
+                "transit": "pending",
+            },
+        )
+
     do_PUT = _refuse  # noqa: N815
     do_PATCH = _refuse  # noqa: N815
     do_DELETE = _refuse  # noqa: N815
