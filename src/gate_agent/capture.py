@@ -57,6 +57,7 @@ from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable
 from .config import CaptureConfig
 from .contract import (
     CAMERA_CODES,
+    KNOWN_LANE_VERSIONS,
     LANE_CODES,
     STORE_CODES,
     CameraDescription,
@@ -74,12 +75,6 @@ from .contract import (
 from .store import CaptureStore, StoreOverBudget, StoreRecordRefused, StoreUnwritable
 
 log = logging.getLogger(__name__)
-
-#: Lane contract versions this process can read. A lane answering anything else
-#: is REFUSED rather than partially read -- the lane contract's own rule, and the
-#: same set the monitor holds, for the same reason: half-understanding a payload
-#: about a vehicle is worse than admitting you cannot read it.
-KNOWN_LANE_VERSIONS: tuple[int, ...] = (1,)
 
 #: The lane event kinds that make this process take a picture, and the reason it
 #: files the capture under. ONE mapping, so a kind cannot become a trigger
