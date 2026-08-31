@@ -51,7 +51,15 @@ from .tickets import VOID_REASONS
 #: Additive changes do not bump it and a consumer ignores fields it does not
 #: know -- the same rule the lane and Vehicle ID contracts state, so one
 #: consumer can hold one policy for all three.
-CONTRACT_VERSION = 1
+#:
+#: **2, from round 7.** Every change in that round is additive by that rule --
+#: new fields, new event kinds, new codes -- and it is bumped anyway, for one
+#: reason that is not additive: `can_vend` CHANGED MEANING. It was `bool(ACTS)`
+#: and answered "can anything in this package act", which was `false`
+#: everywhere; it is now per lane and answers "does this agent hold what acting
+#: at THIS lane needs". A consumer reading the old field's meaning off the new
+#: payload would read a `true` as something this contract never said.
+CONTRACT_VERSION = 2
 
 #: Lane contract versions ANY process in this package can read, and there is
 #: exactly ONE of these.

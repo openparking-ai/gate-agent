@@ -22,7 +22,7 @@ from fakes import RecordingSink
 from gate_agent.capture_service import CaptureService
 from gate_agent.capture_service import make_server as capture_server
 from gate_agent.config import EmailSinkConfig
-from gate_agent.contract import CaptureCode, MonitorCode, TargetKind
+from gate_agent.contract import CONTRACT_VERSION, CaptureCode, MonitorCode, TargetKind
 from gate_agent.monitor import KNOWN_VERSIONS
 from gate_agent.sinks import EmailSink
 from serving import serving
@@ -83,7 +83,11 @@ def test_the_monitor_reads_a_capture_process_and_passes_its_codes_through(site):
     health = monitor.health().to_dict()
     target = next(one for one in health["targets"] if one["name"] == "capture")
     assert target["kind"] == TargetKind.CAPTURE.value
-    assert target["contract_version"] == 1
+    # PRODUCED, not typed. The capture process publishes THIS package's own
+    # contract version, so a bump moves this with it -- a `1` here went stale the
+    # moment round 7 bumped it, which is the same mistake a typed lane version
+    # made a few commits earlier.
+    assert target["contract_version"] == CONTRACT_VERSION
     assert {entry["code"] for entry in target["codes"]} == {
         code.value for code in CaptureCode
     }
