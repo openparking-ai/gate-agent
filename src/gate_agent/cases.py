@@ -94,6 +94,36 @@ FALLBACK_CASES: dict[str, AgentCase] = {
 #: set already gets.
 DEFAULT_DECISION_MAX_AGE_SECONDS = 120.0
 
+#: THE CASES A TICKET ANSWERS. Four, and every one of them is a driver whose
+#: IDENTITY could not be established at a lane that is otherwise working.
+#:
+#: What they have in common is the whole rule: the lane made a decision, it was
+#: not able to say who this vehicle is, and a ticket is the identity it could
+#: not read. That is why the other cases are NOT here, one by one:
+#:
+#:   * `entry_refused` -- the lane knows who this is and said no. A ticket would
+#:     overturn a rule, and only a human may do that.
+#:   * `vehicle_not_detected` -- the lane believes the lane is empty, and the
+#:     vend route's FIRST refusal is that same loop read. A ticket here is one
+#:     the lane would refuse `no_vehicle` a moment later.
+#:   * `entry_not_confirmed` -- a vend already happened. The question is whether
+#:     the car went through, not whether it may.
+#:   * `malfunction_active`, `lane_unavailable`, `stale_decision`,
+#:     `unrecognised_reason` -- the lane cannot be believed about this vehicle,
+#:     so a ticket would be minted against a decision nobody trusts.
+#:   * `standalone` -- there is no lane, no loop and no presence source at all.
+#:     A button that issued a ticket with no car behind it is the market failure
+#:     Gokhan named (SETTLED 3a); the human is the presence check there.
+#:   * `nothing_to_do` -- the driver already got in.
+TICKET_CASES: frozenset[AgentCase] = frozenset(
+    {
+        AgentCase.IDENTIFICATION_UNAVAILABLE,
+        AgentCase.PLATE_NOT_READ,
+        AgentCase.PLATE_UNCLEAR,
+        AgentCase.VEHICLE_NOT_RECOGNISED,
+    }
+)
+
 #: The transit states that mean the lane could not say whether the vehicle
 #: actually went through. `held` is neither a confirmation nor a refutation and
 #: `unconfirmable` is an ordinary lane with no closing loops -- a third party's
@@ -125,6 +155,11 @@ class LaneReading:
     #: that is a fact about the answer this build was given rather than
     #: something to be lost in a conversion before anybody can branch on it.
     decision_at: str | None = None
+    #: `decision.presence`, exactly as the lane published it: `True`, `False` or
+    #: `None`. **`None` is not `False`** -- it is "nobody measured", which is the
+    #: project's standing acceptance applied to the one field that decides
+    #: whether a ticket is offered at all. A ticket is offered only on `True`.
+    presence: bool | None = None
     #: The codes the lane published as `active` with `never_alarm` FALSE, as it
     #: published them. Filtered where the payload is read, not here, because
     #: `never_alarm` travels on the wire with the code and this package holds no
@@ -249,6 +284,7 @@ __all__ = [
     "FALLBACK_CASES",
     "OUTCOMES",
     "REQUIRED_FALLBACK_REASONS",
+    "TICKET_CASES",
     "TRANSIT_STATES",
     "UNCONFIRMED_TRANSITS",
     "LaneReading",

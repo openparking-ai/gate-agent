@@ -51,14 +51,16 @@ from enum import Enum, auto
 from pathlib import Path
 from time import monotonic
 
-from .cases import LaneReading, derive
+from .act import LaneActClient, LaneActRefusedUs, LaneUnreachable
+from .cases import TICKET_CASES, LaneReading, derive
 from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable
 from .config import AgentConfig, Intercom
 from .contract import (
+    ACTS,
     AUTHORISATION_DIGITS,
-    CANNOT_ACT,
     CONTRACT_VERSION,
     KNOWN_LANE_VERSIONS,
+    OPENING_AUTHORISATIONS,
     AgentCase,
     AgentCode,
     AgentDescription,
@@ -70,9 +72,13 @@ from .contract import (
     Authorisation,
     HealthState,
     IntercomDescription,
+    LaneCapability,
     UserAgentDescription,
 )
-from .lines import audio_name
+from .display import DisplayUnavailable, frame_for
+from .lines import DISPLAY_TEXT, audio_name
+from .tickets import TicketRecord as _TicketRecord
+from .tickets import TicketStore, confirmed, mint, vended, voided
 from .ua import (
     UaEvent,
     UaEventKind,
@@ -120,6 +126,33 @@ class State(Enum):
     CLOSING = auto()
 
 
+@dataclass(frozen=True, slots=True)
+class Pending:
+    """A ticket that is on a display and has not been confirmed or voided.
+
+    **One per LANE, never more.** A second ticket at one barrier is a second
+    stay for one car, and the lane would refuse the second vend
+    `already_completed` -- which is the backstop and not the design.
+
+    It is held in memory and NOWHERE ELSE, and that is deliberate: no pending
+    ticket survives a restart. The record on disk says `voided` with reason
+    `restarted`, so a ticket a display is still showing after a crash can never
+    be vended, and the press that would have confirmed it goes to a person.
+    """
+
+    ticket: object
+    payload: str
+    lane: str
+    case: AgentCase
+    #: The lane's `decision.at` this ticket was minted against. **ECHOED to the
+    #: vend, never invented**: it is what says WHICH decision is being
+    #: completed, and a `now()` in its place is a caller telling a lane
+    #: something it did not ask.
+    decision_at: str
+    expires: float
+    displays: tuple = ()
+
+
 @dataclass
 class Session:
     """One case, from the moment a call is answered until the call ends."""
@@ -155,6 +188,12 @@ class Session:
     #: the last file of the case has FINISHED, so it is written once and there
     #: has to be somewhere to remember that.
     spoken: bool = False
+    #: The ticket this call CONFIRMED, where the press was a confirmation.
+    confirmed_ticket: object = None
+    #: What the operator is told before the case, where this call is a driver
+    #: calling back inside the help window: a line saying a ticket was just
+    #: confirmed, and the line for whatever the vend answered.
+    help_lines: tuple = ()
     #: What is queued to play on each leg, and when the leg is next free.
     speech: dict[UaLeg, deque] = field(default_factory=lambda: {
         UaLeg.DRIVER: deque(), UaLeg.OPERATOR: deque()
@@ -207,6 +246,48 @@ class Agent:
             lane.name: client_factory(lane.url, lane.token, lane.timeout_seconds)
             for lane in config.lanes
         }
+        #: THE ONLY CLIENTS IN THIS PACKAGE THAT CAN OPEN A BARRIER, one per
+        #: lane a site declared an `act_token_file` for. A lane that is not in
+        #: here is READ-ONLY to this agent: `can_vend` is false for it, no
+        #: ticket is offered, and a human's `OPEN_NOW` hears
+        #: `operator.cannot_open`. Built only where the token exists, so there
+        #: is no client to be refused by a lane.
+        self._acts = {
+            lane.name: LaneActClient(lane.url, lane.act_token, lane.timeout_seconds)
+            for lane in config.lanes
+            if lane.can_act
+        }
+        #: The displays at each lane, by lane name. A lane whose intercoms
+        #: declare none offers no ticket.
+        self._displays_at: dict[str, tuple] = {}
+        for intercom in config.intercoms:
+            if intercom.lane and intercom.display:
+                self._displays_at.setdefault(intercom.lane, ())
+                self._displays_at[intercom.lane] += (config.displays[intercom.display],)
+        #: One pending ticket per lane, IN MEMORY ONLY -- see `Pending`.
+        self._pending: dict[str, Pending] = {}
+        #: Where this agent follows each lane's events from, and when it is next
+        #: due to. `None` is "not established yet": the first read adopts the
+        #: lane's current cursor and mints nothing for what is already in the
+        #: window, because those cars have gone.
+        self._cursors: dict[str, int | None] = {
+            lane.name: None for lane in config.lanes
+        }
+        self._lane_due: dict[str, float] = {lane.name: 0.0 for lane in config.lanes}
+        #: WHEN a ticket was last confirmed at each intercom. The help window is
+        #: measured from here, and it is per DOOR because that is what a driver
+        #: presses.
+        self._confirmed_at: dict[str, float] = {}
+        #: WHAT THE VEND ANSWERED at each intercom, as the operator lines that
+        #: say it. Held so a driver calling back inside the help window reaches
+        #: a person who is told a ticket was just confirmed and what came of it,
+        #: rather than a person who has to ask.
+        self._help_lines: dict[str, tuple] = {}
+        self._store = (
+            TicketStore(config.tickets.directory, config.tickets.retention_days)
+            if config.tickets is not None
+            else None
+        )
         #: Keyed on the account a call ARRIVES AT, which is what identifies the
         #: intercom. Never on the `From`: that is a string the caller writes.
         self._by_account = {
@@ -237,9 +318,20 @@ class Agent:
         self._code(AgentCode.AUDIO_MISSING, self.config.agent_id, HealthState.OK)
         for leg in UaLeg:
             self._code(AgentCode.AUDIO_PLAYBACK_FAILED, leg.value, HealthState.OK)
+        if self._store is not None:
+            # BEFORE the user agent, because it is the cheaper thing to find out
+            # about: a store that cannot be opened is a configuration this
+            # process must not run on, and finding out costs a `mkdir`.
+            self._store.open()
         self.ua.start()
         self._release_leftover_calls()
         self._check_accounts()
+        for code, subject in (
+            (AgentCode.DISPLAY_UNAVAILABLE, tuple(self.config.displays)),
+            (AgentCode.LANE_ACT_REFUSED, tuple(self._acts)),
+        ):
+            for one in subject:
+                self._code(code, one, HealthState.OK)
         self._ua_version = self.ua.version()
         self._code(AgentCode.UA_UNREACHABLE, self.config.agent_id, HealthState.OK)
         self._code(AgentCode.UA_UNSUPPORTED_VERSION, self.config.agent_id, HealthState.OK)
@@ -415,6 +507,7 @@ class Agent:
         for event in events:
             self._handle(event)
         self._registration_state()
+        self._follow_lanes()
         self._advance()
 
     def _reconnect(self) -> None:
@@ -466,6 +559,250 @@ class Agent:
             except UaUnreachable as exc:
                 log.error("could not release the orphaned call %s: %s", call.call_id, exc)
                 return
+
+    # -- the ticket ---------------------------------------------------------
+
+    def _offers_a_ticket_at(self, lane: str) -> bool:
+        """Whether a ticket could be OFFERED at this lane, unprompted.
+
+        Both halves are needed and neither is enough. A display, because a
+        ticket nobody can see is a stay nobody can prove; and a key to sign one
+        with. **An act token is deliberately NOT required**: a site may want the
+        driver to have a ticket while a person still works the barrier by hand,
+        and a ticket is the identity either way.
+        """
+        return bool(self._displays_at.get(lane)) and self.config.tickets is not None
+
+    def _follow_lanes(self) -> None:
+        """Each declared lane's events, by cursor, then whatever has expired.
+
+        The capture process's pattern, and the same reasons: the cursor is the
+        join, a page this build cannot read is refused WHOLE, and a first read
+        adopts the lane's position without acting on what is already in the
+        window -- those cars have gone.
+
+        Only lanes that could produce a ticket are followed. A lane with no
+        display and no act token is one nothing here would do anything about,
+        and polling it would be a request per two seconds for nobody.
+        """
+        for lane in self.config.lanes:
+            if not (self._offers_a_ticket_at(lane.name) or lane.can_act):
+                continue
+            now = self._clock()
+            if now < self._lane_due[lane.name]:
+                continue
+            self._lane_due[lane.name] = now + lane.poll_seconds
+            self._poll_lane(lane)
+        self._expire_tickets()
+
+    def _poll_lane(self, lane) -> None:
+        """One read of a lane's events, and one of its state where a ticket is up."""
+        try:
+            page = self._clients[lane.name].get(
+                f"/v1/lane/events?since={self._cursors[lane.name] or 0}"
+            )
+        except (TargetUnreachable, TargetRefusedUs) as exc:
+            log.warning("lane %s could not be followed: %s", lane.name, exc)
+            self._code(AgentCode.LANE_UNAVAILABLE, lane.name, HealthState.ACTIVE)
+            return
+        cursor = page.get("cursor")
+        events = page.get("events")
+        if not isinstance(cursor, int) or isinstance(cursor, bool) or not isinstance(
+            events, list
+        ):
+            # REFUSED WHOLE, and the cursor is NOT adopted, so the next poll asks
+            # for the same events again and this recovers by itself.
+            log.error("lane %s served a page this build cannot read", lane.name)
+            self._code(AgentCode.LANE_UNAVAILABLE, lane.name, HealthState.ACTIVE)
+            return
+        self._code(AgentCode.LANE_UNAVAILABLE, lane.name, HealthState.OK)
+
+        held = self._cursors[lane.name]
+        if held is None:
+            # FIRST READ. Take the lane's place at its current cursor and mint
+            # nothing for what is already in the window: a ticket offered now
+            # against a decision from before this process started is a code on a
+            # screen for a car that has gone.
+            self._cursors[lane.name] = cursor
+            log.info("following lane %s from cursor %d", lane.name, cursor)
+            return
+        if page.get("reset") or cursor < held:
+            # The saved position no longer refers to anything, or the lane broke
+            # its own contract. Either way nothing in the gap is acted on.
+            log.warning("lane %s reset the cursor (%s -> %s)", lane.name, held, cursor)
+            self._cursors[lane.name] = cursor
+            self._void_at(lane.name, "lane_decided_again")
+            return
+
+        decided = any(
+            isinstance(event, dict) and event.get("kind") == "decision" for event in events
+        )
+        self._cursors[lane.name] = cursor
+        if decided:
+            self._consider_ticket(lane.name)
+        elif lane.name in self._pending:
+            # NOTHING NEW, and a ticket is up. The lane is asked whether the car
+            # is still there: presence can go false with no decision behind it --
+            # the driver reversed away -- and a code on a screen for an empty
+            # lane is a ticket the vend route would refuse `no_vehicle`.
+            self._check_pending(lane.name)
+
+    def _consider_ticket(self, lane: str) -> None:
+        """A new decision at this lane. Void what was up, and maybe mint."""
+        intercom = next(
+            (one for one in self.config.intercoms if one.lane == lane), None
+        )
+        if intercom is None:
+            return
+        reading = self._read_lane(intercom)
+        # A NEW DECISION VOIDS THE OLD TICKET, whatever the new one says. The
+        # ticket named the previous decision's moment, and the lane refuses a
+        # completion that names anything but its last one.
+        self._void_at(lane, "lane_decided_again")
+        if not self._offers_a_ticket_at(lane):
+            return
+        case = derive(
+            reading,
+            now=datetime.now(UTC),
+            max_age_seconds=self.config.decision_max_age_seconds,
+        )
+        if case not in TICKET_CASES:
+            return
+        if reading.presence is not True:
+            # `None` IS NOT `True`. An unmeasured presence must never put a code
+            # on a screen: that is the fraud this project has spent its rounds
+            # on, arriving through a display instead of through a loop.
+            log.info("lane %s: no ticket, presence is %r", lane, reading.presence)
+            return
+        if reading.decision_at is None:
+            return
+        self._issue(lane, case, reading.decision_at)
+
+    def _issue(self, lane: str, case: AgentCase, decision_at: str) -> None:
+        """Mint, record, show. In that order, and the order is the guarantee.
+
+        The RECORD IS WRITTEN AND FLUSHED BEFORE THE SCREEN, so a crash between
+        them leaves a ticket nobody has seen rather than a ticket on a screen
+        that this site has no record of. The second is the one that costs a
+        customer: they photograph a code and the exit has never heard of it.
+        """
+        tickets = self.config.tickets
+        ticket, payload = mint(
+            self.config.site_id, lane, self._now(), tickets.signing_key
+        )
+        record = _TicketRecord(
+            ticket_id=ticket.ticket_id,
+            ticket_ref=ticket.ticket_ref,
+            site=self.config.site_id,
+            lane=lane,
+            issued_at=ticket.issued_at,
+        )
+        self._store.write(record)
+        pending = Pending(
+            ticket=ticket,
+            payload=payload,
+            lane=lane,
+            case=case,
+            decision_at=decision_at,
+            expires=self._clock() + tickets.confirm_window_s,
+            displays=self._displays_at.get(lane, ()),
+        )
+        if not self._show(pending):
+            self._store.write(
+                voided(record, self._now(), "display_unavailable")
+            )
+            self._record(
+                AgentEventKind.TICKET_VOIDED,
+                lane=lane,
+                ticket_id=ticket.ticket_id,
+                reason="display_unavailable",
+            )
+            return
+        self._pending[lane] = pending
+        self._record(
+            AgentEventKind.TICKET_ISSUED,
+            lane=lane,
+            case=case.value,
+            ticket_id=ticket.ticket_id,
+        )
+
+    def _show(self, pending: Pending) -> bool:
+        """Draw the ticket on every display at its lane. False if any refused."""
+        instructions = tuple(
+            DISPLAY_TEXT["display.instruction"][language]
+            for language in self.config.driver_languages
+            if DISPLAY_TEXT["display.instruction"].get(language)
+        )
+        for screen in pending.displays:
+            try:
+                screen.show(
+                    frame_for(
+                        pending.payload,
+                        pending.ticket.ticket_ref,
+                        instructions,
+                        screen.geometry,
+                    )
+                )
+            except DisplayUnavailable as exc:
+                log.error("display %s could not be written: %s", screen.name, exc)
+                self._code(
+                    AgentCode.DISPLAY_UNAVAILABLE, screen.name, HealthState.ACTIVE
+                )
+                return False
+            self._code(AgentCode.DISPLAY_UNAVAILABLE, screen.name, HealthState.OK)
+        return True
+
+    def _blank(self, pending: Pending) -> None:
+        for screen in pending.displays:
+            try:
+                screen.blank()
+            except DisplayUnavailable as exc:
+                # NOT a void: the ticket is already gone. A screen that cannot
+                # be cleared is a code left up, which is why it is a code on the
+                # health surface rather than a log line.
+                log.error("display %s could not be cleared: %s", screen.name, exc)
+                self._code(
+                    AgentCode.DISPLAY_UNAVAILABLE, screen.name, HealthState.ACTIVE
+                )
+
+    def _check_pending(self, lane: str) -> None:
+        """Is the ticket on this lane's screen still about the car in front of it?"""
+        pending = self._pending.get(lane)
+        intercom = next((one for one in self.config.intercoms if one.lane == lane), None)
+        if pending is None or intercom is None:
+            return
+        reading = self._read_lane(intercom)
+        if not reading.readable:
+            # NOT a void. A lane that cannot be read has not said the car left,
+            # and voiding on silence would take a ticket off a screen somebody
+            # is walking towards.
+            return
+        if reading.decision_at != pending.decision_at:
+            self._void_at(lane, "lane_decided_again")
+        elif reading.presence is not True:
+            self._void_at(lane, "presence_lost")
+
+    def _expire_tickets(self) -> None:
+        now = self._clock()
+        for lane, pending in list(self._pending.items()):
+            if now >= pending.expires:
+                self._void_at(lane, "window_elapsed")
+
+    def _void_at(self, lane: str, reason: str, answer: str | None = None) -> None:
+        """Take the ticket down, record why, and blank the screen."""
+        pending = self._pending.pop(lane, None)
+        if pending is None:
+            return
+        record = self._store.read(pending.ticket.ticket_id)
+        if record is not None:
+            self._store.write(voided(record, self._now(), reason, answer))
+        self._record(
+            AgentEventKind.TICKET_VOIDED,
+            lane=lane,
+            ticket_id=pending.ticket.ticket_id,
+            reason=reason,
+        )
+        self._blank(pending)
 
     def _registration_state(self) -> None:
         registered = self.ua.registered()
@@ -587,6 +924,20 @@ class Agent:
         )
         self._record(AgentEventKind.CALL_ANSWERED, intercom=intercom.sip_uri,
                      lane=intercom.lane, caller_stated_identity=claimed or None)
+
+        # **HELP IS THE NEXT PRESS, and it is checked BEFORE the ticket.** A
+        # driver whose ticket was confirmed a moment ago and who is pressing
+        # again is asking for a person, not asking for a second vend -- and the
+        # lane's `already_completed` is the BACKSTOP for that, not the design.
+        # Checked first because a pending ticket and a recent confirmation can
+        # both be true: the lane may have decided again in between.
+        confirmed_at = self._confirmed_at.get(intercom.sip_uri)
+        window = self.config.tickets.help_window_s if self.config.tickets else 0.0
+        if confirmed_at is not None and self._clock() - confirmed_at <= window:
+            session.help_lines = self._help_lines.get(intercom.sip_uri, ())
+        elif self._pending.get(intercom.lane or "") is not None:
+            return self._confirm_ticket(session, intercom)
+
         session.case = derive(
             self._read_lane(intercom),
             now=datetime.now(UTC),
@@ -603,6 +954,150 @@ class Agent:
             session.state = State.CLOSING
         else:
             session.state = State.SPEAKING_CASE
+        session.deadline = None
+
+    def _confirm_ticket(self, session: Session, intercom: Intercom) -> None:
+        """THE PRESS. Somebody at that barrier confirmed the ticket on its screen.
+
+        **What a press proves, exactly:** that somebody at the barrier pressed.
+        It does not prove a CAR is there -- that is the lane's question, read off
+        its arming loop at the moment of the vend, and it is never this agent's
+        (SETTLED 7, round 6 E3). The lane refuses `no_vehicle` if it is not, and
+        that refusal reaches a person.
+
+        And it does not prove WHO. Whoever photographed the code is holding the
+        ticket, which is exactly as strong as holding the paper one it replaces.
+        What the press adds is that the holder is standing at that barrier now.
+        """
+        lane = intercom.lane or ""
+        pending = self._pending.pop(lane)
+        session.case = pending.case
+        session.confirmed_ticket = pending
+        self._confirmed_at[intercom.sip_uri] = self._clock()
+        record = self._store.read(pending.ticket.ticket_id)
+        if record is not None:
+            self._store.write(confirmed(record, self._now()))
+        self._record(
+            AgentEventKind.TICKET_CONFIRMED,
+            intercom=intercom.sip_uri,
+            lane=lane,
+            case=pending.case.value,
+            ticket_id=pending.ticket.ticket_id,
+        )
+        self._say(session, UaLeg.DRIVER, "ticket.confirmed")
+        self._blank(pending)
+        self._command_vend(session, pending, "display_code_confirmed")
+
+    def _command_vend(self, session: Session, pending: Pending, authorised_by: str) -> None:
+        """`POST /v1/lane/vend`, and whatever the lane says about it.
+
+        **Every refusal is the LANE'S.** Nothing is checked here first: not
+        presence, not the malfunction table, not the age of the decision. A
+        second copy of those checks would be one that comes to disagree with the
+        copy the barrier actually obeys, and the lane's own contract says why in
+        its first paragraph.
+        """
+        client = self._acts.get(pending.lane)
+        if client is None:
+            # READ-ONLY at this lane. The driver has a ticket and a person opens
+            # the barrier: the stay is identified either way, which is what the
+            # ticket was for.
+            return self._to_a_human(session, ("operator.cannot_open",))
+        try:
+            answer = client.vend(
+                authorised_by=authorised_by,
+                ticket_ref=pending.ticket.ticket_ref,
+                # ECHOED. The moment the lane published for the decision this
+                # ticket was minted against, not this process's clock.
+                decision_at=pending.decision_at,
+                idempotency_key=pending.ticket.ticket_id,
+            )
+        except LaneActRefusedUs as exc:
+            log.error("lane %s refused this agent's act: HTTP %s", pending.lane, exc.status)
+            self._code(AgentCode.LANE_ACT_REFUSED, pending.lane, HealthState.ACTIVE)
+            self._finish_ticket(pending, "lane_decided_again", None)
+            return self._to_a_human(session, ())
+        except LaneUnreachable as exc:
+            log.error("lane %s could not be asked to vend: %s", pending.lane, exc)
+            self._code(AgentCode.LANE_UNAVAILABLE, pending.lane, HealthState.ACTIVE)
+            self._finish_ticket(pending, "lane_decided_again", None)
+            return self._to_a_human(session, ())
+        self._code(AgentCode.LANE_ACT_REFUSED, pending.lane, HealthState.OK)
+
+        if answer.commanded:
+            record = self._store.read(pending.ticket.ticket_id)
+            if record is not None:
+                self._store.write(
+                    vended(
+                        record,
+                        self._now(),
+                        None if answer.event_cursor is None else str(answer.event_cursor),
+                    )
+                )
+            self._record(
+                AgentEventKind.VEND_COMMANDED,
+                intercom=session.intercom.sip_uri,
+                lane=pending.lane,
+                case=pending.case.value,
+                ticket_id=pending.ticket.ticket_id,
+                authorised_by=authorised_by,
+                lane_event_cursor=answer.event_cursor,
+            )
+            self._help_lines[session.intercom.sip_uri] = (
+                "operator.help_after_ticket",
+                "operator.vend_commanded",
+            )
+            # **"ASKED TO OPEN", never "is open".** Nothing in this estate has
+            # measured a barrier moving: `boom_did_not_rise` is `no_source` on
+            # the lane's own health surface.
+            self._say(session, UaLeg.DRIVER, "ticket.vend_commanded")
+            session.state = State.CLOSING
+            session.deadline = None
+            return
+
+        self._record(
+            AgentEventKind.VEND_REFUSED,
+            intercom=session.intercom.sip_uri,
+            lane=pending.lane,
+            case=pending.case.value,
+            ticket_id=pending.ticket.ticket_id,
+            authorised_by=authorised_by,
+            code=answer.code,
+        )
+        self._finish_ticket(pending, "lane_decided_again", answer.code)
+        refusal = (
+            f"operator.vend_refused.{answer.code}"
+            if f"operator.vend_refused.{answer.code}" in self._durations_for_lines()
+            else None
+        )
+        self._help_lines[session.intercom.sip_uri] = (
+            ("operator.help_after_ticket",) + ((refusal,) if refusal else ())
+        )
+        self._say(session, UaLeg.DRIVER, "ticket.vend_refused")
+        self._to_a_human(session, (refusal,) if refusal else ())
+
+    def _finish_ticket(self, pending: Pending, reason: str, answer: str | None) -> None:
+        """A confirmed ticket that did not vend. The record says so."""
+        record = self._store.read(pending.ticket.ticket_id) if self._store else None
+        if record is not None:
+            self._store.write(voided(record, self._now(), reason, answer))
+
+    def _durations_for_lines(self) -> frozenset[str]:
+        """Which operator lines this build has words for, for the ONE language
+        the operator hears. A refusal code with no sentence is one this build
+        will not claim to explain."""
+        from .lines import TEXT
+
+        return frozenset(
+            line
+            for line, languages in TEXT.items()
+            if languages.get(self.config.operator_language)
+        )
+
+    def _to_a_human(self, session: Session, extra: tuple) -> None:
+        """The case goes to a person, with anything extra they need told first."""
+        session.help_lines = tuple(one for one in (session.help_lines + extra) if one)
+        session.state = State.SPEAKING_CASE
         session.deadline = None
 
     def _undeclared(self, claimed: str) -> None:
@@ -679,6 +1174,11 @@ class Agent:
             # rather than an exception in the middle of answering a call.
             decision_at=_string(decision, "at"),
             transit=_string(transit, "state"),
+            # READ AS A BOOLEAN, never as truthiness. `None` is what a lane with
+            # no presence measurement publishes and it is not `False`: a ticket
+            # is offered on `True` and on nothing else, so an unmeasured
+            # presence must not become a code on a screen.
+            presence=_boolean(decision, "presence"),
             malfunctions=tuple(malfunctions),
         )
 
@@ -719,6 +1219,12 @@ class Agent:
         self._play(session, UaLeg.OPERATOR, session.intercom.name_audio)
         case = session.case or AgentCase.UNRECOGNISED_REASON
         self._say(session, UaLeg.OPERATOR, f"operator_case.{case.value}", operator=True)
+        # WHAT ALREADY HAPPENED, before the menu. A person asked to decide about
+        # a driver who was given a ticket ninety seconds ago needs to know that
+        # and what the barrier said about it -- otherwise their first act is to
+        # ask the driver, over an intercom, at three in the morning.
+        for line in session.help_lines:
+            self._say(session, UaLeg.OPERATOR, line, operator=True)
         self._menu(session)
 
     def _menu(self, session: Session) -> None:
@@ -760,11 +1266,15 @@ class Agent:
             self._say(session, UaLeg.OPERATOR, "operator.menu_callback_number", operator=True)
             return
         self._record_authorisation(session, value, None)
-        if value in CANNOT_ACT:
-            # The one fixed sentence the person keying it hears. A human who
-            # believes a barrier moved when it did not is worse off than one who
-            # was never called.
-            self._say(session, UaLeg.OPERATOR, "operator.cannot_open", operator=True)
+        if value in OPENING_AUTHORISATIONS:
+            # THE HUMAN'S WORD, ACTED ON. `OPEN_NOW` overrides a rule -- it is
+            # the only authority the lane accepts on a `deny`, and the lane
+            # records it as an override, by name, on the event it writes before
+            # the barrier moves. `OPEN_AND_FLAG` does not override one: a
+            # completion somebody is unsure about and a person overturning a
+            # refusal are different acts, and one of them is not made safer by
+            # being uncertain.
+            return self._human_opens(session, value)
         self._say(session, UaLeg.DRIVER, f"authorisation.{value.value}")
         if value is Authorisation.HOLD:
             session.state = State.HOLDING
@@ -772,6 +1282,64 @@ class Agent:
             session.prompts_left = REPROMPTS
             return
         session.state = State.CLOSING
+
+    def _human_opens(self, session: Session, value: Authorisation) -> None:
+        """`OPEN_NOW` / `OPEN_AND_FLAG`, through the SAME route the press uses.
+
+        One vend path, not two. The authority differs and nothing else does --
+        which is what makes "a human opened it" and "a driver confirmed a
+        ticket" the same record with a different name on it, and what stops one
+        of them growing a refusal the other does not apply.
+
+        **A ticket is minted here if there is not one**, because the lane's
+        completion names an identity and there has to be one to name. Where a
+        display is declared the driver sees it and leaves with a stay they can
+        prove; where none is, the ticket exists in this site's record and the
+        EXIT IS THEN THE HUMAN'S -- `docs/CONTRACT.md` says so rather than
+        leaving an operator to discover it.
+        """
+        self._say(session, UaLeg.DRIVER, f"authorisation.{value.value}")
+        lane = session.intercom.lane
+        pending = self._pending.pop(lane, None) if lane else None
+        if lane is not None and pending is None and self._can_mint_for(lane):
+            pending = self._mint_for_human(lane)
+        if lane is None or pending is None or lane not in self._acts:
+            # NOTHING HERE CAN ACT: no act token for this lane, no key to sign a
+            # ticket with, or a standalone intercom with no relay. One fixed
+            # sentence, and it is not optional -- a person who believes a barrier
+            # moved when it did not is worse off than one who was never called.
+            self._say(session, UaLeg.OPERATOR, "operator.cannot_open",
+                      operator=True)
+            session.state = State.CLOSING
+            return
+        session.state = State.CLOSING
+        session.deadline = None
+        self._command_vend(session, pending, ACTS[value])
+
+    def _can_mint_for(self, lane: str) -> bool:
+        return self.config.tickets is not None and self._store is not None
+
+    def _mint_for_human(self, lane: str) -> Pending | None:
+        """A ticket for a completion a person asked for, against THIS decision.
+
+        The lane's `decision_at` is read now rather than remembered: a human
+        keying `OPEN_NOW` is completing whatever the lane last decided, and a
+        moment this agent held from an earlier poll would be refused
+        `decision_mismatch`.
+        """
+        intercom = next((one for one in self.config.intercoms if one.lane == lane), None)
+        if intercom is None:
+            return None
+        reading = self._read_lane(intercom)
+        if not reading.readable or reading.decision_at is None:
+            return None
+        case = derive(
+            reading,
+            now=datetime.now(UTC),
+            max_age_seconds=self.config.decision_max_age_seconds,
+        )
+        self._issue(lane, case, reading.decision_at)
+        return self._pending.pop(lane, None)
 
     def _finish_call_back(self, session: Session) -> None:
         keyed = session.keyed
@@ -1083,6 +1651,13 @@ class Agent:
             keyed=fields.get("keyed"),
             caller_stated_identity=fields.get("caller_stated_identity"),
             released=fields.get("released"),
+            ticket_id=fields.get("ticket_id"),
+            authorised_by=fields.get("authorised_by"),
+            code=fields.get("code"),
+            reason=fields.get("reason"),
+            lane_event_cursor=fields.get("lane_event_cursor"),
+            relay_port=fields.get("relay_port"),
+            relay_ms=fields.get("relay_ms"),
         )
         if len(self._log) == self._log.maxlen:
             self._dropped += 1
@@ -1099,8 +1674,23 @@ class Agent:
             agent_id=self.config.agent_id,
             site_id=self.config.site_id,
             intercoms=tuple(
-                IntercomDescription(sip_uri=intercom.sip_uri, lane=intercom.lane)
+                IntercomDescription(
+                    sip_uri=intercom.sip_uri,
+                    lane=intercom.lane,
+                    has_display=intercom.display is not None,
+                    has_relay=False,
+                )
                 for intercom in self.config.intercoms
+            ),
+            lanes=tuple(
+                LaneCapability(
+                    name=lane.name,
+                    # BOTH, because a completion names an identity: an act token
+                    # with no key to sign a ticket with opens nothing.
+                    can_vend=lane.name in self._acts
+                    and self.config.tickets is not None,
+                )
+                for lane in self.config.lanes
             ),
             user_agent=UserAgentDescription(
                 kind=self.config.user_agent.kind,
@@ -1188,6 +1778,20 @@ def _bare_uri(peer: str | None) -> str:
     if not host:
         return text
     return f"{scheme}:{user}@{host.split(':')[0]}"
+
+
+def _boolean(payload, key: str) -> bool | None:
+    """A field that is `true`, `false` or absent. Anything else is `None`.
+
+    Typed rather than truthy: a lane that published the string `"false"` or the
+    number `0` would be read as a presence by `if value`, and the field it is
+    reading decides whether a code goes on a screen for a vehicle nobody
+    measured.
+    """
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get(key)
+    return value if isinstance(value, bool) else None
 
 
 def _string(payload, key: str) -> str | None:
