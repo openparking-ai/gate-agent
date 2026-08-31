@@ -252,8 +252,13 @@ BREAKS = [
         "why": "the monitor imports the lane instead of speaking its contract",
         "file": "src/gate_agent/monitor.py",
         "from": "from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable",
+        # THE BREAK ADDS ONE IMPORT AND CHANGES NOTHING ELSE. It used to drop
+        # `TargetRefusedUs` from the same line, so `monitor.py` raised NameError
+        # and the suite ERRORED -- which the exit-status rule read as "fails as
+        # required" and the summary-line rule correctly refuses. A break that
+        # does two things measures neither.
         "to": "from lane_controller.contract import MalfunctionCode as _Unused  # noqa: F401\n"
-        "from .client import ReadOnlyClient, TargetUnreachable",
+        "from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable",
     },
     {
         "name": "sinks_reach_a_target",
@@ -481,11 +486,19 @@ BREAKS = [
         "to": "        pass",
     },
     {
+        # It used to add `"plate"` to `SIDECAR_FIELDS` with no attribute behind
+        # it, so `Record.sidecar()` raised AttributeError and fourteen tests
+        # ERRORED. That is a suite that could not run, not a guarantee that went
+        # red. The break now does what its name says: it carries the lane
+        # event's DETAIL onto the record, through the field that already exists
+        # for the event's moment.
         "name": "event_detail_is_copied",
         "why": "a lane event's detail is carried onto the record",
-        "file": "src/gate_agent/store.py",
-        "from": '    "capture_minus_lane_event_ms",\n    "bytes",\n)',
-        "to": '    "capture_minus_lane_event_ms",\n    "bytes",\n    "plate",\n)',
+        "file": "src/gate_agent/capture.py",
+        "from": "            triggers.append((reason, event_cursor, occurred_at))",
+        "to": "            triggers.append(\n"
+              "                (reason, event_cursor, occurred_at + str(event.get(\"detail\")))\n"
+              "            )",
     },
     {
         "name": "entry_pending_triggers",
