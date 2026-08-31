@@ -58,6 +58,7 @@ from .contract import (
     AUTHORISATION_DIGITS,
     CANNOT_ACT,
     CONTRACT_VERSION,
+    KNOWN_LANE_VERSIONS,
     AgentCase,
     AgentCode,
     AgentDescription,
@@ -83,11 +84,6 @@ from .ua import (
 
 log = logging.getLogger(__name__)
 
-#: Lane contract versions this agent can read. Same rule and same reason as the
-#: monitor's: a lane on another version is refused rather than half-read, and
-#: half-understanding a decision about a vehicle is worse than admitting it
-#: cannot be read.
-KNOWN_LANE_VERSIONS: tuple[int, ...] = (1,)
 
 #: How many times a digit outside the enabled set is re-prompted before the
 #: attempt is `nothing usable`. Two, and it is fixed rather than per-site: it is

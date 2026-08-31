@@ -51,6 +51,22 @@ from urllib.parse import urlsplit
 #: consumer can hold one policy for all three.
 CONTRACT_VERSION = 1
 
+#: Lane contract versions ANY process in this package can read, and there is
+#: exactly ONE of these.
+#:
+#: **It used to be three.** `agent.py`, `monitor.py` and `capture.py` each held
+#: their own tuple, and on 2026-08-31 the lane's contract went to 2 while all
+#: three still said `(1,)` -- so the monitor and the whole capture process
+#: refused to start against the lane on `lane-controller` main, and the agent
+#: read every lane as `lane_unavailable`. Three copies of one number is three
+#: places to forget, and the forgetting is silent in the reassuring direction:
+#: every consumer simply says the lane cannot be read.
+#:
+#: A lane on a version outside this set is REFUSED rather than partially read --
+#: the lane contract's own instruction to a consumer, and half-understanding a
+#: payload about a vehicle is worse than admitting it cannot be read.
+KNOWN_LANE_VERSIONS: tuple[int, ...] = (1,)
+
 
 class TargetKind(StrEnum):
     """What kind of thing a target is, and therefore how it is read.
