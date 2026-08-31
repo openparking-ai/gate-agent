@@ -479,3 +479,119 @@ dial_secret_file = "{second}"
     )
     assert len(config.intercoms) == 2
     assert len({one.account_user for one in config.intercoms}) == 2
+
+
+# ---------------------------------------------------------------------------
+# [tickets] — required exactly where the agent can offer or command anything
+# ---------------------------------------------------------------------------
+
+TICKETS = """
+[tickets]
+signing_key_file = "SIGNING_KEY_FILE"
+directory = "TICKET_DIRECTORY"
+"""
+
+
+def with_tickets(tmp_path, text: str = BASE, key: str = "a-signing-key-long-enough-000000") -> str:
+    """`BASE` plus a `[tickets]` section with a real key file at `0600`."""
+    path = secret_file(tmp_path / "tickets.key", key)
+    return (text + TICKETS).replace("SIGNING_KEY_FILE", str(path)).replace(
+        "TICKET_DIRECTORY", str(tmp_path / "ticket-records")
+    )
+
+
+def with_act_token(tmp_path, text: str) -> str:
+    token = secret_file(tmp_path / "lane.act-token", "an-act-token-for-a-test")
+    return text.replace(
+        'url = "http://127.0.0.1:8090"',
+        f'url = "http://127.0.0.1:8090"\nact_token_file = "{token}"',
+    )
+
+
+def test_an_agent_with_no_display_and_no_act_token_needs_no_tickets_section(tmp_path):
+    """Round 5 exactly, and it is a supported configuration.
+
+    An agent that can neither offer a ticket nor command a vend has nothing to
+    sign. Requiring a key there would be a site generating a credential to
+    satisfy a file rather than to protect anything.
+    """
+    config = AgentConfig.from_file(written(tmp_path))
+    assert config.tickets is None
+    assert config.can_vend_at == ()
+
+
+def test_a_lane_with_an_act_token_and_no_tickets_section_is_refused_by_name(tmp_path):
+    """And the refusal says WHICH declaration made it necessary.
+
+    A site told "you need [tickets]" has to work out why; a site told
+    "[lanes.entry] declares act_token_file" does not.
+    """
+    refused(tmp_path, with_act_token(tmp_path, BASE), "[tickets] is not declared")
+    refused(tmp_path, with_act_token(tmp_path, BASE), "[lanes.entry] declares act_token_file")
+
+    # THE CONTROL: the same file WITH the section is accepted, so the refusal is
+    # about the missing section and not about the act token.
+    both = with_act_token(tmp_path, with_tickets(tmp_path))
+    config = AgentConfig.from_file(written(tmp_path, both))
+    assert config.can_vend_at == ("entry",)
+    assert config.lane("entry").can_act is True
+
+
+def test_a_signing_key_short_enough_to_have_been_typed_is_refused(tmp_path):
+    """A FLOOR THIS REPOSITORY CHOSE, and the message says so.
+
+    What makes a key unguessable is that it was generated at random, which
+    nothing here can see from a file's contents. What this refuses is the one
+    case needing no measurement.
+    """
+    refused(tmp_path, with_tickets(tmp_path, key="too-short"), "refuses anything shorter")
+    # THE CONTROL: one character over the floor is accepted.
+    assert AgentConfig.from_file(
+        written(tmp_path, with_tickets(tmp_path, key="k" * 32))
+    ).tickets is not None
+
+
+def test_tickets_with_no_directory_is_refused(tmp_path):
+    """There is no default: it is the one place on this box a `ticket_ref` is
+    written down, and a default would put a record of every arrival somewhere
+    nobody chose."""
+    text = with_tickets(tmp_path)
+    refused(tmp_path, text.replace(f'directory = "{tmp_path / "ticket-records"}"\n', ""),
+            "does not declare directory")
+
+
+def test_a_signing_key_as_a_VALUE_is_refused_by_the_credential_sweep(tmp_path):
+    """`signing_key = "..."` is a credential in a configuration file, which is a
+    credential in every backup of it. The refusal is the one every credential
+    key already gets, by name."""
+    refused(tmp_path, BASE + '\n[tickets]\nsigning_key = "abc"\n', "signing_key")
+
+
+def test_the_settings_have_the_published_defaults(tmp_path):
+    """Published in `docs/CONTRACT.md`, and read from the code that defines them."""
+    from gate_agent.tickets import (
+        DEFAULT_CONFIRM_WINDOW_S,
+        DEFAULT_HELP_WINDOW_S,
+        DEFAULT_RETENTION_DAYS,
+    )
+
+    tickets = AgentConfig.from_file(written(tmp_path, with_tickets(tmp_path))).tickets
+    assert tickets.retention_days == DEFAULT_RETENTION_DAYS == 30
+    assert tickets.confirm_window_s == DEFAULT_CONFIRM_WINDOW_S == 90.0
+    assert tickets.help_window_s == DEFAULT_HELP_WINDOW_S == 60.0
+
+
+def test_the_signing_key_is_not_in_the_repr_of_the_settings(tmp_path):
+    """The generated `__repr__` would put the key every ticket at this site is
+    signed with into every log line, traceback and test failure that touches a
+    configuration. The intercom's dial secret has the same guard."""
+    tickets = AgentConfig.from_file(
+        written(tmp_path, with_tickets(tmp_path, key="PLANTEDKEY" + "0" * 30))
+    ).tickets
+    assert "PLANTEDKEY" not in repr(tickets)
+    assert "PLANTEDKEY" not in repr(AgentConfig.from_file(
+        written(tmp_path, with_tickets(tmp_path, key="PLANTEDKEY" + "0" * 30))
+    ))
+    # THE CONTROL: the key really is the one loaded, so the absence above is
+    # about the repr and not about a key that never arrived.
+    assert tickets.signing_key.startswith(b"PLANTEDKEY")

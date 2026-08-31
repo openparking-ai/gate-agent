@@ -41,6 +41,12 @@ from .cases import DEFAULT_DECISION_MAX_AGE_SECONDS
 from .client import DEFAULT_TIMEOUT
 from .contract import Authorisation, SinkKind, TargetKind
 from .lines import DRIVER_LINES, OPERATOR_LINES, SHIPPED_LANGUAGES, audio_name, missing_text
+from .tickets import (
+    DEFAULT_CONFIRM_WINDOW_S,
+    DEFAULT_HELP_WINDOW_S,
+    MINIMUM_SIGNING_KEY,
+)
+from .tickets import DEFAULT_RETENTION_DAYS as DEFAULT_TICKET_RETENTION_DAYS
 from .ua_baresip import (
     DEFAULT_RECONNECT_SECONDS,
     DEFAULT_UA_TIMEOUT,
@@ -204,6 +210,14 @@ SECRET_FILE_IS: dict[str, str] = {
         "the shared token this process's own read surface requires. It publishes which of a "
         "site's lanes are broken and when a human was called and did not answer."
     ),
+    "[tickets].signing_key_file": (
+        "THE KEY EVERY TICKET AT THIS SITE IS SIGNED WITH. Anybody who can read it can mint "
+        "a ticket this site's own exit will accept."
+    ),
+    "[lanes.*].act_token_file": (
+        "the credential that OPENS A BARRIER at that lane. It is not the read token and the "
+        "read token does not authorise it."
+    ),
 }
 
 
@@ -298,10 +312,27 @@ class Target:
     #: and an assumption -- see `client.DEFAULT_TIMEOUT` for what it is drawn
     #: against, which is the lane's own bound on the machine BEHIND it.
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    #: LANE ONLY, and it is the credential that OPENS A BARRIER. **A separate
+    #: token from `token`, deliberately and not as belt and braces:** `token`
+    #: reads where a vehicle was, and a read token that also authorised an act
+    #: would mean every consumer holding a read credential held an opening one.
+    #: The lane's own bind rule makes the same split on its side.
+    #:
+    #: `None` means this agent is READ-ONLY at that lane -- `can_vend` is false
+    #: for it on `GET /v1/agent`, no ticket is offered there, and a human's
+    #: `OPEN_NOW` hears `operator.cannot_open`. That is a supported
+    #: configuration and not a broken one: a site may want the intercom to reach
+    #: a person and nothing more.
+    act_token: str | None = None
 
     @property
     def authenticated(self) -> bool:
         return self.token is not None
+
+    @property
+    def can_act(self) -> bool:
+        """Whether this agent holds a credential that opens a barrier here."""
+        return self.act_token is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -961,6 +992,17 @@ STANDALONE = "none"
 DEFAULT_UA_HOST = "127.0.0.1"
 DEFAULT_UA_PORT = 4444
 
+#: The published default for `[lanes.<name>] poll_seconds`: how often the agent
+#: follows a lane's events looking for a decision worth a ticket.
+#:
+#: **AN ASSUMPTION, and it is a different one from the monitor's 30 seconds.**
+#: The monitor is watching for faults, which are minutes-scale; this is watching
+#: for a car that has just been refused, and the driver is looking at a display.
+#: Nothing has measured how long somebody will look at a blank one before
+#: deciding nothing is coming, and two seconds is drawn from that rather than
+#: from any measurement of a lane.
+DEFAULT_LANE_POLL_SECONDS = 2.0
+
 #: The published default for how long the human has to answer before the driver
 #: is told nobody did.
 #:
@@ -1073,6 +1115,113 @@ class UserAgentSettings:
     reconnect_seconds: float = DEFAULT_RECONNECT_SECONDS
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class TicketSettings:
+    """`[tickets]`. Declared where the agent can offer or command anything.
+
+    **Required exactly when it is needed, and not otherwise.** An agent with no
+    display and no act token is round 5 exactly: it answers, it speaks the case,
+    it calls a person, and it opens nothing. Making a signing key mandatory
+    there would be a site generating a credential to satisfy a file rather than
+    to protect anything. The moment an intercom declares a display or a lane
+    declares an act token, this becomes required and startup says which.
+
+    **It has a `__repr__` of its own and that is not cosmetic.** The generated
+    one puts `signing_key` -- the key every ticket at this site is signed with --
+    into every log line, every traceback and every test failure that touches a
+    configuration. The intercom's dial secret has the same guard for the same
+    reason.
+    """
+
+    #: Read ONCE, at startup, out of the file that holds it. It is bytes here
+    #: rather than a string because that is what HMAC takes, and a value that
+    #: has to be encoded at every use is a value somebody encodes differently
+    #: once.
+    signing_key: bytes
+    #: Where the records go. DECLARED, no default: a default would put a site's
+    #: record of every arrival somewhere nobody chose, and it is the one place
+    #: on this box a `ticket_ref` is written down.
+    directory: Path
+    retention_days: int = DEFAULT_TICKET_RETENTION_DAYS
+    confirm_window_s: float = DEFAULT_CONFIRM_WINDOW_S
+    help_window_s: float = DEFAULT_HELP_WINDOW_S
+
+    def __repr__(self) -> str:
+        return (
+            f"TicketSettings(signing_key=<not shown>, directory={self.directory!r}, "
+            f"retention_days={self.retention_days!r}, "
+            f"confirm_window_s={self.confirm_window_s!r}, "
+            f"help_window_s={self.help_window_s!r})"
+        )
+
+
+def _tickets(raw: dict, relative_to: Path | None, needed_by: tuple[str, ...]):
+    """`[tickets]`, and every refusal it can earn.
+
+    `needed_by` is what makes this section required -- the displays and act
+    tokens already read out of the file -- so the refusal can say WHICH
+    declaration made it necessary rather than telling a site it needs a section
+    for reasons it has to work out.
+    """
+    if not raw:
+        if not needed_by:
+            return None
+        raise ConfigError(
+            "[tickets] is not declared, and this configuration needs it: "
+            + ", ".join(needed_by)
+            + ". A ticket is signed with a per-site key this agent alone holds, and there is "
+            "no default and there cannot be one -- a key this package chose would be a key "
+            "every installation shares. Declare [tickets] with signing_key_file and directory."
+        )
+    if "signing_key_file" not in raw:
+        raise ConfigError(
+            "[tickets] does not declare signing_key_file. It is the key every ticket at this "
+            "site is signed with, it is a FILE and never a value, and there is no default: a "
+            "key this package chose would be one every installation shares, so any of them "
+            "could mint a ticket for any other."
+        )
+    key = read_secret_file(
+        raw["signing_key_file"], "[tickets].signing_key_file", relative_to
+    )
+    if len(key) < MINIMUM_SIGNING_KEY:
+        raise ConfigError(
+            f"[tickets].signing_key_file: the key is {len(key)} characters and this build "
+            f"refuses anything shorter than {MINIMUM_SIGNING_KEY}. That floor is a choice this "
+            "package made and not a measurement -- what makes a key unguessable is that it was "
+            "generated at RANDOM, which nothing here can see. What it refuses is the one case "
+            "needing no measurement: a key short enough to have been typed."
+        )
+    directory = raw.get("directory")
+    if not isinstance(directory, str) or not directory.strip():
+        raise ConfigError(
+            "[tickets] does not declare directory. It is where this site's ticket records "
+            "are kept -- the standalone site has this and no platform -- and it is the one "
+            "place on this box a ticket_ref is written down, so there is no default: a "
+            "default would put a record of every arrival somewhere nobody chose."
+        )
+    retention = _positive_int(
+        raw.get("retention_days"), "[tickets].retention_days", DEFAULT_TICKET_RETENTION_DAYS
+    )
+    if not RETENTION_DAYS_BOUNDS[0] <= retention <= RETENTION_DAYS_BOUNDS[1]:
+        raise ConfigError(
+            f"[tickets].retention_days is {retention} and this build takes "
+            f"{RETENTION_DAYS_BOUNDS[0]} to {RETENTION_DAYS_BOUNDS[1]}. The same bounds as the "
+            "capture store's, for the same reason: a zero deletes what was just written and a "
+            "century is not a retention rule."
+        )
+    return TicketSettings(
+        signing_key=key.encode("utf-8"),
+        directory=_resolve(directory.strip(), relative_to),
+        retention_days=retention,
+        confirm_window_s=_positive(
+            raw.get("confirm_window_s"), "[tickets].confirm_window_s", DEFAULT_CONFIRM_WINDOW_S
+        ),
+        help_window_s=_positive(
+            raw.get("help_window_s"), "[tickets].help_window_s", DEFAULT_HELP_WINDOW_S
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class AgentConfig:
     """What the agent was told to do, after every refusal it makes.
@@ -1103,6 +1252,23 @@ class AgentConfig:
     decision_max_age_seconds: float = DEFAULT_DECISION_MAX_AGE_SECONDS
     line_timeout_seconds: float = DEFAULT_LINE_TIMEOUT_SECONDS
     name_audio_max_seconds: float = DEFAULT_NAME_AUDIO_MAX_SECONDS
+    #: `[tickets]`, or `None` where this agent can neither offer nor command
+    #: anything -- no display declared and no lane with an act token. That is
+    #: round 5 exactly and it is a supported configuration.
+    tickets: TicketSettings | None = None
+
+    @property
+    def can_vend_at(self) -> tuple[str, ...]:
+        """Which lanes this agent could command a vend at. DERIVED, never typed.
+
+        A lane is on this list when it has an act token AND this agent can mint
+        a ticket to name in the completion. `GET /v1/agent` publishes `can_vend`
+        per lane from here, so the surface cannot say `true` for a lane the code
+        would refuse to act at.
+        """
+        if self.tickets is None:
+            return ()
+        return tuple(lane.name for lane in self.lanes if lane.can_act)
 
     @classmethod
     def from_file(cls, path: str | Path) -> AgentConfig:
@@ -1158,6 +1324,13 @@ class AgentConfig:
                 raise ConfigError("[escalation].transfer_sip_uri must be a SIP URI")
             _refuse_sip_credential(transfer, "[escalation].transfer_sip_uri")
         authorisations = _authorisations(_table(raw, "authorisations"), transfer)
+        # WHAT MAKES `[tickets]` NECESSARY, named so the refusal can say which
+        # declaration did it. Derived from what has already been read out of the
+        # file rather than from a second pass over the raw table.
+        needed_by = tuple(
+            f"[lanes.{lane.name}] declares act_token_file" for lane in lanes if lane.can_act
+        )
+        tickets = _tickets(_table(raw, "tickets", required=False), relative_to, needed_by)
         return cls(
             agent_id=str(agent["id"]),
             site_id=str(agent["site_id"]),
@@ -1201,6 +1374,7 @@ class AgentConfig:
                 DEFAULT_LINE_TIMEOUT_SECONDS,
             ),
             name_audio_max_seconds=name_audio_max,
+            tickets=tickets,
         )
 
     def lane(self, name: str) -> Target | None:
@@ -1246,13 +1420,33 @@ def _agent_lanes(raw: dict, relative_to: Path | None) -> tuple[Target, ...]:
         token = None
         if "token_file" in table:
             token = read_secret_file(table["token_file"], f"[lanes.{name}].token_file", relative_to)
+        act_token = None
+        if "act_token_file" in table:
+            # THE CREDENTIAL THAT OPENS A BARRIER, and it is declared per lane
+            # rather than per agent: a site may run one intercom that can act
+            # and another that cannot, and an agent-wide act token would give
+            # every lane the strongest of them.
+            act_token = read_secret_file(
+                table["act_token_file"], f"[lanes.{name}].act_token_file", relative_to
+            )
         lanes.append(
             Target(
                 name=name,
                 kind=TargetKind.LANE,
                 url=url.rstrip("/"),
-                poll_seconds=DEFAULT_POLL_SECONDS,
+                # HOW OFTEN this agent follows that lane's events. An
+                # ASSUMPTION: nothing has measured how long a driver will look
+                # at a blank display before deciding nothing is coming. Two
+                # seconds is drawn from a barrier that has just refused
+                # somebody, and it is per lane because a site with ten of them
+                # and one agent is a site that may want it slower.
+                poll_seconds=_positive(
+                    table.get("poll_seconds"),
+                    f"[lanes.{name}].poll_seconds",
+                    DEFAULT_LANE_POLL_SECONDS,
+                ),
                 token=token,
+                act_token=act_token,
                 timeout_seconds=_positive(
                     table.get("timeout_seconds"),
                     f"[lanes.{name}].timeout_seconds",
