@@ -566,6 +566,17 @@ BREAKS = [
         "to": 'SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es")',
     },
     {
+        # F0.7. The round-5 merge gate's other open item. `_reconnect()` covers
+        # a socket lost inside a RUNNING process; `start()` covered nothing, so
+        # a restarted agent answered the next call with the previous process's
+        # legs still live -- and this user agent's bridge is site-wide.
+        "name": "a_restart_keeps_the_previous_processs_calls",
+        "why": "a new process leaves the old one's legs up, to be bridged into the next case",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._release_leftover_calls()",
+        "to": "        pass",
+    },
+    {
         # F0.6. The flake that turned `main` red on a tree CI had already
         # passed twice: a handler thread still inside `do_GET` when the
         # interpreter finalises, killed mid-write, exit 134 after every test
