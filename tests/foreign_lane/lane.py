@@ -74,6 +74,13 @@ MALFUNCTION_CODES = (
 #: same document.
 NEVER_ALARM_CODES = ("reference_not_recognised",)
 
+#: The contract version THIS STUB SPEAKS, copied from the document's header the
+#: same way its closed sets are. One constant rather than the four literals that
+#: used to sit in the four payloads: a stub that spoke version 2 on one route
+#: and version 1 on another is not a lane any consumer could be written against,
+#: and the version is the field every consumer checks first.
+CONTRACT_VERSION = 2
+
 #: And this vendor's OWN caveat for the one it publishes. Written here rather
 #: than copied from ours, because the contract says the caveat travels with the
 #: code on the wire -- so a foreign lane's is a foreign lane's, and a monitor
@@ -131,6 +138,11 @@ class ForeignLane:
             # either.
             "at": decided_at(),
             "read_ref": None,
+            # ROUND 6, and it is on the document's version-2 state payload: a
+            # decision is one case and one case is one vend, so a consumer has
+            # to be able to see that somebody has already completed this one.
+            # `False` is a lane whose last decision is still open.
+            "completed": False,
         }
         self.transit: dict = {"state": "none", "since": None}
         self.sources: dict[str, str] = {}
@@ -185,7 +197,7 @@ class ForeignLane:
             "lane_id": self.lane_id,
             "site_id": self.site_id,
             "direction": self.direction,
-            "contract_version": 1,
+            "contract_version": CONTRACT_VERSION,
             # No loops, so nothing to publish. Not `null` and not our five keys.
             "geometry": {},
             "event_window_depth": self.window,
@@ -203,7 +215,7 @@ class ForeignLane:
 
     def state(self) -> dict:
         payload = {
-            "contract_version": 1,
+            "contract_version": CONTRACT_VERSION,
             "decision": self.decision,
             "transit": self.transit,
         }
@@ -231,7 +243,7 @@ class ForeignLane:
         if self.drop_never_alarm:
             for entry in codes:
                 del entry["never_alarm"]
-        payload = {"contract_version": 1, "codes": codes}
+        payload = {"contract_version": CONTRACT_VERSION, "codes": codes}
         if _break("future_version"):
             payload["contract_version"] = 99
         return payload
@@ -255,7 +267,7 @@ class ForeignLane:
             served.append(item)
         reset = since > self._seq or (oldest is not None and since + 1 < oldest)
         return {
-            "contract_version": 1,
+            "contract_version": CONTRACT_VERSION,
             "cursor": self._seq,
             "reset": False if self.suppress_reset else reset,
             "dropped": self.dropped,

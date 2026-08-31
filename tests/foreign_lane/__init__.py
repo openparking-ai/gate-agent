@@ -18,6 +18,7 @@ published set has quietly drifted would prove something false.
 """
 
 from .lane import (
+    CONTRACT_VERSION,
     MALFUNCTION_CODES,
     NEVER_ALARM_CODES,
     VENDOR_CAVEAT,
@@ -28,6 +29,7 @@ from .lane import (
 )
 
 __all__ = [
+    "CONTRACT_VERSION",
     "MALFUNCTION_CODES",
     "NEVER_ALARM_CODES",
     "VENDOR_CAVEAT",
