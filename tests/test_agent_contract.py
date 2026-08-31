@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -104,25 +105,74 @@ def test_the_documents_contract_version_is_the_codes(busy):
         assert doc[name]["contract_version"] == CONTRACT_VERSION, name
 
 
-def test_the_document_says_can_vend_is_false_and_so_does_the_code(busy):
-    """The one field this round exists to keep false, checked in both places.
+def test_can_vend_is_derived_per_lane_from_what_this_agent_actually_holds(busy):
+    """The field whose MEANING this round inverts, and it is derived both times.
 
-    It is DERIVED from the act table rather than written down, so the day
-    something in this package can act, this answer changes with it.
+    For two rounds it was `bool(ACTS)` and the answer was `false` everywhere,
+    because nothing in this package could act. That question is now true
+    everywhere and answers nothing about a SITE: an agent with an act table and
+    no act token opens nothing.
+
+    So it is per lane, and it is `true` only where this agent holds BOTH an act
+    token for that lane and a key to sign a ticket with -- a completion names an
+    identity, and there has to be one to name.
+
+    **It is about the AGENT and not about the lane.** The lane's own `can_vend`
+    is on the lane's surface; republishing it here would be this agent making a
+    claim about another machine out of a read it may not have made since that
+    machine restarted.
     """
-    assert doc_payloads()["agent"]["can_vend"] is False
-    assert busy.describe().to_dict()["can_vend"] is False
-    assert busy.describe().can_vend is False
-    # And the control: the property really does follow the table, so `False` is
-    # a measurement rather than a constant.
-    from gate_agent import contract
+    # `busy` declares a lane and no act token, so there is a lane to answer
+    # about and the answer is `false` -- which is the case that matters: an
+    # empty list would make the summary `false` for a reason that has nothing to
+    # do with what this agent holds.
+    described = busy.describe()
+    assert [one.name for one in described.lanes] == ["entry"]
+    assert described.lanes[0].can_vend is False
+    assert described.can_vend is False
+    assert described.to_dict()["can_vend"] is False
+    assert described.to_dict()["lanes"] == [{"name": "entry", "can_vend": False}]
+    # And the DOCUMENT shows the other side of it, so a reader sees what a lane
+    # with an act token looks like rather than only the empty case.
+    published = doc_payloads()["agent"]
+    assert published["can_vend"] is True
+    assert published["lanes"] == [{"name": "entry", "can_vend": True}]
 
-    contract.ACTS[contract.Authorisation.OPEN_NOW] = "planted"
-    try:
-        assert busy.describe().can_vend is True
-    finally:
-        contract.ACTS.clear()
-    assert busy.describe().can_vend is False
+
+def test_can_vend_needs_the_act_token_AND_the_key_and_neither_alone(tmp_path):
+    """Both halves, each varied on its own. Three of the four combinations are
+    `false`, and a check that only tried the two ends would pass on a field that
+    read either one of them."""
+    from conftest import agent_config_for, agent_for
+    from fake_ua import FakeUa
+    from gate_agent.config import Target, TicketSettings
+    from gate_agent.contract import TargetKind
+
+    def described(act_token, tickets):
+        base = agent_config_for(tmp_path, lane_url="http://127.0.0.1:1")
+        config = replace(
+            base,
+            lanes=(
+                Target(
+                    name="entry",
+                    kind=TargetKind.LANE,
+                    url="http://127.0.0.1:1",
+                    poll_seconds=2.0,
+                    act_token=act_token,
+                ),
+            ),
+            tickets=tickets,
+        )
+        return agent_for(config, FakeUa()).describe()
+
+    settings = TicketSettings(
+        signing_key=b"a-key-long-enough-for-the-floor-0000",
+        directory=tmp_path / "tickets",
+    )
+    assert described("a-token", settings).lanes[0].can_vend is True
+    assert described(None, settings).lanes[0].can_vend is False
+    assert described("a-token", None).lanes[0].can_vend is False
+    assert described(None, None).lanes[0].can_vend is False
 
 
 def test_every_agent_code_ships_on_every_response(busy):

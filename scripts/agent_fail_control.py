@@ -47,13 +47,13 @@ BREAKS = [
         "to": "        self.ua.vend()\n"
               "        self._say(session, UaLeg.DRIVER, f\"authorisation.{value.value}\")",
     },
-    {
-        "name": "an_act_exists",
-        "why": "something in this package can act, so `can_vend` is no longer false",
-        "file": "src/gate_agent/contract.py",
-        "from": "ACTS: dict[Authorisation, str] = {}",
-        "to": "ACTS: dict[Authorisation, str] = {Authorisation.OPEN_NOW: \"planted\"}",
-    },
+    # `an_act_exists` STOOD HERE and is retired, not lost. It planted an entry
+    # in an empty `ACTS` and required `can_vend` to stop being false -- which
+    # measured that the table was empty, and round 7 fills it by design. What it
+    # was really protecting is that `can_vend` is DERIVED and not written down;
+    # `can_vend_ignores_the_act_token` below is that property under the new
+    # mechanism, and it is a stronger question: not "can anything act" but "does
+    # this agent hold what acting at THIS lane needs".
     {
         "name": "the_socket_module_can_see_a_lane",
         "why": "the module allowed to open a socket gains the target client",
@@ -149,9 +149,8 @@ BREAKS = [
         "name": "the_dial_secret_is_published",
         "why": "the account -- which is the secret -- goes onto the read surface",
         "file": "src/gate_agent/agent.py",
-        "from": "                IntercomDescription(sip_uri=intercom.sip_uri, lane=intercom.lane)",
-        "to": "                IntercomDescription(sip_uri=intercom.account_user, "
-              "lane=intercom.lane)",
+        "from": "                    sip_uri=intercom.sip_uri,",
+        "to": "                    sip_uri=intercom.account_user,",
     },
     {
         "name": "the_intercom_repr_shows_the_secret",
@@ -243,11 +242,18 @@ BREAKS = [
         "to": "            if True:",
     },
     {
+        # It used to anchor on `if value in CANNOT_ACT:`, a typed tuple that no
+        # longer exists: whether an authorisation CAN act is now a question
+        # about the lane rather than about the authorisation. The property is
+        # the same one and this is the half where the sentence must be SAID;
+        # `cannot_open_is_spoken_where_something_can_act` is the half where it
+        # must not be.
         "name": "the_person_is_never_told_it_cannot_open",
         "why": "`open_now` is recorded and the person is left believing a barrier moved",
         "file": "src/gate_agent/agent.py",
-        "from": "        if value in CANNOT_ACT:",
-        "to": "        if False:",
+        "from": '            self._say(session, UaLeg.OPERATOR, "operator.cannot_open",\n'
+                "                      operator=True)",
+        "to": "            pass",
     },
     {
         "name": "the_bridge_comes_first",
@@ -563,6 +569,121 @@ BREAKS = [
         "file": "src/gate_agent/lines.py",
         "from": 'SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es-ES")',
         "to": 'SHIPPED_LANGUAGES: tuple[str, ...] = ("en", "es")',
+    },
+    {
+        # F3-F5. The ticket, the press and the vend. Every break here is one
+        # that fails in the REASSURING direction: a code on a screen for a car
+        # nobody measured, a second vend for one arrival, a barrier told to open
+        # on a decision that was not the one asked about.
+        "name": "an_unmeasured_presence_gets_a_ticket",
+        "why": "`None` is read as presence, so a code goes up for a car nobody measured",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if reading.presence is not True:",
+        "to": "        if reading.presence is False:",
+    },
+    {
+        "name": "presence_is_read_as_truthiness",
+        "why": "a lane publishing the string `false` is read as a vehicle being there",
+        "file": "src/gate_agent/agent.py",
+        "from": "    return value if isinstance(value, bool) else None",
+        "to": "    return bool(value) if value is not None else None",
+    },
+    {
+        "name": "any_case_gets_a_ticket",
+        "why": "a refused vehicle and an empty lane are offered a code as well",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if case not in TICKET_CASES:",
+        "to": "        if False:",
+    },
+    {
+        "name": "a_new_decision_leaves_the_old_ticket_up",
+        "why": "a code stays on a screen for the car in front of the one at the barrier",
+        "file": "src/gate_agent/agent.py",
+        "from": '        self._void_at(lane, "lane_decided_again")\n'
+                "        if not self._offers_a_ticket_at(lane):",
+        "to": "        if not self._offers_a_ticket_at(lane):",
+    },
+    {
+        "name": "a_ticket_never_expires",
+        "why": "a code from an hour ago is still confirmable by whoever walks up next",
+        "file": "src/gate_agent/agent.py",
+        "from": "            if now >= pending.expires:",
+        "to": "            if False:",
+    },
+    {
+        "name": "a_first_read_acts_on_the_whole_window",
+        "why": "a restarted agent puts up a code for a car that has already gone",
+        "file": "src/gate_agent/agent.py",
+        "from": "            self._cursors[lane.name] = cursor\n"
+                '            log.info("following lane %s from cursor %d", lane.name, cursor)\n'
+                "            return",
+        "to": "            self._cursors[lane.name] = 0",
+    },
+    {
+        "name": "the_help_window_is_ignored",
+        "why": "a second press is a second vend, and one arrival becomes two stays",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if confirmed_at is not None and self._clock() - confirmed_at <= window:",
+        "to": "        if False:",
+    },
+    {
+        "name": "decision_at_is_invented",
+        "why": "the vend names this process's clock instead of the decision it completes",
+        "file": "src/gate_agent/agent.py",
+        "from": "                decision_at=pending.decision_at,",
+        "to": "                decision_at=self._now(),",
+    },
+    {
+        "name": "the_idempotency_key_is_fresh_each_time",
+        "why": "a retry vends a second time, which is the commonest idempotency bug there is",
+        "file": "src/gate_agent/agent.py",
+        "from": "                idempotency_key=pending.ticket.ticket_id,",
+        "to": "                idempotency_key=__import__('secrets')\n"
+              "                .token_bytes(16).hex().upper(),",
+    },
+    {
+        "name": "a_vend_is_commanded_without_an_act_token",
+        "why": "a read-only lane is asked to open, and the read token is offered as authority",
+        "file": "src/gate_agent/act.py",
+        "from": "        if not act_token:",
+        "to": "        if False:",
+    },
+    {
+        "name": "the_driver_is_told_the_barrier_is_open",
+        "why": "an unmeasured claim about a boom nothing in this estate has watched move",
+        "file": "src/gate_agent/lines.py",
+        "from": "The barrier has been asked to open. Please drive forward when it does.",
+        "to": "The barrier is now open. Please drive forward.",
+    },
+    {
+        "name": "a_refusal_code_reaches_nobody",
+        "why": "the person is told it was refused and not told which refusal it was",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._to_a_human(session, (refusal,) if refusal else ())",
+        "to": "        self._to_a_human(session, ())",
+    },
+    {
+        "name": "cannot_open_is_spoken_where_something_can_act",
+        "why": "a person is told the system cannot open a barrier it is about to open",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if lane is None or pending is None or lane not in self._acts:",
+        "to": "        if True:",
+    },
+    {
+        "name": "the_ticket_ref_goes_on_an_event",
+        "why": "the identifier of a stay reaches a surface outside the retention rule",
+        "file": "src/gate_agent/agent.py",
+        "from": "            ticket_id=ticket.ticket_id,\n        )\n\n    def _show",
+        "to": "            ticket_id=ticket.ticket_id,\n"
+              "            keyed=ticket.ticket_ref,\n        )\n\n    def _show",
+    },
+    {
+        "name": "can_vend_ignores_the_act_token",
+        "why": "the surface says a lane can be vended at when this agent holds nothing",
+        "file": "src/gate_agent/agent.py",
+        "from": "                    can_vend=lane.name in self._acts\n"
+                "                    and self.config.tickets is not None,",
+        "to": "                    can_vend=True,",
     },
     {
         # F2. The display and the font.

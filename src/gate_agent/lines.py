@@ -33,7 +33,7 @@ language is a driver told something in a language nobody chose for them.
 
 from __future__ import annotations
 
-from .contract import AgentCase, Authorisation
+from .contract import VEND_REFUSALS, AgentCase, Authorisation
 
 #: The lines the DRIVER hears, in every declared driver language.
 #: Derived: one per case, one per authorisation, plus the four the dialogue
@@ -48,6 +48,13 @@ DRIVER_LINES: tuple[str, ...] = (
     #: instruction" is not what happened and a driver told it goes on holding.
     "driver.operator_hung_up",
     "driver.hold_reprompt",
+    #: What a driver is told once their press has been taken as a confirmation,
+    #: and what the lane then said. **`commanded`, never `opened`**: the boom is
+    #: `no_source` on the lane's own health surface, so nothing in this estate
+    #: has measured a barrier moving.
+    "ticket.confirmed",
+    "ticket.vend_commanded",
+    "ticket.vend_refused",
 )
 
 #: The lines the OPERATOR hears, in the operator language only.
@@ -57,6 +64,13 @@ OPERATOR_LINES: tuple[str, ...] = (
     "operator.menu_repeat",
     "operator.menu_callback_number",
     "operator.cannot_open",
+    "operator.vend_commanded",
+    #: Why this call was already in progress when the person picked up.
+    "operator.help_after_ticket",
+    #: ONE SENTENCE PER PUBLISHED REFUSAL CODE, derived from the set rather than
+    #: listed: a code the lane can answer and this build has no words for would
+    #: be a person told "it was refused" and not told what to do about it.
+    *(f"operator.vend_refused.{code}" for code in VEND_REFUSALS),
 )
 
 LINES: tuple[str, ...] = DRIVER_LINES + OPERATOR_LINES
@@ -312,11 +326,78 @@ TEXT: dict[str, dict[str, str]] = {
         "en": "Key the call-back number, then hash.",
         "es-ES": "Marque el número de devolución de llamada y luego almohadilla.",
     },
-    # Played to the HUMAN, at the moment they key an authorisation this version
-    # can only record. It is one fixed sentence and it is not optional.
+    # Played to the HUMAN when nothing at this door can act: no act token for
+    # its lane, or a standalone intercom with no relay. It is one fixed sentence
+    # and it is not optional -- a person who believes a barrier moved when it did
+    # not is worse off than one who was never called.
     "operator.cannot_open": {
-        "en": "Recorded. This version cannot operate the barrier.",
-        "es-ES": "Registrado. Esta versión no puede accionar la barrera.",
+        "en": "Recorded. This entrance is not set up for this system to open it.",
+        "es-ES": "Registrado. Esta entrada no está configurada para que este sistema la abra.",
+    },
+    # --- the ticket, to the driver ----------------------------------------
+    # NEVER "the barrier is opening". The lane commands its relay and nothing in
+    # this estate has measured a boom moving: `boom_did_not_rise` is `no_source`
+    # on the lane's own health surface.
+    "ticket.confirmed": {
+        "en": "Thank you. I have your ticket.",
+        "es-ES": "Gracias. Tengo su ticket.",
+    },
+    "ticket.vend_commanded": {
+        "en": "The barrier has been asked to open. Please drive forward when it does.",
+        "es-ES": "Se ha pedido que se abra la barrera. Avance cuando lo haga.",
+    },
+    "ticket.vend_refused": {
+        "en": "The entrance did not accept that. I am connecting you to a person.",
+        "es-ES": "La entrada no lo ha aceptado. Le paso con una persona.",
+    },
+    # --- the ticket, to the operator --------------------------------------
+    "operator.vend_commanded": {
+        "en": "The barrier has been asked to open.",
+        "es-ES": "Se ha pedido que se abra la barrera.",
+    },
+    "operator.help_after_ticket": {
+        "en": "This driver was given a ticket a moment ago and has called back.",
+        "es-ES": "A este conductor se le ha dado un ticket hace un momento y ha vuelto a "
+              "llamar.",
+    },
+    # ONE PER PUBLISHED REFUSAL CODE. Each says what the lane refused and what
+    # the person can do about it, because "it was refused" is a sentence that
+    # leaves somebody standing at a barrier with nothing to try.
+    "operator.vend_refused.no_vehicle": {
+        "en": "The entrance says there is no vehicle on the loop.",
+        "es-ES": "La entrada dice que no hay ningún vehículo en el lazo.",
+    },
+    "operator.vend_refused.malfunction_active": {
+        "en": "The entrance has a fault that stops it opening safely.",
+        "es-ES": "La entrada tiene una avería que le impide abrir con seguridad.",
+    },
+    "operator.vend_refused.geometry_incomplete": {
+        "en": "Only one of the entrance loops is covered.",
+        "es-ES": "Solo uno de los lazos de la entrada está cubierto.",
+    },
+    "operator.vend_refused.decision_in_future": {
+        "en": "The entrance's clock disagrees with this system's.",
+        "es-ES": "El reloj de la entrada no coincide con el de este sistema.",
+    },
+    "operator.vend_refused.decision_stale": {
+        "en": "The entrance says this is too old to act on.",
+        "es-ES": "La entrada dice que esto es demasiado antiguo para actuar.",
+    },
+    "operator.vend_refused.decision_mismatch": {
+        "en": "The entrance has moved on to another vehicle.",
+        "es-ES": "La entrada ya ha pasado a otro vehículo.",
+    },
+    "operator.vend_refused.already_completed": {
+        "en": "This entry has already been opened once.",
+        "es-ES": "Esta entrada ya se ha abierto una vez.",
+    },
+    "operator.vend_refused.not_completable": {
+        "en": "The entrance has nothing outstanding to open for.",
+        "es-ES": "La entrada no tiene nada pendiente que abrir.",
+    },
+    "operator.vend_refused.busy": {
+        "en": "The entrance is already opening for somebody.",
+        "es-ES": "La entrada ya se está abriendo para alguien.",
     },
 }
 

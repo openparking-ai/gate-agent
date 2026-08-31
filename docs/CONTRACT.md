@@ -410,7 +410,11 @@ without adding it here.
     "human_unreachable",
     "audio_missing",
     "audio_playback_failed",
-    "lane_unavailable"
+    "lane_unavailable",
+    "display_unavailable",
+    "lane_act_refused",
+    "relay_unreachable",
+    "relay_refused_us"
   ],
   "agent_cases": [
     "malfunction_active",
@@ -455,7 +459,13 @@ without adding it here.
     "call_refused_busy",
     "case_not_spoken",
     "call_ended",
-    "leftover_calls_released"
+    "leftover_calls_released",
+    "ticket_issued",
+    "ticket_confirmed",
+    "ticket_voided",
+    "vend_commanded",
+    "vend_refused",
+    "relay_pulsed"
   ],
   "shipped_languages": [
     "en",
@@ -1768,11 +1778,19 @@ assumptions** — nothing here measures how long a person takes to reach a phone
   "agent_id": "agent-1",
   "site_id": "site-1",
   "contract_version": 1,
-  "can_vend": false,
+  "can_vend": true,
   "intercoms": [
     {
       "sip_uri": "sip:door1@10.0.0.9",
-      "lane": "entry"
+      "lane": "entry",
+      "has_display": true,
+      "has_relay": false
+    }
+  ],
+  "lanes": [
+    {
+      "name": "entry",
+      "can_vend": true
     }
   ],
   "user_agent": {
@@ -1888,7 +1906,14 @@ cannot be helped.
       "at": "2026-08-30T14:00:00+00:00",
       "keyed": null,
       "caller_stated_identity": "sip:door1@10.0.0.9",
-      "released": null
+      "released": null,
+      "ticket_id": null,
+      "authorised_by": null,
+      "code": null,
+      "reason": null,
+      "lane_event_cursor": null,
+      "relay_port": null,
+      "relay_ms": null
     }
   ]
 }

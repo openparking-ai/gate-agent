@@ -21,6 +21,7 @@ Three separate questions, and they are different:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -366,3 +367,70 @@ def test_every_case_is_reachable_from_some_reading():
     assert reached == set(AgentCase), sorted(
         one.value for one in set(AgentCase) - reached
     )
+
+
+# ---------------------------------------------------------------------------
+# The two sets this package COPIES from the lane contract
+# ---------------------------------------------------------------------------
+
+
+def test_the_vend_authorities_are_the_lanes_own_in_both_directions():
+    """`ACTS` names the lane's `VendAuthority` values, and this holds the copy.
+
+    The copy exists because it has to: this package is a CONSUMER of that
+    contract and may not import it, so an authority is a string here. What that
+    would cost if it drifted is a vend the lane answers `400` at the moment a
+    driver is waiting, so the copy is compared against the enum out of the
+    INSTALLED package, both ways.
+    """
+    from lane_controller.contract import VendAuthority
+
+    from gate_agent.contract import ACTS
+
+    assert set(ACTS.values()) == {
+        VendAuthority.HUMAN_OPEN_NOW.value,
+        VendAuthority.HUMAN_OPEN_AND_FLAG.value,
+    }
+    # `display_code_confirmed` is the third and it is NOT in `ACTS`: it is not
+    # something a human keys, it is what a PRESS means. It is used by name in
+    # `agent._confirm_ticket`, and this is where that name is held to the enum.
+    assert VendAuthority.DISPLAY_CODE_CONFIRMED.value == "display_code_confirmed"
+    import gate_agent.agent as agent_module
+
+    source = Path(agent_module.__file__).read_text(encoding="utf-8")
+    assert '"display_code_confirmed"' in source
+    # And every authority the lane publishes is one this agent can produce, so a
+    # fourth added there arrives here as a red test rather than as silence.
+    assert set(ACTS.values()) | {VendAuthority.DISPLAY_CODE_CONFIRMED.value} == {
+        one.value for one in VendAuthority
+    }
+
+
+def test_the_vend_refusal_codes_are_the_lanes_own_in_both_directions():
+    """One operator sentence per refusal code, and the set is the lane's.
+
+    A code the lane can answer and this build has no words for is a person told
+    "it was refused" and not told what to do about it. A sentence for a code
+    that does not exist is a file nobody will ever hear.
+    """
+    from lane_controller.contract import VendRefusal
+
+    from gate_agent.contract import VEND_REFUSALS
+    from gate_agent.lines import OPERATOR_LINES, TEXT
+
+    assert set(VEND_REFUSALS) == {one.value for one in VendRefusal}, {
+        "in the lane and not here": sorted(
+            {one.value for one in VendRefusal} - set(VEND_REFUSALS)
+        ),
+        "here and not in the lane": sorted(
+            set(VEND_REFUSALS) - {one.value for one in VendRefusal}
+        ),
+    }
+    # AND ONE SENTENCE EACH, keyed one-to-one, generated from the same list on
+    # both sides -- a missing key and an orphan key each fail.
+    expected = {f"operator.vend_refused.{code}" for code in VEND_REFUSALS}
+    published = {line for line in OPERATOR_LINES if line.startswith("operator.vend_refused.")}
+    assert published == expected
+    for line in expected:
+        assert TEXT[line]["en"].strip(), line
+        assert TEXT[line]["es-ES"].strip(), line
