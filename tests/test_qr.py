@@ -107,14 +107,24 @@ def longest_at() -> dict[int, int]:
             out[qr.choose_version("A" * length)[0]] = length
         except qr.QrTooLong:
             return out
-    raise AssertionError(
-        f"the encoder accepted a payload of {LENGTH_CEILING} characters. It refuses past "
-        f"version {qr.MAX_VERSION}, so either that bound moved or `choose_version` stopped "
-        "raising -- and this helper must not spin while somebody finds out which."
-    )
+    # STOPS rather than raises, and that is a fail-control fix (Z16.1, 2026-09-01).
+    # This runs at IMPORT, so an assertion here is a COLLECTION ERROR -- and
+    # `scripts/_control.py` correctly refuses to read an error as a guarantee
+    # going red, because an error is a suite that could not run. The break
+    # `a_payload_too_long_is_truncated` reddened nothing for exactly that
+    # reason: it made this helper raise, pytest reported `1 errors, 0 passed`,
+    # and the control was reported as NOT A CONTROL. The bound is asserted by
+    # `test_choose_version_refuses_a_payload_past_the_largest_symbol` below,
+    # where a failure is a FAILURE.
+    return out
 
 
 LONGEST = longest_at()
+
+#: Whether `longest_at()` walked all the way to its ceiling without the encoder
+#: ever refusing -- which is what "the encoder stopped raising" looks like from
+#: here. A VALUE, so the test below can assert on it instead of the import.
+CEILING_REACHED = max(LONGEST.values(), default=0) >= LENGTH_CEILING - 1
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +244,24 @@ def test_no_version_is_supported_without_all_three_of_its_tables():
     assert set(qr.EC_M_BLOCKS) == set(range(1, qr.MAX_VERSION + 1))
     assert set(qr.ALIGNMENT_CENTRES) == set(range(1, qr.MAX_VERSION + 1))
     assert set(qr.VERSION_INFO) == set(range(7, qr.MAX_VERSION + 1))
+
+
+def test_choose_version_refuses_a_payload_past_the_largest_symbol():
+    """The bound `longest_at()` rests on, asserted where a failure is a FAILURE.
+
+    `longest_at()` runs at import and used to raise here; pytest reports that as
+    a collection ERROR, which is not evidence about a guarantee (SETTLED 6, and
+    `scripts/_control.py`'s own rule). The assertion lives in a test instead, so
+    the break that makes `choose_version` return `MAX_VERSION` rather than
+    refusing goes RED rather than un-runnable.
+    """
+    assert not CEILING_REACHED, (
+        f"the encoder accepted a payload of {LENGTH_CEILING - 1} characters. It must refuse "
+        f"past version {qr.MAX_VERSION}, so either that bound moved or `choose_version` "
+        "stopped raising."
+    )
+    with pytest.raises(qr.QrTooLong):
+        qr.choose_version("A" * (LONGEST[qr.MAX_VERSION] + 1))
 
 
 def test_a_payload_past_the_largest_symbol_is_refused_with_its_length():

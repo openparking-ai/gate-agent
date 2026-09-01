@@ -610,10 +610,11 @@ BREAKS = [
         "name": "the_relay_credential_is_in_the_repr",
         "why": "a password that pulses a barrier reaches every traceback and log line",
         "file": "src/gate_agent/relay.py",
-        "from": '            f"pulse_ms={self.pulse_ms!r}, username={self.username!r}, "\n'
-                '            "password=<not shown>)"',
-        "to": '            f"pulse_ms={self.pulse_ms!r}, username={self.username!r}, "\n'
-              '            f"password={self.password!r})"',
+        # RE-ANCHORED 2026-09-01 (Z16.1): Z3 added `answer_margin_s` to this
+        # repr, which moved the password onto a line of its own. The break then
+        # applied to nothing and the control measured nothing.
+        "from": '            f"username={self.username!r}, password=<not shown>)"',
+        "to": '            f"username={self.username!r}, password={self.password!r})"',
     },
     {
         # F3-F5. The ticket, the press and the vend. Every break here is one
@@ -622,9 +623,14 @@ BREAKS = [
         # on a decision that was not the one asked about.
         "name": "an_unmeasured_presence_gets_a_ticket",
         "why": "`None` is read as presence, so a code goes up for a car nobody measured",
-        "file": "src/gate_agent/agent.py",
-        "from": "        if reading.presence is not True:",
-        "to": "        if reading.presence is False:",
+        # RE-ANCHORED 2026-09-01 (Z16.1). Z1 moved the offer decision out of
+        # `agent.py` into `cases.offers_ticket`, so this moves with it -- FILE
+        # included. **This is a fraud-boundary control** (SETTLED 3f: an
+        # unmeasured presence must never cause a transaction), so it is
+        # re-anchored rather than retired, whatever it costs.
+        "file": "src/gate_agent/cases.py",
+        "from": "        and reading.presence is True\n    )",
+        "to": "        and reading.presence is not False\n    )",
     },
     {
         "name": "presence_is_read_as_truthiness",
@@ -636,17 +642,21 @@ BREAKS = [
     {
         "name": "any_case_gets_a_ticket",
         "why": "a refused vehicle and an empty lane are offered a code as well",
-        "file": "src/gate_agent/agent.py",
-        "from": "        if case not in TICKET_CASES:",
-        "to": "        if False:",
+        # RE-ANCHORED 2026-09-01 (Z16.1): moved into `cases.offers_ticket` by Z1.
+        "file": "src/gate_agent/cases.py",
+        "from": "        decision_case(reading, now, max_age_seconds) in TICKET_CASES\n",
+        "to": "        True\n",
     },
     {
         "name": "a_new_decision_leaves_the_old_ticket_up",
         "why": "a code stays on a screen for the car in front of the one at the barrier",
         "file": "src/gate_agent/agent.py",
+        # RE-ANCHORED 2026-09-01 (Z16.1): Z6 inserted `_end_help_at` between
+        # the void and the offer check, so the old two-line anchor stopped
+        # matching. Anchored on the comment that follows instead.
         "from": '        self._void_at(lane, "lane_decided_again")\n'
-                "        if not self._offers_a_ticket_at(lane):",
-        "to": "        if not self._offers_a_ticket_at(lane):",
+                "        # AND IT ENDS THE HELP WINDOW.",
+        "to": "        # AND IT ENDS THE HELP WINDOW.",
     },
     {
         "name": "a_ticket_never_expires",
@@ -668,8 +678,15 @@ BREAKS = [
         "name": "the_help_window_is_ignored",
         "why": "a second press is a second vend, and one arrival becomes two stays",
         "file": "src/gate_agent/agent.py",
-        "from": "        if confirmed_at is not None and self._clock() - confirmed_at <= window:",
-        "to": "        if False:",
+        # RE-ANCHORED 2026-09-01 (Z16.1): Z6 replaced `_confirmed_at` and
+        # `_help_lines` with one `Help` record per intercom, so the clock
+        # comparison this named no longer exists. `_help_at` is where the
+        # window is now recognised; a `None` from it is "this is not help",
+        # which is a second vend.
+        "from": "        help_window = self._help.get(intercom.sip_uri)\n"
+                "        if help_window is None:\n            return None",
+        "to": "        help_window = self._help.get(intercom.sip_uri)\n"
+              "        if True:\n            return None",
     },
     {
         "name": "decision_at_is_invented",
@@ -704,8 +721,12 @@ BREAKS = [
         "name": "a_refusal_code_reaches_nobody",
         "why": "the person is told it was refused and not told which refusal it was",
         "file": "src/gate_agent/agent.py",
-        "from": "        self._to_a_human(session, (refusal,) if refusal else ())",
-        "to": "        self._to_a_human(session, ())",
+        # RE-ANCHORED 2026-09-01 (Z16.1): Z5 made the briefing ALWAYS carry
+        # `operator.ticket_refused` and then the code's sentence or
+        # `operator.vend_refused.unknown`, so the conditional tuple this named
+        # is gone. Emptying the pair is the same reassuring failure.
+        "from": '        lines = ("operator.ticket_refused", refusal)',
+        "to": "        lines = ()",
     },
     {
         "name": "cannot_open_is_spoken_where_something_can_act",
@@ -718,9 +739,13 @@ BREAKS = [
         "name": "the_ticket_ref_goes_on_an_event",
         "why": "the identifier of a stay reaches a surface outside the retention rule",
         "file": "src/gate_agent/agent.py",
-        "from": "            ticket_id=ticket.ticket_id,\n        )\n\n    def _show",
+        # RE-ANCHORED 2026-09-01 (Z16.1): Z2 added `_call_being_spoken_at`
+        # after this emission, so the trailing `def _show` stopped matching.
+        "from": "            ticket_id=ticket.ticket_id,\n        )\n\n"
+                "    def _call_being_spoken_at",
         "to": "            ticket_id=ticket.ticket_id,\n"
-              "            keyed=ticket.ticket_ref,\n        )\n\n    def _show",
+              "            keyed=ticket.ticket_ref,\n        )\n\n"
+              "    def _call_being_spoken_at",
     },
     {
         "name": "can_vend_ignores_the_act_token",
@@ -763,8 +788,31 @@ BREAKS = [
         "name": "a_character_with_no_glyph_is_left_blank",
         "why": "a hole in the frame instead of a startup refusal naming the string",
         "file": "src/gate_agent/font.py",
-        "from": "    if character not in GLYPHS:\n        raise UndrawableCharacter(character)",
-        "to": '    if character not in GLYPHS:\n        return ("." * GLYPH_WIDTH,) * CELL_HEIGHT',
+        # RE-ANCHORED 2026-09-01 (Z16.1), and this one was never a control at
+        # all rather than having drifted. It broke `cell`'s raise -- which
+        # `render` never reaches, because `missing()` is consulted first and
+        # raises with the naming message. Breaking a SHADOWED guard changes
+        # nothing observable, so the suite stayed green and the break reported
+        # PASSED WHEN. Anchored on `render`'s own guard, which is what turns an
+        # undrawable character into a refusal instead of a hole.
+        "from": "    absent = missing(text)\n"
+                "    if absent:\n"
+                "        raise UndrawableCharacter(\n"
+                "            f\"this font has no glyph for "
+                "{', '.join(repr(one) for one in absent)}\"\n"
+                "        )\n"
+                "    rows = [[0] * width_of(text) for _ in range(CELL_HEIGHT)]\n"
+                "    for index, character in enumerate(text):\n"
+                "        left = index * (GLYPH_WIDTH + TRACKING)\n"
+                "        for row, line in enumerate(cell(character)):",
+        "to": "    rows = [[0] * width_of(text) for _ in range(CELL_HEIGHT)]\n"
+              "    for index, character in enumerate(text):\n"
+              "        left = index * (GLYPH_WIDTH + TRACKING)\n"
+              "        for row, line in enumerate(\n"
+              "            cell(character)\n"
+              "            if character in DRAWABLE\n"
+              "            else (\".\" * GLYPH_WIDTH,) * CELL_HEIGHT\n"
+              "        ):",
     },
     {
         "name": "a_display_language_with_no_words_is_accepted",
@@ -920,6 +968,23 @@ BREAKS = [
         "file": "tests/serving.py",
         "from": "    server.daemon_threads = False",
         "to": "    server.daemon_threads = True",
+    },
+    {
+        # Z16.2, 2026-09-01. The banner said "OPENS NOTHING: no vend route here"
+        # at every start of the round that GAVE this package a vend route, and
+        # nothing was measuring it because a fixed sentence cannot go stale in a
+        # way a test can see. The line is derived now; this is what proves it is
+        # still derived.
+        "name": "the_startup_line_is_written_down_again",
+        "why": "every operator is told at every start that this process opens nothing, "
+               "while it holds an act token for a lane",
+        "file": "src/gate_agent/cli.py",
+        "from": "    lanes = sorted(lane.name for lane in config.lanes if lane.can_act)",
+        "to": "    return (\n"
+              "        \"  OPENS NOTHING: no vend route here, none at any lane on this \"\n"
+              "        \"contract version\"\n"
+              "    )\n"
+              "    lanes = sorted(lane.name for lane in config.lanes if lane.can_act)",
     },
     {
         "name": "the_text_has_no_provenance",

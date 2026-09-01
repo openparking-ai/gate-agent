@@ -1,9 +1,15 @@
 # The gate agent. Answers the intercom, says what happened, calls a person.
 #
-# IT OPENS NOTHING. Every authorisation below is a RECORD of what a person said.
-# There is no vend route in this package and none on the lane contract this build
-# reads, so `open_now` ends in an event, a message to the driver, and one fixed
-# sentence to the person who keyed it saying this version cannot move a barrier.
+# THIS BUILD CAN ASK A BARRIER TO MOVE, and what it can ask is decided HERE.
+# A lane with an `act_token_file` can be vended at; an intercom with a [relay]
+# table can be pulsed; a site that declares neither still opens nothing. The
+# process prints which it holds at every start, derived from this file rather
+# than written down, so the banner cannot say the opposite of the truth -- which
+# is what it did for the whole of the round that added the vend route.
+#
+# What OPENS a barrier is never a button press on its own: the LANE decides and
+# applies its own refusals, and standalone it is a human's word. A ticket is
+# offered against a decision, shown on a display, and confirmed by a press.
 #
 # Almost nothing here has a default, and the ones that do are published in
 # `docs/CONTRACT.md`. A defaulted intercom answers a door nobody declared; a
@@ -104,6 +110,13 @@ operator_aor = "sip:agent-operator@10.0.0.20"
 lane = "entry"
 name_audio = "/opt/openparking/audio/site/door1.wav"
 dial_secret_file = "/etc/openparking/gate-agent/door1.dial-secret"
+# DECLARED, no default. The display this door's ticket is shown on, named in
+# [displays] below. An intercom without one offers no ticket at all and every
+# case at it goes to a person. **One display per lane**: two intercoms that both
+# declare a display and both name one lane are refused at startup, because one
+# code on two screens means whoever photographs the second holds the first
+# driver's ticket.
+display = "front"
 
 # A standalone intercom: no lane, and every call is a human case from the first
 # second. NOT a degraded mode -- a garage with an intercom and no gate is the
@@ -112,6 +125,29 @@ dial_secret_file = "/etc/openparking/gate-agent/door1.dial-secret"
 lane = "none"
 name_audio = "/opt/openparking/audio/site/lobby.wav"
 dial_secret_file = "/etc/openparking/gate-agent/lobby.dial-secret"
+
+# THE INTERCOM'S OWN RELAY, and it is only legal where `lane = "none"`: where a
+# lane exists the lane opens its own barrier and two things opening one barrier
+# means the lane has no record of one of them.
+#
+# NOT MEASURED AGAINST A DEVICE. The request is the VAPIX I/O port API's pulse
+# action, quoted in `docs/CONTRACT.md` from the vendor's published document;
+# nobody here has driven a real unit or watched a real barrier.
+#
+# It moves on a HUMAN'S WORD ONLY. There is no self-service ticket standalone:
+# nothing measures presence, and a button that issues a ticket with no car
+# behind it is the fraud this project exists to keep shut.
+[intercoms."sip:lobby@10.0.0.11".relay]
+kind = "axis_vapix"                 # the only kind this version drives
+url = "http://10.0.0.11"
+port = 1                            # 1 or 2
+# DECLARED, no default, 1..10000: the pulse a barrier's vend input needs is the
+# BARRIER's specification and not ours. The HTTP timeout is derived from it as
+# `pulse_ms / 1000 + answer_margin_s`, so a unit that holds the connection open
+# for the whole contact is not reported as one that could not be reached.
+pulse_ms = 500
+# answer_margin_s = 5.0             # published default, an ASSUMPTION
+credentials_file = "/etc/openparking/gate-agent/lobby.relay"
 
 # --- the lanes it reads -----------------------------------------------------
 # Read GET-only, through the lane contract. Every declared lane must have an
@@ -122,6 +158,51 @@ dial_secret_file = "/etc/openparking/gate-agent/lobby.dial-secret"
 url = "http://127.0.0.1:8090"
 # token_file = "/etc/openparking/lane.token"
 # timeout_seconds = 10.0
+# poll_seconds = 2.0                # published default, an ASSUMPTION
+# THE CREDENTIAL THAT OPENS A BARRIER, and a SEPARATE file from `token_file`
+# deliberately: that one reads where a vehicle was, and a read token that also
+# authorised an act would mean every consumer holding a read credential held an
+# opening one. Absent -> this agent is READ-ONLY at this lane: `can_vend` is
+# false for it, no ticket is offered, and a human's OPEN_NOW hears that nothing
+# here can open it. Refused at startup unless the file is 0600 or tighter.
+act_token_file = "/etc/openparking/gate-agent/entry.act-token"
+
+# --- the ticket, the display, and what a driver photographs -----------------
+# REQUIRED exactly when it is needed: the moment an intercom declares a display
+# or a lane declares an act_token_file, [tickets] becomes mandatory and startup
+# says so. An agent with neither is round 5 exactly -- it answers, it speaks the
+# case, it calls a person, and it opens nothing -- and making a site generate a
+# signing key there would be a credential created to satisfy a file.
+[tickets]
+# DECLARED, no default, refused at startup unless 0600 or tighter and at least
+# 32 bytes. Every ticket this site issues is signed with it, and the QR a driver
+# photographs is self-contained: the exit verifies it with no connectivity on
+# either side. Losing this file is losing the ability to verify what was issued.
+signing_key_file = "/etc/openparking/gate-agent/ticket-signing.key"
+# DECLARED, no default. The records live here and it is the ONE place on this
+# box a ticket_ref is written down -- it is on no event, no read route and no
+# log line. A default would put a site's record of every arrival somewhere
+# nobody chose.
+directory = "/var/lib/openparking/gate-agent/tickets"
+# retention_days = 30               # published default: the platform's own for
+#                                   # the stay this identifies. Purged by
+#                                   # deletion, like the capture store.
+# confirm_window_s = 90.0           # published default, an ASSUMPTION: nothing
+#                                   # has measured how long a driver takes to
+#                                   # photograph a code and press a button.
+# help_window_s = 60.0              # published default, an ASSUMPTION. A press
+#                                   # inside it is HELP about THAT ticket and
+#                                   # never a second vend.
+
+# --- the screens ------------------------------------------------------------
+# The geometry is NOT here and cannot be: `virtual_size` and `bits_per_pixel`
+# are read from the driver at startup. A site that typed its own resolution is a
+# site whose display is silently wrong the day somebody changes a cable, and a
+# frame written at the wrong stride is not a smaller picture -- it is diagonal
+# noise. Refused at startup if the device cannot be read or is not 16/24/32 bpp.
+[displays.front]
+framebuffer = "/dev/fb0"
+# sysfs = "/sys/class/graphics/fb0"  # optional; derived from the device name
 
 # --- languages --------------------------------------------------------------
 # DECLARED, both. `driver` is the ORDER a driver hears every sentence in: they
