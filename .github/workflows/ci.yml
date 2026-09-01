@@ -39,6 +39,14 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     strategy:
+      # A RED LEG MAY NOT CANCEL ITS SIBLING. With fail-fast on, 3.11 going red
+      # cancelled 3.12 and left it UNMEASURED -- which happened twice on this
+      # branch, at the round-7 L3's tip and again at the cut's, so nobody ever
+      # saw a 3.12 result for either. An unmeasured interpreter reads as "not
+      # green" and stops a merge exactly like a red one, and the cheap half of
+      # the matrix is the half that tells you whether the failure is version
+      # specific.
+      fail-fast: false
       matrix:
         # The lowest version supported and a current one. This runs on whatever
         # the lane's box ships; the tests must not quietly depend on a newer

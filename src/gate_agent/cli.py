@@ -131,6 +131,40 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def opening_line(config) -> str:
+    """What this process can ask a barrier to do, DERIVED from what it holds.
+
+    **Never a fixed sentence, and that is the whole point of this function.**
+    Until round 7 this line read "OPENS NOTHING: no vend route here, none at any
+    lane on this contract version". Round 7 gave the package a vend route, and
+    the line went on saying the opposite for a whole round -- because a string
+    cannot go stale in a way anything measures, and nothing was measuring it.
+
+    So it is computed from the configuration the process actually loaded: the
+    lanes it holds an `act_token_file` for (`Target.can_act`, the same field
+    `Agent._acts` is built from, so the banner and the behaviour cannot
+    disagree) and the intercoms that declare a relay. A site that declares
+    neither still gets the honest "opens nothing", and gets it because it was
+    derived rather than because somebody wrote it down.
+
+    "ASK" and not "open": whether the boom moves is the barrier's answer and
+    nothing in this estate has watched one move.
+    """
+    lanes = sorted(lane.name for lane in config.lanes if lane.can_act)
+    relays = sorted(one.sip_uri for one in config.intercoms if one.relay is not None)
+    if not lanes and not relays:
+        return (
+            "  OPENS NOTHING: no lane here declares an act token and no intercom declares "
+            "a relay, so nothing in this configuration can ask a barrier to move"
+        )
+    what = []
+    if lanes:
+        what.append(f"vend at {', '.join(lanes)}")
+    if relays:
+        what.append(f"pulse the relay at {', '.join(relays)}")
+    return "  CAN ASK A BARRIER TO MOVE: " + "; ".join(what)
+
+
 def cmd_agent(args) -> int:
     token = _token(args)
     try:
@@ -171,7 +205,7 @@ def cmd_agent(args) -> int:
         print("  STANDALONE: no intercom has a lane, so every call is a human case")
     print("  ONE CASE AT A TIME: a call arriving during a case is refused unanswered, "
           "whoever it is from (486 Busy Here)")
-    print("  OPENS NOTHING: no vend route here, none at any lane on this contract version")
+    print(opening_line(config))
 
     try:
         agent.start()

@@ -12,10 +12,14 @@ disk, the way a site's is -- so the refusals are the ones an installer meets.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from conftest import DIAL_SECRET, secret_file, wav
 from gate_agent.config import AgentConfig, ConfigError
+
+ROOT = Path(__file__).resolve().parent.parent
 
 BASE = """
 [agent]
@@ -868,3 +872,55 @@ def test_the_answer_margin_is_a_published_default_a_site_can_move(tmp_path):
     )
     assert config.intercoms[0].relay.answer_margin_s == 2.5
     assert config.intercoms[0].relay.timeout == 8.5
+
+
+def test_the_example_config_parses_and_declares_round_sevens_act_surface():
+    """The file an installer copies, checked (Z16.2, 2026-09-01).
+
+    `config/agent.example.toml` spent the whole of round 7 saying *"There is no
+    vend route in this package"* -- the round that added one -- and declaring
+    none of the surface below. Nothing read it, so nothing could notice.
+
+    **The key list here is a CHECKLIST and not a derivation**, and it is written
+    down as such rather than dressed up: there is no single place in
+    `config.py` to derive "the keys round 7 added" from, and a test that
+    pretended otherwise would be the second copy this repository keeps banning.
+    What it buys is that the installer-facing file cannot lose a key silently;
+    what parses it for real is `AgentConfig.from_file`, tested above against
+    files these tests write.
+    """
+    import tomllib
+
+    from gate_agent.tickets import (
+        DEFAULT_CONFIRM_WINDOW_S,
+        DEFAULT_HELP_WINDOW_S,
+        DEFAULT_RETENTION_DAYS,
+    )
+
+    example = ROOT / "config" / "agent.example.toml"
+    raw = tomllib.loads(example.read_text(encoding="utf-8"))
+
+    assert "tickets" in raw, "[tickets] is required the moment a display or an act token is"
+    assert "signing_key_file" in raw["tickets"]
+    assert "directory" in raw["tickets"]
+    assert "displays" in raw and raw["displays"], "no display is declared"
+    assert any("display" in one for one in raw["intercoms"].values()), (
+        "no intercom points at a display, so no door in this example offers a ticket"
+    )
+    assert any("act_token_file" in one for one in raw["lanes"].values()), (
+        "no lane declares an act token, so this example can vend nowhere"
+    )
+    relays = [one["relay"] for one in raw["intercoms"].values() if "relay" in one]
+    assert relays, "no intercom declares a relay"
+    for relay in relays:
+        assert set(relay) >= {"kind", "url", "port", "pulse_ms", "credentials_file"}
+
+    # AND IT NO LONGER SAYS THE OPPOSITE OF WHAT THE CODE DOES.
+    text = example.read_text(encoding="utf-8")
+    assert "There is no vend route in this package" not in text
+
+    # The DEFAULTS it quotes in comments are the code's own. A commented default
+    # that has drifted is worse than none: an installer reads it and plans
+    # around a number nothing uses.
+    for value in (DEFAULT_RETENTION_DAYS, DEFAULT_CONFIRM_WINDOW_S, DEFAULT_HELP_WINDOW_S):
+        assert str(value) in text, f"the example does not quote the published default {value}"

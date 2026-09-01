@@ -343,6 +343,121 @@ def test_an_unmeasured_presence_never_gets_a_ticket(tmp_path):
         assert screen2.frames
 
 
+def test_a_presence_that_is_not_a_BOOLEAN_is_unmeasured_and_gets_no_ticket(tmp_path):
+    """The string `"false"` is not `False`, and truthiness would read it as a car.
+
+    THE SAME FRAUD AS THE TEST ABOVE, arriving by a different route. `presence`
+    is read with `_boolean`, which answers `None` for anything that is not a
+    JSON boolean -- so a lane that publishes the STRING `"false"`, or the number
+    `0`, or `"yes"`, is a lane that has measured nothing, and an unmeasured
+    presence never puts a code on a screen (SETTLED 3f).
+
+    Nothing in the suite drove a non-boolean `presence` before this test, which
+    is why `presence_is_read_as_truthiness` -- a break that swaps the type check
+    for `bool(value)` -- reddened nothing and was reported PASSED WHEN. A lane
+    that is NOT ours is the right fixture: ours cannot publish a malformed
+    field, and a third party's is exactly who will.
+    """
+    from foreign_lane import make_server as foreign_server
+
+    for published in ("false", "true", 0, 1, "yes"):
+        lane = a_vending_foreign_lane()
+        with serving(foreign_server(lane)) as url:
+            agent, _ua, screen = agent_on(tmp_path, url)
+            foreign_decides(agent, lane, "no_plate_read", presence=published)
+            reading = agent._read_lane(agent.config.intercoms[0])
+            assert reading.presence is None, (
+                f"a lane published presence={published!r} -- not a boolean, so nothing was "
+                f"measured -- and the agent read it as {reading.presence!r}"
+            )
+            assert events_of(agent, AgentEventKind.TICKET_ISSUED) == [], published
+            assert screen.frames == [], published
+
+    # THE CONTROL, and it is the same fixture on the same route: a REAL boolean
+    # `true` on the wire is measured, and a ticket appears. So the five refusals
+    # above are about the TYPE of that field and not about the foreign lane.
+    lane = a_vending_foreign_lane()
+    with serving(foreign_server(lane)) as url:
+        agent, _ua, screen = agent_on(tmp_path, url)
+        foreign_decides(agent, lane, "no_plate_read", presence=True)
+        assert agent._read_lane(agent.config.intercoms[0]).presence is True
+        assert events_of(agent, AgentEventKind.TICKET_ISSUED)
+        assert screen.frames
+
+
+
+def test_a_new_decision_the_lane_offers_no_ticket_for_voids_the_old_one_IN_THAT_POLL(tmp_path):
+    """The void that nothing was measuring (Z16.1, 2026-09-01), and WHEN it happens.
+
+    A new decision voids the pending ticket, whatever the new decision says.
+    Two things hid this from every test that touched it:
+
+      * every one of them drove a new decision that ALSO offered a ticket, and a
+        mint replaces the pending one on its way past -- so removing the void
+        changed nothing they could see; and
+      * `_check_pending` voids `lane_decided_again` too, on the NEXT poll, when
+        it notices the decision moment has moved. So a test that polls more than
+        once sees the ticket go down either way.
+
+    **The guarantee is that it is down IN THE POLL THAT READ THE DECISION**, and
+    that is not pedantry: between that poll and the next one, a press at the door
+    finds driver one's ticket pending and confirms it for the car that is now at
+    the barrier. So this drives exactly one poll and looks at the state inside
+    that window.
+
+    A foreign lane, because the payload has to be chosen: `deny` with presence
+    still TRUE, so `presence_lost` is not what does the voiding. The reason is
+    measured, not merely that something happened.
+    """
+    from foreign_lane import decided_at
+    from foreign_lane import make_server as foreign_server
+
+    lane = a_vending_foreign_lane()
+    with serving(foreign_server(lane)) as url:
+        agent, ua, screen = agent_on(tmp_path, url)
+        foreign_decides(agent, lane, "no_plate_read", presence=True)
+        issued = events_of(agent, AgentEventKind.TICKET_ISSUED)
+        assert len(issued) == 1 and screen.frames, "no ticket to void"
+        first = issued[0]["ticket_id"]
+        blanked_before = screen.blanked
+
+        # THE LANE DECIDES AGAIN, about somebody else, and offers no ticket.
+        # Driven by hand rather than through `foreign_decides`, because that
+        # helper polls four times and the second poll would void this through
+        # `_check_pending` -- a different site, proving a different thing.
+        lane.decision = {
+            "outcome": "deny",
+            "reason": None,
+            "fallback": None,
+            "cause": None,
+            "presence": True,
+            "at": decided_at(),
+            "read_ref": None,
+            "completed": False,
+        }
+        lane.record("decision", "2026-09-01T09:00:00+00:00", {"outcome": "deny"})
+        agent.poll()  # EXACTLY ONE, and the ticket must already be down
+
+        voided_events = events_of(agent, AgentEventKind.TICKET_VOIDED)
+        assert [one["reason"] for one in voided_events] == ["lane_decided_again"], (
+            agent.events(0).to_dict()["events"]
+        )
+        assert voided_events[0]["ticket_id"] == first
+        assert agent._pending.get("entry") is None, "the old code is still pending"
+        assert screen.blanked > blanked_before, "the old code is still on the screen"
+
+        # AND THE RECORD SAYS SO -- it is the site's only account of this stay.
+        record = TicketStore(tmp_path / "tickets").read(first)
+        assert record is not None
+        assert record.state == VOIDED and record.void_reason == "lane_decided_again"
+
+        # THE CONTROL, and it is the harm: a press in this window is round five
+        # exactly. With the void gone the press confirms driver ONE's ticket for
+        # the car now at the barrier, and commands a vend on it.
+        press(agent, ua)
+        assert events_of(agent, AgentEventKind.TICKET_CONFIRMED) == []
+        assert events_of(agent, AgentEventKind.VEND_COMMANDED) == []
+
 def test_the_ticket_case_set_is_the_four_it_says_it_is(tmp_path):
     """The set, and the CONTROL that widening it changes the answer.
 

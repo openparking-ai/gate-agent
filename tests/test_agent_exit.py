@@ -173,3 +173,77 @@ def test_without_the_blanking_the_frame_survives_too(tmp_path):
     assert set(after) == {FRAME}, (
         f"the control did not reproduce the defect: {sorted(set(after))}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The startup banner is DERIVED, not written down (Z16.2, 2026-09-01)
+# ---------------------------------------------------------------------------
+
+
+def _config_with(tmp_path, *, act_token=None, relay=None):
+    """One agent config, with or without something that can move a barrier."""
+    from dataclasses import replace
+
+    from conftest import agent_config_for
+    from gate_agent.config import Target
+    from gate_agent.contract import TargetKind
+
+    base = agent_config_for(tmp_path, lane_url="http://127.0.0.1:1/")
+    lanes = (
+        Target(
+            name="entry",
+            kind=TargetKind.LANE,
+            url="http://127.0.0.1:1/",
+            poll_seconds=2.0,
+            act_token=act_token,
+        ),
+    )
+    intercoms = (replace(base.intercoms[0], lane="entry", relay=relay),)
+    return replace(base, lanes=lanes, intercoms=intercoms)
+
+
+def test_the_startup_line_is_derived_from_what_this_process_can_act_on(tmp_path):
+    """The line CHANGES when the act surface changes, and that is the guarantee.
+
+    `cli.py` told every operator "OPENS NOTHING: no vend route here" at every
+    start for the whole of round 7 -- the round that gave this package a vend
+    route. A fixed sentence cannot go stale in a way anything measures, so this
+    one is computed from the config the process loaded and this test is what
+    measures it.
+    """
+    from gate_agent import cli
+
+    nothing = cli.opening_line(_config_with(tmp_path))
+    assert "OPENS NOTHING" in nothing
+    assert "entry" not in nothing
+
+    # A LANE THIS AGENT HOLDS AN ACT TOKEN FOR. The line must move, and it must
+    # name the lane -- an operator reading the banner is asking WHICH barrier.
+    vending = cli.opening_line(_config_with(tmp_path, act_token="an-act-token-0000"))
+    assert vending != nothing, "the act surface changed and the line did not"
+    assert "OPENS NOTHING" not in vending
+    assert "vend at entry" in vending
+    # And it says ASK, because whether the boom moves is the barrier's answer.
+    assert "ASK" in vending.upper()
+
+
+def test_the_startup_line_names_a_relay_a_standalone_site_declares(tmp_path):
+    """The other half of the act surface: an intercom with its own relay."""
+    from gate_agent import cli
+    from gate_agent.relay import Relay
+
+    relay = Relay(
+        kind="axis_vapix",
+        url="http://10.0.0.7/",
+        port=1,
+        pulse_ms=500,
+        answer_margin_s=5.0,
+        username="operator",
+        password="secret",
+    )
+    line = cli.opening_line(_config_with(tmp_path, relay=relay))
+    assert "OPENS NOTHING" not in line
+    assert "pulse the relay at" in line and "sip:door1@10.0.0.9" in line
+    # THE CREDENTIAL IS NOT IN IT. This line is printed at every start and goes
+    # wherever a service manager's log goes.
+    assert "secret" not in line and "operator" not in line
