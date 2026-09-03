@@ -5,12 +5,16 @@ agent; a human only when the agent cannot handle, confirm or find the problem*,
 and when the human is reached *"we RECEIVE THEIR AUTHORISATION -- open the gate,
 don't open, I'll be there in a minute"*.
 
-**IT OPENS NOTHING.** An authorisation is a RECORD of what a person said. It is
-never an act, and this is not a promise: there is no vend route on the lane
-contract this build reads, there is no act surface here, and the only client in
-this package cannot build a request that is not a `GET`. `OPEN_NOW` ends in an
-event, two audio messages, and nothing else -- and one of those messages is the
-person being told, in the same breath, that this version cannot move a barrier.
+**THE LANE DECIDES. THIS AGENT ASSERTS.** From round 7 an authorisation is an
+act where a site declared one: `OPEN_NOW` and `OPEN_AND_FLAG` reach
+`POST /v1/lane/vend` at a lane this agent holds an act token for, and the LANE
+applies its own refusals -- presence off its arming loop at the moment of the
+call, its own malfunction table, its own arming geometry, the age and identity
+of its own last decision. Nothing here checks any of them first. Where a site
+declared no act token and no relay, the same code answers, speaks the case,
+calls a person and asks for nothing, which is round 5 exactly and is supported.
+What this process can ask for is `AgentConfig.act_surface` and it is printed at
+every start; `docs/CONTRACT.md`, "IT CAN NOW COMMAND A VEND", is the whole of it.
 
 **WHICH INTERCOM A CALL IS FROM IS THE ADDRESS IT DIALLED, NEVER WHO IT SAYS IT
 IS.** Each declared intercom has an account of its own on the user agent, whose
@@ -1730,7 +1734,12 @@ class Agent:
         self._authorised(session, value)
 
     def _authorised(self, session: Session, value: Authorisation) -> None:
-        """Record it, tell both sides what it means, and open nothing."""
+        """Record what the person keyed, and tell both sides what it means.
+
+        Whether it goes on to ask a barrier for anything is decided downstream by
+        what this site declared, never here: `ACTS` names the two authorisations
+        that can, and `AgentConfig.act_surface` says where.
+        """
         session.authorisation = value
         if value is Authorisation.CALL_BACK:
             session.state = State.COLLECTING_NUMBER

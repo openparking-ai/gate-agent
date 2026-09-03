@@ -1,7 +1,7 @@
 # Open Parking AI — gate agent
 
-The intercom module. It ships **three processes**, and none of them can open a
-barrier.
+The intercom module. It ships **three processes**. Two of them open nothing; the
+third can ask a barrier to move, where a site configured it to.
 
 **The gate agent** answers the intercom. It works out which lane the call belongs
 to **from the address the caller dialled** — each intercom is given an account of
@@ -11,8 +11,14 @@ claim and decides nothing: it is a string anybody can write, and the secret is
 never in it — it is the number dialled. It then reads that lane's last decision
 through the lane contract, says what happened in every language the site
 declared, and when the case needs a person it calls one, stays in both calls, and
-records the authorisation they key. **An authorisation is a record of what
-somebody said. It is never an act.**
+records the authorisation they key. **An authorisation is always a record of what
+somebody said, and two of them are also acts**: `open now` and `open and flag`
+reach `POST /v1/lane/vend` at a lane the site gave this agent an act token for.
+**The lane decides** — it applies its own refusals to a human's completion
+exactly as it does to a driver's, reading presence off its own loop at the moment
+of the call. A driver's confirmed display code goes through the same one route.
+Where a site declared no act token and no relay, the same code asks for nothing
+and the person is told so.
 
 **The malfunction monitor** watches whatever a site declares — a lane, an
 identification service, a platform, a capture process — and tells a human what
@@ -41,13 +47,29 @@ at startup, and refuses one it was not tested against.
 
 ## What they will not do
 
-**None has opening authority.** They read `GET`s; one sends messages, one writes
-to its own disk, and one answers a phone. Nothing here calls a vend, resolves a
-transit, or writes to a lane. There is no client in this package capable of a
+**The monitor and the capture process have no opening authority.** They read
+`GET`s; one sends messages, one writes to its own disk. Neither calls a vend,
+resolves a transit, or writes to a lane, and neither holds a client capable of a
 method other than `GET` — swept out of the source, and observed at lanes and
-cameras that record what arrived. A person can key `open now` and what happens is
-an event, a message to the driver, and one fixed sentence to that person saying
-this version cannot operate the barrier.
+cameras that record what arrived.
+
+**The agent is the exception, and the exception is one module wide.** Exactly one
+module may build a non-`GET` **at a lane** and it is `act.py`. It builds exactly
+one request, `POST /v1/lane/vend`, to a path held in a constant, follows no
+redirect, and cannot be constructed without an **act token** — so a lane a site
+declared none for has no client at all rather than a client the lane would
+refuse. The read token that learns where a vehicle was does not authorise it; the
+lane refuses that with a `403`. The sweep that walks every module for a request
+that is not a `GET` exempts two files by name — this one and the webhook sink
+below — and a third is a change to that list, which somebody has to argue for.
+
+**What none of them decides is whether a barrier moves.** The lane reads its own
+loop at the moment of the call, applies its own malfunction table and its own
+geometry, and answers — and it applies them to a human's completion exactly as
+to a driver's. Nothing here checks any of that first, because a second copy of
+those refusals is one that comes to disagree with the copy the barrier obeys.
+And nothing in this estate has watched a boom move, so every sentence says
+**asked**, never opened.
 
 The one thing that leaves by another method is a **webhook**, which points at a
 paging system and never at a lane. It lives in its own module, that module may
@@ -219,14 +241,20 @@ comes to disagree.
 pip install -e '.[dev]'
 pytest -q
 python scripts/monitor_fail_control.py
+python scripts/agent_fail_control.py
 ```
 
-The second one is the point. It breaks each property these processes exist to
-have — no opening authority, `unknown` never reading as `ok`, a plate never
-reaching the store, a purge that actually deletes, a camera that is dead never
-reading as fine — and requires the suite to go red on every one. Every break is
-in the reassuring direction, because that is the direction this kind of software
-fails in when nobody is looking. Both run in CI, on 3.11 and 3.12.
+The last two are the point. Each breaks a property these processes exist to have
+and requires the suite to go red on it — for the monitor and the capture process:
+no opening authority, `unknown` never reading as `ok`, a plate never reaching the
+store, a purge that actually deletes, a camera that is dead never reading as
+fine; for the agent: an unmeasured presence never getting a ticket, a press never
+confirming a code the driver was not shown, a second press never becoming a
+second vend, a refusal always reaching the person, a relay never recorded as
+pulsed when it was not. Every break is in the reassuring direction, because that
+is the direction this kind of software fails in when nobody is looking. All three
+run in CI, on 3.11 and 3.12, and a break that makes the suite ERROR rather than
+FAIL is reported as a broken control rather than as a working one.
 
 **There is no image file in this repository, and CI refuses one.** Every image in
 the tests is synthetic and built in the process that uses it.

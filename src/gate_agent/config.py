@@ -990,6 +990,7 @@ __all__ = [
     "MonitorConfig",
     "Target",
     "WebhookSinkConfig",
+    "opening_line",
 ]
 
 
@@ -1340,6 +1341,34 @@ class AgentConfig:
     #: The declared screens, by name, each with the geometry its DRIVER
     #: published at startup. Empty where a site declared none.
     displays: dict = field(default_factory=dict)
+
+    @property
+    def act_surface(self) -> tuple[str, ...]:
+        """Everything THIS configuration can ask a barrier to do. One phrase each.
+
+        **THE ONE PLACE THIS PACKAGE SAYS WHAT IT CAN ACT ON**, and every other
+        surface that says it renders THIS -- the startup banner (`opening_line`
+        below) and the `405` body the agent's read surface answers with. Two
+        renderings of one fact; no second hand-written copy, because the
+        hand-written one is always the one that lies.
+
+        Read from the same fields the BEHAVIOUR is built from: `Target.can_act`,
+        which is what `Agent._acts` is built from, and the intercoms that
+        declared a relay, which is what the standalone path pulses. So a sentence
+        here cannot disagree with what the process would actually do.
+
+        Empty means this configuration can ask a barrier for nothing -- round 5
+        exactly, and a supported configuration rather than a degraded one.
+        """
+        return tuple(
+            [f"vend at {name}" for name in sorted(lane.name for lane in self.lanes if lane.can_act)]
+            + [
+                f"pulse the relay at {uri}"
+                for uri in sorted(
+                    one.sip_uri for one in self.intercoms if one.relay is not None
+                )
+            ]
+        )
 
     @property
     def can_vend_at(self) -> tuple[str, ...]:
@@ -2078,3 +2107,30 @@ def _user_agent(raw: dict) -> UserAgentSettings:
             DEFAULT_RECONNECT_SECONDS,
         ),
     )
+
+
+def opening_line(config: AgentConfig) -> str:
+    """The startup banner: what this process can ask a barrier to do.
+
+    **Never a fixed sentence, and that is the whole point of this function.**
+    Until round 7 this line read "OPENS NOTHING: no vend route here, none at any
+    lane on this contract version". Round 7 gave the package a vend route, and
+    the line went on saying the opposite for a whole round -- because a string
+    cannot go stale in a way anything measures, and nothing was measuring it.
+    Round 7's re-gate then found the same sentence, unmeasured, in seven more
+    files, so it lives HERE now, once, beside the fact it renders.
+
+    It renders `AgentConfig.act_surface` and holds no list of its own. The agent
+    service's `405` body renders the same property, so the two cannot disagree
+    about what this process can do.
+
+    "ASK" and not "open": whether the boom moves is the barrier's answer and
+    nothing in this estate has watched one move.
+    """
+    surface = config.act_surface
+    if not surface:
+        return (
+            "  OPENS NOTHING: no lane here declares an act token and no intercom declares "
+            "a relay, so nothing in this configuration can ask a barrier to move"
+        )
+    return "  CAN ASK A BARRIER TO MOVE: " + "; ".join(surface)

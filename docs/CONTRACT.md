@@ -16,11 +16,18 @@ reserved for us — so if this contract is inadequate, we find out first.
 ## This monitor has NO OPENING AUTHORITY
 
 It reads `GET`s and it sends messages. It never calls a vend, never resolves a
-transit, never writes to a lane. There is no client in this package capable of a
+transit, never writes to a lane. The monitor holds no client capable of a
 method other than `GET`, and that is **swept out of the source and observed at
 the targets**, not promised here: `tests/test_no_opening_authority.py` walks
 every module for a request that is not a `GET`, and runs a whole poll against
 lanes that record what arrived.
+
+**Said of the MONITOR, and it used to be said of the package.** From round 7 the
+AGENT — the third process here, under this same `contract_version` — can command
+a vend at a lane a site gave it an act token for; see *IT CAN NOW COMMAND A
+VEND*. That sweep still walks every module: it exempts `act.py`, which only the
+agent uses, and the webhook sink, and nothing else — so a module this monitor
+reads a target through cannot grow a non-`GET` without going red.
 
 The one thing that leaves this process by any other method is a **webhook**,
 which points at a paging system and never at a lane. It lives in its own module,
@@ -717,10 +724,11 @@ hands them to the identifier, and drops them.
 ## It has NO OPENING AUTHORITY either
 
 It reads a camera and it reads a lane's READ contract, both `GET`, and it writes
-to its own directory. There is **no client in this package capable of a method
-other than `GET`**, swept out of the source and observed at the lane and at the
-camera. It has no route that changes anything: it cannot capture on demand, it
-cannot delete a record, and it cannot move a retention window.
+to its own directory. **This process holds no client capable of a method other
+than `GET`** — said of the capture process, not of the package, since round 7
+gave the agent a vend route — swept out of the source and observed at the lane
+and at the camera. It has no route that changes anything: it cannot capture on
+demand, it cannot delete a record, and it cannot move a retention window.
 
 **The lane is not touched by this process at all.** It learns that a car arrived
 and that the lane vended from `GET /v1/lane/events?since=` — the read contract,

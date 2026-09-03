@@ -4,10 +4,13 @@
     gate-agent capture --config capture.toml
     gate-agent agent   --config agent.toml
 
-**Three processes, beside each other, and none of them can open a barrier.** The
-monitor watches whatever a site declares and tells a human what changed. The
-capture process photographs a lane on a timer and on that lane's events, and
-writes to its own disk. They are separate processes for the reason every module
+**Three processes, beside each other.** The monitor watches whatever a site
+declares and tells a human what changed, and it opens nothing. The capture
+process photographs a lane on a timer and on that lane's events, writes to its
+own disk, and opens nothing. **The agent can ask a barrier to move where a site
+declared an act token or a relay**, and what THIS process can ask for is printed
+at every start by `opening_line`, derived from the configuration it loaded.
+They are separate processes for the reason every module
 in this project is separate: a partial failure must stay partial, and the one
 that has to still be alive when a lane is not should not share an interpreter
 with the one that is writing to a disk.
@@ -46,6 +49,7 @@ from .config import (
     CaptureConfig,
     ConfigError,
     MonitorConfig,
+    opening_line,
     read_secret_file,
 )
 from .monitor import Monitor, UnsupportedContract
@@ -129,40 +133,6 @@ def build_parser() -> argparse.ArgumentParser:
              "surface publishes which intercoms a site has and when nobody answered a call",
     )
     return parser
-
-
-def opening_line(config) -> str:
-    """What this process can ask a barrier to do, DERIVED from what it holds.
-
-    **Never a fixed sentence, and that is the whole point of this function.**
-    Until round 7 this line read "OPENS NOTHING: no vend route here, none at any
-    lane on this contract version". Round 7 gave the package a vend route, and
-    the line went on saying the opposite for a whole round -- because a string
-    cannot go stale in a way anything measures, and nothing was measuring it.
-
-    So it is computed from the configuration the process actually loaded: the
-    lanes it holds an `act_token_file` for (`Target.can_act`, the same field
-    `Agent._acts` is built from, so the banner and the behaviour cannot
-    disagree) and the intercoms that declare a relay. A site that declares
-    neither still gets the honest "opens nothing", and gets it because it was
-    derived rather than because somebody wrote it down.
-
-    "ASK" and not "open": whether the boom moves is the barrier's answer and
-    nothing in this estate has watched one move.
-    """
-    lanes = sorted(lane.name for lane in config.lanes if lane.can_act)
-    relays = sorted(one.sip_uri for one in config.intercoms if one.relay is not None)
-    if not lanes and not relays:
-        return (
-            "  OPENS NOTHING: no lane here declares an act token and no intercom declares "
-            "a relay, so nothing in this configuration can ask a barrier to move"
-        )
-    what = []
-    if lanes:
-        what.append(f"vend at {', '.join(lanes)}")
-    if relays:
-        what.append(f"pulse the relay at {', '.join(relays)}")
-    return "  CAN ASK A BARRIER TO MOVE: " + "; ".join(what)
 
 
 def cmd_agent(args) -> int:

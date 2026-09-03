@@ -1,4 +1,11 @@
-"""THE INVARIANT for the third process: the agent opens nothing.
+"""THE INVARIANT for the third process, AT A LANE THIS AGENT HOLDS NO ACT TOKEN FOR.
+
+**The scope is in the first line because it is the whole of what this file
+measures.** Every configuration below is round 5's: no act token, no relay. From
+round 7 an agent that HAS one commands a vend, and that is the subject of
+`tests/test_ticket_flow.py` and `tests/test_relay.py`, not of this file. What is
+asserted here is the property a read-only lane still has to have — that holding
+a read token and a person on a phone is not a route to a barrier.
 
 The same three questions the monitor's sweep asks, asked of the agent, because
 this is the process that has a person on a phone saying "open the gate" and a
@@ -9,8 +16,10 @@ record of them saying it.
      user agent and the set must be exactly those six. A seventh, added quietly,
      goes red here.
   2. **Did it?** A whole `OPEN_NOW` dialogue is run against a lane that RECORDS
-     what reached it, and the set of methods must be exactly `{"GET"}` and the
-     set of paths exactly the two an agent has business on.
+     what reached it, **with no act token declared**, and the set of methods must
+     be exactly `{"GET"}` and the set of paths exactly the two an agent has
+     business on. With one declared the same dialogue POSTs, by design, and
+     `test_a_humans_open_now_vends_through_the_same_route` is where that lives.
   3. **Would it show?** A user agent that CAN open a barrier is run through the
      same dialogue. The barrier must not move -- and the control is that the same
      object moves it when something asks, so "nothing opened" is a statement
@@ -42,8 +51,9 @@ INTERCOM = "sip:door1@10.0.0.9"
 #: The whole seam, and NONE of them opens anything. `accounts` asks which local
 #: accounts the user agent holds, which is what says which intercom a call is
 #: from; `calls` asks which calls it is holding RIGHT NOW, which is what says
-#: whether a previous process left any -- and neither can open a barrier any
-#: more than `version` can.
+#: whether a previous process left any -- and no verb on this seam moves a
+#: barrier any more than `version` does. (The agent's route to one is `act.py`
+#: and an HTTP call to the lane, which is not on this seam at all.)
 #: Written here rather than derived from the class, because the point is to
 #: notice a verb being ADDED -- an expectation derived from the thing under test
 #: cannot.
