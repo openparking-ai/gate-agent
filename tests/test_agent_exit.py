@@ -247,3 +247,85 @@ def test_the_startup_line_names_a_relay_a_standalone_site_declares(tmp_path):
     # THE CREDENTIAL IS NOT IN IT. This line is printed at every start and goes
     # wherever a service manager's log goes.
     assert "secret" not in line and "operator" not in line
+
+
+def test_what_this_can_act_on_is_derived_in_one_place(tmp_path):
+    """Z17.2. THE STRUCTURAL HALF, and it is the one a word query cannot do.
+
+    The two surfaces that tell a human what this process can ask a barrier for --
+    the startup banner and the `405` body the read surface answers with -- must
+    render the SAME property. A second hand-written copy is the one that lies,
+    and it lied for a whole round: the banner was repaired and the served body
+    was not, so a caller was told "this agent opens nothing, here or at any lane"
+    by a process holding an act token.
+
+    Measured on both sides of the branch, because a claim with one possible
+    wording is one no measurement can falsify.
+    """
+    from gate_agent.agent_service import AgentService
+    from gate_agent.config import opening_line
+
+    class _Agent:
+        def __init__(self, config):
+            self.config = config
+
+    nothing = _config_with(tmp_path)
+    vending = _config_with(tmp_path, act_token="an-act-token-0000")
+
+    # ONE SOURCE. Both renderings read this property and nothing else.
+    assert nothing.act_surface == ()
+    assert vending.act_surface == ("vend at entry",)
+
+    quiet = AgentService(_Agent(nothing)).act_surface()
+    loud = AgentService(_Agent(vending)).act_surface()
+    assert quiet == nothing.act_surface and loud == vending.act_surface, (
+        "the service answers something other than the property the banner renders"
+    )
+    # And the banner moves with it, so the two cannot disagree about the same
+    # configuration.
+    assert ("OPENS NOTHING" in opening_line(nothing)) is (quiet == ())
+    assert ("OPENS NOTHING" in opening_line(vending)) is (loud == ())
+
+
+def test_the_served_refusal_says_what_this_process_can_actually_ask_for(tmp_path):
+    """The `405` body, read off the wire, on both sides of the branch.
+
+    Not the function that builds it -- the bytes a caller receives. That is what
+    went false and what nobody was reading.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    from gate_agent.agent_service import AgentService, make_server
+    from serving import serving
+
+    class _Agent:
+        def __init__(self, config):
+            self.config = config
+
+        def describe(self):  # pragma: no cover - not reached by a 405
+            raise AssertionError
+
+    def refusal(config) -> dict:
+        with serving(make_server(AgentService(_Agent(config)), port=0)) as url:
+            request = urllib.request.Request(f"{url}/v1/agent", data=b"{}", method="POST")
+            try:
+                urllib.request.urlopen(request, timeout=5)
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 405, exc.code
+                return json.loads(exc.read())
+            raise AssertionError("the surface accepted a POST")
+
+    quiet = refusal(_config_with(tmp_path))["error"]
+    loud = refusal(_config_with(tmp_path, act_token="an-act-token-0000"))["error"]
+
+    # BOTH say the surface itself moves nothing: that is what the caller asked.
+    assert "this surface is read-only" in quiet and "this surface is read-only" in loud
+    # And they differ on the part that is about the PROCESS, which is the half
+    # that was a fixed false sentence.
+    assert quiet != loud, "the served body does not move with the act surface"
+    assert "nothing in this configuration can ask a barrier to move" in quiet
+    assert "vend at entry" in loud
+    # The sentence that was false for a round is gone from both.
+    assert "opens nothing, here or at any lane" not in quiet + loud

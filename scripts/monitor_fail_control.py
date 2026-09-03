@@ -775,7 +775,20 @@ BREAKS = [
 
 def stage() -> Path:
     directory = Path(tempfile.mkdtemp(prefix="gate-agent-control-"))
-    for entry in ("src", "tests", "docs", "config", "pyproject.toml"):
+    # THIS LIST MUST MATCH `agent_fail_control.py`'s, and until Z17 it did not:
+    # `scripts` and `README.md` were missing here, so every sweep in
+    # `tests/test_unmeasured_claims.py` -- which globs `scripts/*.py` and
+    # `README.md` -- measured a narrower set of files under THIS script than
+    # under that one, silently, and had done since it was written. A missing file
+    # is one fewer file, not a failure, which is the shape this repository has a
+    # rule about. `test_the_readme_is_in_the_swept_set` and the exclusion
+    # assertion in `test_nothing_claims_this_package_cannot_act` are what go red
+    # now if either entry leaves either list.
+    #
+    # Two lists that must agree and nothing enforcing it is the next round's
+    # cleanup; it is named here rather than done, because one shared staging
+    # helper is a change to both scripts and Z17 is not that round.
+    for entry in ("src", "tests", "docs", "config", "scripts", "pyproject.toml", "README.md"):
         source = ROOT / entry
         target = directory / entry
         if source.is_dir():

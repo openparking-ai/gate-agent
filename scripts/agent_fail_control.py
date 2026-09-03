@@ -975,16 +975,50 @@ BREAKS = [
         # nothing was measuring it because a fixed sentence cannot go stale in a
         # way a test can see. The line is derived now; this is what proves it is
         # still derived.
+        #
+        # RE-ANCHORED by Z17, 2026-09-03, and the move is the point: the sentence
+        # now lives in `config.opening_line` beside `AgentConfig.act_surface`, the
+        # ONE property both it and the served `405` body render. Breaking it here
+        # breaks both surfaces at once, which is what one source is for.
         "name": "the_startup_line_is_written_down_again",
         "why": "every operator is told at every start that this process opens nothing, "
                "while it holds an act token for a lane",
-        "file": "src/gate_agent/cli.py",
-        "from": "    lanes = sorted(lane.name for lane in config.lanes if lane.can_act)",
+        "file": "src/gate_agent/config.py",
+        "from": "    surface = config.act_surface",
         "to": "    return (\n"
               "        \"  OPENS NOTHING: no vend route here, none at any lane on this \"\n"
               "        \"contract version\"\n"
               "    )\n"
-              "    lanes = sorted(lane.name for lane in config.lanes if lane.can_act)",
+              "    surface = config.act_surface",
+    },
+    {
+        # Z17, 2026-09-03. THE CONTROL FOR THE SWEEP, and it is the break the
+        # whole round exists for: the README's own sentence, put back, in the file
+        # a reader of this repository opens first.
+        #
+        # It is planted in README.md rather than in a module because that is where
+        # the claim did the most damage and because staging the README is itself
+        # part of the repair -- while it was not staged, this break could not have
+        # been written at all.
+        "name": "the_readme_says_the_package_cannot_open_a_barrier",
+        "why": "the front page of a public repository states, as a property, that nothing "
+               "here can open a barrier -- in the round that gave it a vend route",
+        "file": "README.md",
+        "from": "The intercom module. It ships **three processes**. Two of them open nothing; the",
+        "to": "The intercom module. It ships **three processes**, and none of them can open a\n"
+              "barrier. There is no client in this package capable of a method other than "
+              "`GET`.\n"
+              "The intercom module. It ships **three processes**. Two of them open nothing; the",
+    },
+    {
+        # Z17, 2026-09-03. The other half of the same guarantee, on the surface
+        # that is not prose: the JSON body a caller receives.
+        "name": "the_served_refusal_is_written_down_again",
+        "why": "a caller is told this agent opens nothing at any lane by a process that is "
+               "holding an act token for one",
+        "file": "src/gate_agent/agent_service.py",
+        "from": "        surface = self.service.act_surface()",
+        "to": "        surface = ()",
     },
     {
         "name": "the_text_has_no_provenance",
@@ -1185,7 +1219,14 @@ def stage() -> Path:
     # `scripts` is here because the audio build script is itself a published
     # claim -- the manifest's provenance rows come out of it -- and a break that
     # cannot reach it is a guarantee nobody is measuring.
-    for entry in ("src", "tests", "docs", "config", "scripts", "pyproject.toml"):
+    #
+    # `README.md` is here from Z17, for the same reason and a sharper one: it is
+    # the file a reader opens first, `test_unmeasured_claims.py` sweeps it, and
+    # while it was not staged that sweep silently measured every file except that
+    # one. A break planted in it could not go red because the file was not there
+    # to break. `test_the_readme_is_in_the_swept_set` is what goes red if it
+    # leaves this tuple again.
+    for entry in ("src", "tests", "docs", "config", "scripts", "pyproject.toml", "README.md"):
         source = ROOT / entry
         target = directory / entry
         if source.is_dir():

@@ -6,12 +6,19 @@ so a change to them is always visible as one, and they follow the same
 compatibility policy the lane contract and the Vehicle ID contract state, in the
 same words, so one consumer can hold one policy for all three.
 
-**This surface is READ ONLY, and the module behind it has no opening authority
+**This surface is READ ONLY, and the MONITOR behind it has no opening authority
 at all.** The monitor reads GETs and sends messages. It never calls a vend,
-never resolves a transit, and never writes to a lane -- there is no client in
-this package capable of a method other than `GET`, and that is swept rather than
+never resolves a transit, and never writes to a lane -- the monitor holds no
+client capable of a method other than `GET`, and that is swept rather than
 promised. A monitor that could act would be a new route to a barrier, which is
 the boundary every outside reviewer of this project has named.
+
+**Said of the MONITOR, not of the package.** From round 7 the AGENT -- the third
+process here, under this same `contract_version` -- can command a vend at a lane
+a site gave it an act token for. That is described where it happens, under "IT
+CAN NOW COMMAND A VEND" in `docs/CONTRACT.md`. The sweep that walks every module
+for a request that is not a `GET` still runs; it exempts `act.py` and the webhook
+sink by name and nothing else, so a monitor module that grew one would go red.
 
 Four properties are the whole point, and each is enforced below rather than
 described and hoped for:
@@ -1273,12 +1280,13 @@ class RecordPage:
 # monitor and the capture process, because a consumer holds one compatibility
 # policy for this package and not three.
 #
-# **IT OPENS NOTHING.** It answers an intercom, reads the lane's last decision
-# through the lane contract, speaks the case, calls a human when the case needs
-# one, and RECORDS what that human authorised. An authorisation is a record of
-# what somebody said; it is never an act. There is no vend route here, there is
-# no vend route on the lane contract this build reads, and the client in this
-# package still cannot build a request that is not a GET.
+# **THE LANE DECIDES; THIS AGENT ASSERTS.** It answers an intercom, reads the
+# lane's last decision through the lane contract, speaks the case, calls a human
+# when the case needs one, and records what that human authorised. From round 7
+# an authorisation is also an ACT where a site declared one: `ACTS` below names
+# the two that reach `POST /v1/lane/vend`, and the lane applies its own refusals
+# to a human's completion exactly as it does to a driver's. A site that declared
+# no act token and no relay gets the same code asking for nothing.
 # ===========================================================================
 
 
@@ -1350,13 +1358,18 @@ HUMAN_CASES: tuple[AgentCase, ...] = tuple(
 
 
 class Authorisation(StrEnum):
-    """What a human told us to do. CLOSED, per-site enabled, and NEVER an act.
+    """What a human told us to do. CLOSED, per-site enabled, and a RECORD always.
 
-    Each member is a RECORD. `OPEN_NOW` records that a human said to open; it
-    opens nothing, because this package has no route that could and the lane
-    contract this build reads has none either. The human is told so, in one
-    fixed sentence, at the moment they key it -- a human who believes a barrier
-    moved when it did not is worse off than one who was never called.
+    Every member is recorded. Two of them are also ACTS where a site declared
+    one -- `ACTS` below is that mapping, and it is the one place this package
+    says which authorities reach a vend. `OPEN_NOW` on a lane with an act token
+    commands one and the lane may still refuse it; on a lane without one, or at
+    a standalone intercom with no relay, the person is told this process cannot
+    ask for anything. Which of the two they get is decided by what the site
+    declared -- the same `Target.can_act` and declared-relay fields that
+    `AgentConfig.act_surface` renders -- and never by a fixed sentence: a human
+    who believes a barrier moved when it did not is worse off than one who was
+    never called, and so is one told nothing can move when something just did.
     """
 
     OPEN_NOW = "open_now"
@@ -1709,11 +1722,13 @@ class UserAgentDescription:
 class AgentDescription:
     """`GET /v1/agent` -- who this agent is, and what it is set to do.
 
-    `can_vend` is here and it is `false`, DERIVED from the act table rather than
-    written down: the agent has no route that opens anything, and the day one
-    exists this answer changes with it instead of being a flag somebody has to
-    remember. It is the same field, in the same words, that the lane contract
-    publishes for the same reason.
+    `can_vend` is here, PER LANE, and it is DERIVED rather than written down:
+    true where this agent holds an act token for that lane and a key to sign the
+    ticket a completion has to name. It read `false` everywhere for two rounds
+    because `ACTS` was empty; round 7 filled it and the answer changed with it,
+    which is what deriving it was for. It is the same field, in the same words,
+    that the lane contract publishes for the same reason -- and it is this
+    AGENT's answer about itself, never a republished copy of the lane's.
     """
 
     agent_id: str

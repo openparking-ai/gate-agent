@@ -916,6 +916,14 @@ def test_the_example_config_parses_and_declares_round_sevens_act_surface():
         assert set(relay) >= {"kind", "url", "port", "pulse_ms", "credentials_file"}
 
     # AND IT NO LONGER SAYS THE OPPOSITE OF WHAT THE CODE DOES.
+    #
+    # This used to be one phrase matched against this one file, and that is
+    # exactly how nineteen copies of the same false claim survived it in seven
+    # other files. The sweep that covers all of them is
+    # `tests/test_unmeasured_claims.py::test_nothing_claims_this_package_cannot_act`,
+    # over every published file and derived from `ACTS`; this line stays because
+    # this file is the one an installer copies and the sentence is quoted here
+    # verbatim, which the concept sweep deliberately does not do.
     text = example.read_text(encoding="utf-8")
     assert "There is no vend route in this package" not in text
 
