@@ -9,9 +9,10 @@ an image anywhere: the lane grabs frames at an arrival, hands them to the
 identifier and drops them.
 
 **IT HAS NO OPENING AUTHORITY EITHER.** It reads a camera and it reads a lane's
-READ contract, both `GET`, and it writes to its own directory. There is no client
-in this package capable of another method, swept out of the source and observed
-at the lane.
+READ contract, both `GET`, and it writes to its own directory. This process holds
+no client capable of another method -- said of the capture process, not of the
+package, since round 7 gave the agent a vend route -- swept out of the source and
+observed at the lane.
 
 **IT IS A CONSUMER OF THE LANE CONTRACT.** It learns that a car arrived and that
 the lane vended from `GET /v1/lane/events?since=` -- the seat round 2 built, and
@@ -57,6 +58,7 @@ from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable
 from .config import CaptureConfig
 from .contract import (
     CAMERA_CODES,
+    KNOWN_LANE_VERSIONS,
     LANE_CODES,
     STORE_CODES,
     CameraDescription,
@@ -74,12 +76,6 @@ from .contract import (
 from .store import CaptureStore, StoreOverBudget, StoreRecordRefused, StoreUnwritable
 
 log = logging.getLogger(__name__)
-
-#: Lane contract versions this process can read. A lane answering anything else
-#: is REFUSED rather than partially read -- the lane contract's own rule, and the
-#: same set the monitor holds, for the same reason: half-understanding a payload
-#: about a vehicle is worse than admitting you cannot read it.
-KNOWN_LANE_VERSIONS: tuple[int, ...] = (1,)
 
 #: The lane event kinds that make this process take a picture, and the reason it
 #: files the capture under. ONE mapping, so a kind cannot become a trigger

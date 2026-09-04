@@ -147,6 +147,7 @@ def camera_config(
 
     auth = tmp_path / f"{camera_id}.auth"
     auth.write_text(f"{username}:{password}\n", encoding="utf-8")
+    auth.chmod(0o600)
     return CameraConfig(
         camera_id=camera_id,
         snapshot_url=url,
@@ -267,7 +268,19 @@ OTHER_ACCOUNT = "agent-" + OTHER_SECRET
 
 
 def secret_file(path, secret: str = DIAL_SECRET):
-    """A dial-secret file with the permissions `config.py` insists on."""
+    """A CREDENTIAL file with the permissions `config.py` insists on.
+
+    Every credential this package reads is refused unless it is `0600` or
+    `0400` -- a lane's token, the platform's operator token, a webhook's token,
+    a camera's `user:password`, an intercom's dial secret, and the shared token
+    on the read surfaces. A fixture that wrote one at the default `0644` would
+    be exercising a path the product refuses, so every test that needs a real
+    credential comes through here.
+
+    The permission is what makes this a FIXTURE OF THE THING and not of
+    something adjacent: the tests that assert the refusal write `0644`
+    deliberately, by hand, and they are the only ones that do.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(secret + "\n", encoding="utf-8")
     path.chmod(0o600)
@@ -392,3 +405,57 @@ def agent_for(config, user_agent=None, clock=None, now=None):
     )
     agent.start()
     return agent
+
+
+def agent_raw_for(
+    tmp_path, *, lane_extra=None, dial_secret_file=None, tickets=None,
+    standalone=False, relay=None,
+) -> dict:
+    """The smallest agent configuration `AgentConfig.from_dict` accepts, as a dict.
+
+    Here rather than in one test file because the credential sweep needs to
+    build one too, and two copies of a minimal configuration is two things to
+    keep in step with the refusals.
+    """
+    return {
+        "agent": {"id": "agent-1", "site_id": "site-1"},
+        "user_agent": {"operator_aor": "sip:agent-operator@10.0.0.20"},
+        **(
+            {}
+            if standalone
+            else {"lanes": {"entry": {"url": "http://127.0.0.1:8090", **(lane_extra or {})}}}
+        ),
+        "intercoms": {
+            "sip:door1@10.0.0.9": {
+                "lane": "none" if standalone else "entry",
+                "name_audio": str(wav(tmp_path / "door1.wav")),
+                "dial_secret_file": dial_secret_file
+                or str(secret_file(tmp_path / "door1.dial-secret")),
+                **({"relay": relay} if relay else {}),
+            }
+        },
+        "languages": {"driver": ["en"], "operator": "en"},
+        "authorisations": {"open_now": True, "do_not_open": True},
+        "escalation": {"human_sip_uri": "sip:duty@10.0.0.5"},
+        **({"tickets": tickets} if tickets else {}),
+    }
+
+
+def capture_raw_for(directory, auth) -> dict:
+    """The smallest capture configuration `CaptureConfig.from_dict` accepts."""
+    return {
+        "capture": {
+            "id": "capture-1",
+            "site_id": "site-1",
+            "directory": str(directory),
+            # DECLARED, no default: nothing here has ever seen a capture from
+            # any of the cameras this is written for.
+            "max_bytes": 1 << 30,
+        },
+        "cameras": {
+            "front": {
+                "snapshot_url": "http://camera.example.com/snap",
+                "auth_file": str(auth),
+            }
+        },
+    }

@@ -41,11 +41,20 @@ from serving import serving
 PACKAGE = Path(gate_agent.__file__).resolve().parent
 SOURCES = sorted(PACKAGE.glob("*.py"))
 
-#: The one module allowed to build a request that is not a GET, and it points
-#: AWAY from a lane: a webhook is how a third party's paging system takes the
-#: seat. It is named here, once, so adding a second is a change to this list and
-#: therefore a change somebody has to argue for.
-MAY_POST = {"sinks.py"}
+#: The modules allowed to build a request that is not a GET. **It was one for
+#: six rounds and it is two now**, and the second one is the whole of round 7:
+#:
+#:   * `sinks.py` points AWAY from a lane -- a webhook is how a third party's
+#:     paging system takes the seat;
+#:   * `act.py` is `POST /v1/lane/vend`, the agent asking a lane to open a
+#:     barrier, which is the boundary every outside reviewer of this project has
+#:     named.
+#:
+#: The old guarantee -- "nothing in this package can build a non-GET at a lane"
+#: -- is GONE, and it is replaced rather than weakened. What replaces it is in
+#: `test_the_act_modules_exemption_is_bounded` below, one property at a time:
+#: one module, one method, one path, and no client at all without an act token.
+MAY_POST = {"sinks.py", "act.py"}
 
 
 def _is_request(node) -> bool:
@@ -81,7 +90,7 @@ def _has_body(call: ast.Call) -> bool:
 
 
 def test_no_module_that_reads_a_target_can_build_anything_but_a_get():
-    """Every request this package makes to a TARGET is a GET with no body."""
+    """Every request this package makes, outside the two named modules, is a GET."""
     swept = 0
     for path in SOURCES:
         if path.name in MAY_POST:
@@ -115,6 +124,100 @@ def test_the_sweep_sees_a_planted_non_get():
     assert len(calls) == 2
     assert {_method_of(call) for call in calls} == {"POST", "PUT"}
     assert all(_has_body(call) for call in calls)
+
+
+def test_the_act_modules_exemption_is_bounded():
+    """THE REPLACEMENT for "nothing here can build a non-GET at a lane".
+
+    That guarantee held for six rounds and this round ends it: the agent commands
+    a vend. A mechanism change re-proves what the old mechanism guaranteed, one
+    by one, so here is what now stands in its place -- read out of `act.py`'s own
+    source, because a route that exists and is never called is invisible to
+    behaviour.
+
+      1. **ONE request.** Exactly one `Request(...)` is constructed in that
+         module. A second is a second thing this exemption covers.
+      2. **ONE method**, and it is `POST`.
+      3. **ONE path**, and it is a module constant rather than a parameter: a
+         path a caller could choose is a client that can reach any route on a
+         lane.
+      4. **The body is a body**, not a URL: nothing about the vend travels where
+         a log or a `Referer` would carry it.
+    """
+    tree = ast.parse((PACKAGE / "act.py").read_text(encoding="utf-8"))
+    calls = [node for node in ast.walk(tree) if _is_request(node)]
+    assert len(calls) == 1, f"act.py builds {len(calls)} requests; the exemption covers one"
+    assert _method_of(calls[0]) == "POST"
+    assert _has_body(calls[0])
+
+    # The URL is built from the module's own constant and the base URL, and from
+    # nothing a caller passed. Read as SOURCE: a path that arrived as an
+    # argument would be invisible to any test that only drives the client.
+    url = calls[0].args[0]
+    assert isinstance(url, ast.JoinedStr), "the vend URL is not an f-string of known parts"
+    names = {
+        node.value.attr
+        for node in ast.walk(url)
+        if isinstance(node, ast.FormattedValue)
+        and isinstance(node.value, ast.Attribute)
+    } | {
+        node.value.id
+        for node in ast.walk(url)
+        if isinstance(node, ast.FormattedValue) and isinstance(node.value, ast.Name)
+    }
+    assert names == {"base_url", "VEND_PATH"}, names
+
+    from gate_agent.act import VEND_PATH
+
+    assert VEND_PATH == "/v1/lane/vend"
+
+    # THE CONTROL for the sweep above: the same helpers see a second request,
+    # another method and a path that came from an argument.
+    planted = ast.parse(
+        'urllib.request.Request(f"{base}{path}", data=b"{}", method="PUT")\n'
+        'Request(url, method="DELETE")\n'
+    )
+    planted_calls = [node for node in ast.walk(planted) if _is_request(node)]
+    assert len(planted_calls) == 2
+    assert {_method_of(one) for one in planted_calls} == {"PUT", "DELETE"}
+
+
+def test_an_act_client_cannot_exist_without_an_act_token():
+    """A lane with no `act_token_file` has NO CLIENT, not a refused one.
+
+    The difference is a round trip. A client built without a credential would be
+    a vend attempted, refused by the lane, and reported to a person -- with a
+    driver waiting through all of it for an answer nobody could have given.
+    """
+    import pytest as _pytest
+
+    from gate_agent.act import LaneActClient
+
+    for absent in (None, ""):
+        with _pytest.raises(ValueError, match="act token"):
+            LaneActClient("http://127.0.0.1:8090", absent, 5.0)
+    # THE CONTROL: with one, it builds.
+    assert LaneActClient("http://127.0.0.1:8090", "a-token", 5.0).act_token == "a-token"
+
+
+def test_the_act_client_does_not_follow_a_redirect():
+    """The request it would follow one on is the one carrying the credential
+    that OPENS A BARRIER.
+
+    The read client's own sweep already requires every opener in this package to
+    come from `redirects.py`; this asserts it of the module where the stakes are
+    a whole category higher, by name.
+    """
+    tree = ast.parse((PACKAGE / "act.py").read_text(encoding="utf-8"))
+    opened = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "open_url" in opened, "act.py does not open its request through redirects.open_url"
+    assert "urlopen" not in opened and "build_opener" not in opened
+    from_redirects = _names_from_redirects(tree)
+    assert "open_url" in from_redirects, from_redirects
 
 
 def test_nothing_in_the_package_imports_the_lane_controller():

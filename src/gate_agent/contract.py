@@ -6,12 +6,19 @@ so a change to them is always visible as one, and they follow the same
 compatibility policy the lane contract and the Vehicle ID contract state, in the
 same words, so one consumer can hold one policy for all three.
 
-**This surface is READ ONLY, and the module behind it has no opening authority
+**This surface is READ ONLY, and the MONITOR behind it has no opening authority
 at all.** The monitor reads GETs and sends messages. It never calls a vend,
-never resolves a transit, and never writes to a lane -- there is no client in
-this package capable of a method other than `GET`, and that is swept rather than
+never resolves a transit, and never writes to a lane -- the monitor holds no
+client capable of a method other than `GET`, and that is swept rather than
 promised. A monitor that could act would be a new route to a barrier, which is
 the boundary every outside reviewer of this project has named.
+
+**Said of the MONITOR, not of the package.** From round 7 the AGENT -- the third
+process here, under this same `contract_version` -- can command a vend at a lane
+a site gave it an act token for. That is described where it happens, under "IT
+CAN NOW COMMAND A VEND" in `docs/CONTRACT.md`. The sweep that walks every module
+for a request that is not a `GET` still runs; it exempts `act.py` and the webhook
+sink by name and nothing else, so a monitor module that grew one would go red.
 
 Four properties are the whole point, and each is enforced below rather than
 described and hoped for:
@@ -45,11 +52,37 @@ from datetime import datetime
 from enum import StrEnum
 from urllib.parse import urlsplit
 
+from .tickets import VOID_REASONS
+
 #: Bumped whenever a payload's shape changes in a way a consumer could notice.
 #: Additive changes do not bump it and a consumer ignores fields it does not
 #: know -- the same rule the lane and Vehicle ID contracts state, so one
 #: consumer can hold one policy for all three.
-CONTRACT_VERSION = 1
+#:
+#: **2, from round 7.** Every change in that round is additive by that rule --
+#: new fields, new event kinds, new codes -- and it is bumped anyway, for one
+#: reason that is not additive: `can_vend` CHANGED MEANING. It was `bool(ACTS)`
+#: and answered "can anything in this package act", which was `false`
+#: everywhere; it is now per lane and answers "does this agent hold what acting
+#: at THIS lane needs". A consumer reading the old field's meaning off the new
+#: payload would read a `true` as something this contract never said.
+CONTRACT_VERSION = 2
+
+#: Lane contract versions ANY process in this package can read, and there is
+#: exactly ONE of these.
+#:
+#: **It used to be three.** `agent.py`, `monitor.py` and `capture.py` each held
+#: their own tuple, and on 2026-08-31 the lane's contract went to 2 while all
+#: three still said `(1,)` -- so the monitor and the whole capture process
+#: refused to start against the lane on `lane-controller` main, and the agent
+#: read every lane as `lane_unavailable`. Three copies of one number is three
+#: places to forget, and the forgetting is silent in the reassuring direction:
+#: every consumer simply says the lane cannot be read.
+#:
+#: A lane on a version outside this set is REFUSED rather than partially read --
+#: the lane contract's own instruction to a consumer, and half-understanding a
+#: payload about a vehicle is worse than admitting it cannot be read.
+KNOWN_LANE_VERSIONS: tuple[int, ...] = (2,)
 
 
 class TargetKind(StrEnum):
@@ -1247,12 +1280,13 @@ class RecordPage:
 # monitor and the capture process, because a consumer holds one compatibility
 # policy for this package and not three.
 #
-# **IT OPENS NOTHING.** It answers an intercom, reads the lane's last decision
-# through the lane contract, speaks the case, calls a human when the case needs
-# one, and RECORDS what that human authorised. An authorisation is a record of
-# what somebody said; it is never an act. There is no vend route here, there is
-# no vend route on the lane contract this build reads, and the client in this
-# package still cannot build a request that is not a GET.
+# **THE LANE DECIDES; THIS AGENT ASSERTS.** It answers an intercom, reads the
+# lane's last decision through the lane contract, speaks the case, calls a human
+# when the case needs one, and records what that human authorised. From round 7
+# an authorisation is also an ACT where a site declared one: `ACTS` below names
+# the two that reach `POST /v1/lane/vend`, and the lane applies its own refusals
+# to a human's completion exactly as it does to a driver's. A site that declared
+# no act token and no relay gets the same code asking for nothing.
 # ===========================================================================
 
 
@@ -1324,13 +1358,18 @@ HUMAN_CASES: tuple[AgentCase, ...] = tuple(
 
 
 class Authorisation(StrEnum):
-    """What a human told us to do. CLOSED, per-site enabled, and NEVER an act.
+    """What a human told us to do. CLOSED, per-site enabled, and a RECORD always.
 
-    Each member is a RECORD. `OPEN_NOW` records that a human said to open; it
-    opens nothing, because this package has no route that could and the lane
-    contract this build reads has none either. The human is told so, in one
-    fixed sentence, at the moment they key it -- a human who believes a barrier
-    moved when it did not is worse off than one who was never called.
+    Every member is recorded. Two of them are also ACTS where a site declared
+    one -- `ACTS` below is that mapping, and it is the one place this package
+    says which authorities reach a vend. `OPEN_NOW` on a lane with an act token
+    commands one and the lane may still refuse it; on a lane without one, or at
+    a standalone intercom with no relay, the person is told this process cannot
+    ask for anything. Which of the two they get is decided by what the site
+    declared -- the same `Target.can_act` and declared-relay fields that
+    `AgentConfig.act_surface` renders -- and never by a fixed sentence: a human
+    who believes a barrier moved when it did not is worse off than one who was
+    never called, and so is one told nothing can move when something just did.
     """
 
     OPEN_NOW = "open_now"
@@ -1356,16 +1395,60 @@ AUTHORISATION_DIGITS: dict[str, Authorisation] = {
     "6": Authorisation.CALL_BACK,
 }
 
-#: The authorisations this version can only RECORD, and about which the human
-#: hears one fixed sentence saying so. Derived from the act table below, which
-#: is empty -- so the day an act exists, this follows it rather than being a
-#: second list somebody has to remember to edit.
-ACTS: dict[Authorisation, str] = {}
+#: WHICH authorisations are an ACT, and what each one is called on the lane's
+#: own contract. **It was empty for two rounds and it is not now.**
+#:
+#: The values are `lane_controller.contract.VendAuthority`'s, spelt here because
+#: this package is a CONSUMER of that contract and may not import it. The copy
+#: is held to the real lane by `tests/test_agent_cases.py`, which reads the enum
+#: out of the INSTALLED package and requires the two to agree -- an authority
+#: invented here goes red, and so does one added there without an answer here.
+#:
+#: `DO_NOT_OPEN`, `HOLD`, `TRANSFER` and `CALL_BACK` are deliberately not on it.
+#: None of them opens anything, and a lane has no route for "the human said
+#: no": the record of that decision is this agent's, on its own event surface.
+ACTS: dict[Authorisation, str] = {
+    Authorisation.OPEN_NOW: "human_open_now",
+    Authorisation.OPEN_AND_FLAG: "human_open_and_flag",
+}
 
-CANNOT_ACT: tuple[Authorisation, ...] = (
-    Authorisation.OPEN_NOW,
-    Authorisation.OPEN_AND_FLAG,
+#: THE LANE'S OWN REFUSAL CODES, and this is a COPY because it has to be.
+#:
+#: The operator hears one sentence per code when a vend is refused, and a
+#: sentence is a value in this repository -- so the set has to exist here, in a
+#: package that may not import `lane_controller`. It is held to the real lane by
+#: `tests/test_agent_cases.py`, which reads `VendRefusal` out of the INSTALLED
+#: package and requires the two to be equal in both directions: a code added
+#: there without a sentence here goes red, and so does a sentence for a code
+#: that does not exist.
+#:
+#: Unlike `reason`, this set is CLOSED by the lane contract and published in its
+#: document, so a third-party lane implementing that contract answers from it.
+VEND_REFUSALS: tuple[str, ...] = (
+    "no_vehicle",
+    "malfunction_active",
+    "geometry_incomplete",
+    "decision_in_future",
+    "decision_stale",
+    "decision_mismatch",
+    "already_completed",
+    "not_completable",
+    "busy",
 )
+
+#: The authorisations that MEAN OPEN, derived from the act table so the two
+#: cannot come apart. It used to be a typed tuple with a comment claiming it was
+#: derived from a table that was empty -- which was true of the values and not
+#: of the mechanism, and the mechanism is what a later round relies on.
+#:
+#: **Whether one of them CAN act is not decided here.** It depends on the lane:
+#: an act token declared for it, and a ticket to name in the completion. The
+#: agent asks that at the moment a human keys a digit, and `operator.cannot_open`
+#: is spoken only where the answer is no. The DRIVER's sentence is on the same
+#: branch: `authorisation.<value>` where nothing can act and says so, and
+#: `authorisation.<value>.acting` -- keyed off this table -- where something
+#: can, because there the clause about what this system cannot do is false.
+OPENING_AUTHORISATIONS: tuple[Authorisation, ...] = tuple(ACTS)
 
 
 class AgentCode(StrEnum):
@@ -1402,6 +1485,23 @@ class AgentCode(StrEnum):
     AUDIO_PLAYBACK_FAILED = "audio_playback_failed"
     #: A declared lane could not be read. Per lane, under that lane's name.
     LANE_UNAVAILABLE = "lane_unavailable"
+    #: A declared display could not be written, or its geometry has gone. Per
+    #: display, under that display's name. **The ticket is then not offered**:
+    #: a code minted for a screen that cannot show it is a stay nobody can
+    #: prove, and the case goes to a person exactly as it did in round 5.
+    DISPLAY_UNAVAILABLE = "display_unavailable"
+    #: The lane answered a vend with a 401, a 403 or a 404. Per lane. **This is
+    #: not a refused vend** -- that is a 409 with a code from the lane's own
+    #: published set, and it means the lane considered the request. This means
+    #: it would not: the act token is wrong, or that lane is an older build with
+    #: no such route. The two send somebody to different machines.
+    LANE_ACT_REFUSED = "lane_act_refused"
+    #: An intercom's own relay did not answer. Per intercom. STANDALONE only:
+    #: where there is a lane, the lane moves its own barrier.
+    RELAY_UNREACHABLE = "relay_unreachable"
+    #: An intercom's own relay answered, and what it answered was no -- a
+    #: credential it will not accept, or a port it does not have. Per intercom.
+    RELAY_REFUSED_US = "relay_refused_us"
 
 
 #: WHERE each of the agent's codes gets its answer in this build. One copy, and
@@ -1459,6 +1559,61 @@ class AgentEventKind(StrEnum):
     #: a reader can act on rather than a gap in the log.
     CASE_NOT_SPOKEN = "case_not_spoken"
     CALL_ENDED = "call_ended"
+    #: The calls a PREVIOUS agent process left up, released at startup with how
+    #: many there were. `Agent._reconnect()` has always dealt with the calls a
+    #: lost control socket left behind; `Agent.start()` dealt with nothing, so
+    #: an agent that died with two legs up left baresip holding both and a
+    #: restarted process ANSWERED THE NEXT CALL WITH THE ORPHANS STILL LIVE --
+    #: the user agent's bridge is site-wide, so the previous driver and the
+    #: previous operator were conferenced into a stranger's case.
+    #:
+    #: Written only when there was at least one. A record of nothing having
+    #: happened, on every start of every agent for ever, is noise in the window
+    #: that holds what did.
+    LEFTOVER_CALLS_RELEASED = "leftover_calls_released"
+    #: A ticket was minted and put on a display. Carries `ticket_id`, the lane
+    #: and the case -- **never the `ticket_ref`**, which is on no event, no read
+    #: route and no log line, and lives only in the ticket record.
+    TICKET_ISSUED = "ticket_issued"
+    #: Somebody at that barrier pressed the button while the ticket was pending.
+    #: **That is what binds the ticket to an arrival**, and it is the whole of
+    #: what the press proves: somebody is there. Whether a CAR is there is the
+    #: lane's question, read off its loop at vend time, and never this agent's.
+    TICKET_CONFIRMED = "ticket_confirmed"
+    #: The ticket will not be vended, and why. The reasons are a closed set in
+    #: `tickets.VOID_REASONS`.
+    TICKET_VOIDED = "ticket_voided"
+    #: The lane accepted the completion. **`vend_commanded`, never `vend_opened`
+    #: and never `opened`**: the boom is `no_source` on the lane's own health
+    #: surface, so nothing in this estate has measured a barrier moving, and a
+    #: record that said it did would be the first unmeasured claim in it.
+    VEND_COMMANDED = "vend_commanded"
+    #: The lane refused the completion, with ITS OWN code on the record.
+    VEND_REFUSED = "vend_refused"
+    #: A STANDALONE intercom's own relay was pulsed, on a human's word. Carries
+    #: the intercom, the port and the milliseconds -- and no credential.
+    #:
+    #: **Written only AFTER the unit answered as the document says.** It used to
+    #: be written before the request went out and stood whether the unit
+    #: refused, answered something else, or was not there at all -- so the one
+    #: machine-readable account of a barrier at a site with no platform said the
+    #: relay was pulsed when it was not.
+    RELAY_PULSED = "relay_pulsed"
+    #: The relay did NOT pulse, and `cause` says why in the words the relay
+    #: module used. Its own kind rather than an absence, because the absence of
+    #: `relay_pulsed` is also what a call that never reached `OPEN_NOW` looks
+    #: like, and a site with no platform has this event and nothing else.
+    RELAY_PULSE_FAILED = "relay_pulse_failed"
+    #: The driver was shown a code and TOLD SO in the call they were already on.
+    #: A ticket minted while somebody is on the phone is one the screen cannot
+    #: tell them about, and a press that confirmed it would vend a code they
+    #: never photographed.
+    TICKET_ON_SCREEN = "ticket_on_screen"
+    #: A declared screen's driver now says it is a different size. The frame is
+    #: re-rendered at the new geometry; the old one was being written at the old
+    #: stride, which a driver sees as diagonal noise while the agent believes a
+    #: code is up.
+    DISPLAY_GEOMETRY_CHANGED = "display_geometry_changed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1478,11 +1633,47 @@ class IntercomDescription:
 
     sip_uri: str
     lane: str | None
+    #: Whether a driver at this door can be SHOWN a ticket. DERIVED from
+    #: `[intercoms.<uri>] display` naming a screen this agent opened at startup,
+    #: so it cannot say `true` for a door whose display refused.
+    has_display: bool = False
+    #: Whether this door has a relay of its own. STANDALONE ONLY: where there is
+    #: a lane, the lane moves its own barrier and this is `false`.
+    has_relay: bool = False
 
     def __post_init__(self) -> None:
         _text(self.sip_uri, "intercom.sip_uri")
         if self.lane is not None:
             _text(self.lane, "intercom.lane")
+        if self.has_relay and self.lane is not None:
+            raise ValueError(
+                "an intercom with a lane has no relay of its own. Where there is a lane, the "
+                "LANE writes the identity and moves its own barrier -- an agent pulsing a "
+                "second relay at the same gate would be a vend the lane has no record of."
+            )
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class LaneCapability:
+    """One declared lane, and whether THIS AGENT can command a vend at it.
+
+    **`can_vend` here is about the AGENT and not about the lane**, and the
+    difference is stated because the two words are the same. It is `true` when
+    this agent holds an act token for that lane AND can mint a ticket to name in
+    the completion -- both, because a completion needs an identity.
+
+    **The LANE'S own `can_vend` is on the lane's own surface**, and a consumer
+    that wants it reads it there. Republishing it here would be this agent
+    making a claim about another machine, out of a read it may not have made
+    since the lane last restarted -- which is the shape of every stale
+    capability this project has had reported against it.
+    """
+
+    name: str
+    can_vend: bool
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1534,16 +1725,21 @@ class UserAgentDescription:
 class AgentDescription:
     """`GET /v1/agent` -- who this agent is, and what it is set to do.
 
-    `can_vend` is here and it is `false`, DERIVED from the act table rather than
-    written down: the agent has no route that opens anything, and the day one
-    exists this answer changes with it instead of being a flag somebody has to
-    remember. It is the same field, in the same words, that the lane contract
-    publishes for the same reason.
+    `can_vend` is here, PER LANE, and it is DERIVED rather than written down:
+    true where this agent holds an act token for that lane and a key to sign the
+    ticket a completion has to name. It read `false` everywhere for two rounds
+    because `ACTS` was empty; round 7 filled it and the answer changed with it,
+    which is what deriving it was for. It is the same field, in the same words,
+    that the lane contract publishes for the same reason -- and it is this
+    AGENT's answer about itself, never a republished copy of the lane's.
     """
 
     agent_id: str
     site_id: str
     intercoms: tuple[IntercomDescription, ...]
+    #: Every declared lane, with what this agent can do at it. Empty for a
+    #: standalone-only site.
+    lanes: tuple[LaneCapability, ...]
     user_agent: UserAgentDescription
     driver_languages: tuple[str, ...]
     operator_language: str
@@ -1589,8 +1785,16 @@ class AgentDescription:
 
     @property
     def can_vend(self) -> bool:
-        """Whether this agent can open anything. Derived from the act table."""
-        return bool(ACTS)
+        """Whether this agent can command a vend ANYWHERE. Derived from the
+        per-lane answers, which are themselves derived -- so it cannot say
+        `false` while a lane below it says `true`, and it is a summary rather
+        than a second opinion.
+
+        It was `bool(ACTS)` for two rounds, which asked whether an act existed
+        AT ALL. That is now true everywhere and answers nothing about a site: an
+        agent with an act table and no act token opens nothing.
+        """
+        return any(lane.can_vend for lane in self.lanes)
 
     def to_dict(self) -> dict:
         return {
@@ -1599,6 +1803,7 @@ class AgentDescription:
             "contract_version": self.contract_version,
             "can_vend": self.can_vend,
             "intercoms": [intercom.to_dict() for intercom in self.intercoms],
+            "lanes": [lane.to_dict() for lane in self.lanes],
             "user_agent": self.user_agent.to_dict(),
             "languages": {
                 "driver": list(self.driver_languages),
@@ -1689,6 +1894,18 @@ class AgentHealth:
         }
 
 
+#: The event kinds that are ABOUT one ticket, and therefore name it. DERIVED
+#: from the names rather than listed, so a kind added for tickets carries the
+#: rule without anybody adding it to a second place -- and `relay_pulsed` is
+#: deliberately outside it: a standalone relay is pulsed on a human's word and
+#: the ticket, where a display exists at all, is a separate record.
+TICKET_EVENT_KINDS: frozenset[str] = frozenset(
+    kind.value
+    for kind in AgentEventKind
+    if kind.value.startswith("ticket_") or kind.value.startswith("vend_")
+)
+
+
 @dataclass(frozen=True, slots=True)
 class AgentEvent:
     """One thing the agent did. **There is no field here for a plate.**
@@ -1726,6 +1943,52 @@ class AgentEvent:
     #: CLAIM, never a check: anybody who can send an INVITE can write any value
     #: here. `null` when the user agent did not report one.
     caller_stated_identity: str | None = None
+    #: HOW MANY calls a previous process had left up, on `leftover_calls_released`
+    #: and `null` on every other kind. A count and not a list: the call ids are
+    #: the previous process's bookkeeping and mean nothing to a reader of this
+    #: surface, and what a site needs to know is that there were some.
+    released: int | None = None
+    #: WHICH TICKET, on every ticket and vend event. The agent's own opaque
+    #: handle, and it is the vend's `Idempotency-Key`.
+    #:
+    #: **The `ticket_ref` is NOT here and is on no event at all.** It is what a
+    #: person reads out and what an exit will scan; it identifies one stay and
+    #: is personal data while that stay exists. It lives in the ticket record
+    #: and nowhere else on this box, which is what makes the retention rule mean
+    #: something.
+    ticket_id: str | None = None
+    #: WHO said to open, on `vend_commanded` and `vend_refused`: a member of the
+    #: lane contract's `VendAuthority`, verbatim.
+    authorised_by: str | None = None
+    #: The LANE'S OWN refusal code, on `vend_refused`. Never translated: a lane
+    #: that is not ours has its own vocabulary and the contract requires a
+    #: consumer to escalate on one it does not recognise rather than map it onto
+    #: the nearest thing it knows.
+    code: str | None = None
+    #: WHY a ticket was voided, on `ticket_voided`. A member of
+    #: `tickets.VOID_REASONS`.
+    reason: str | None = None
+    #: The lane's own event cursor at the moment it accepted, on
+    #: `vend_commanded`. **Not a `completion_id`:** the lane's 202 carries
+    #: `event_cursor` and `transit` and nothing else, and the completion's own
+    #: identifier is minted onto the lane's `assisted_identity` event. This is
+    #: the join to that record.
+    lane_event_cursor: int | None = None
+    #: WHICH PORT of an intercom's relay was pulsed, and for how long, on
+    #: `relay_pulsed` and on `relay_pulse_failed`. No credential, ever.
+    relay_port: int | None = None
+    relay_ms: int | None = None
+    #: WHY the pulse did not happen, on `relay_pulse_failed`: the sentence the
+    #: relay module raised, which names the unit's own answer or its silence.
+    #: **Never a credential** -- the two refusals are built from a status, a
+    #: challenge's scheme and its missing fields, and never from the password
+    #: they authenticate with.
+    cause: str | None = None
+    #: WHICH SCREEN, and what its driver now says it is, on
+    #: `display_geometry_changed`. The geometry is `<width>x<height>@<bpp>`,
+    #: which is what decides the stride a frame is written at.
+    display: str | None = None
+    geometry: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in tuple(kind.value for kind in AgentEventKind):
@@ -1740,6 +2003,62 @@ class AgentEvent:
             value.value for value in Authorisation
         ):
             raise ValueError(f"{self.authorisation!r} is not an authorisation in this contract")
+        if self.released is not None and (
+            not isinstance(self.released, int)
+            or isinstance(self.released, bool)
+            or self.released < 1
+        ):
+            raise ValueError(
+                f"released must be a whole number of calls, at least one, or null, got "
+                f"{self.released!r}. It is written only when there were leftovers, so a zero "
+                "here would be a record of nothing having happened."
+            )
+        if self.ticket_id is not None and self.kind not in TICKET_EVENT_KINDS:
+            raise ValueError(
+                f"{self.kind!r} carries no ticket_id in this contract. A ticket id on an "
+                "event that is not about a ticket has nothing to identify."
+            )
+        if self.kind in TICKET_EVENT_KINDS and not self.ticket_id:
+            raise ValueError(
+                f"{self.kind!r} is about one ticket and must name it. An event that says a "
+                "ticket happened without saying which cannot be joined to anything."
+            )
+        if self.reason is not None and self.reason not in VOID_REASONS:
+            raise ValueError(
+                f"{self.reason!r} is not a void reason in this contract. The set is closed "
+                "so a consumer can branch on it."
+            )
+        if (self.released is not None) != (
+            self.kind == AgentEventKind.LEFTOVER_CALLS_RELEASED.value
+        ):
+            raise ValueError(
+                "released belongs on leftover_calls_released and on no other kind, and that "
+                "kind carries it: a count on another event has nothing to count, and that "
+                "event without one says only that something happened."
+            )
+        if self.cause is not None and self.kind != AgentEventKind.RELAY_PULSE_FAILED.value:
+            raise ValueError(
+                f"{self.kind!r} carries no cause in this contract. A cause belongs to the "
+                "one event that says something did not happen."
+            )
+        if self.kind == AgentEventKind.RELAY_PULSE_FAILED.value and not self.cause:
+            raise ValueError(
+                "relay_pulse_failed must say why. An event recording that a barrier did not "
+                "move, with no cause on it, sends nobody anywhere."
+            )
+        if (self.display is not None or self.geometry is not None) and (
+            self.kind != AgentEventKind.DISPLAY_GEOMETRY_CHANGED.value
+        ):
+            raise ValueError(
+                f"{self.kind!r} carries no display or geometry in this contract."
+            )
+        if self.kind == AgentEventKind.DISPLAY_GEOMETRY_CHANGED.value and not (
+            self.display and self.geometry
+        ):
+            raise ValueError(
+                "display_geometry_changed names the screen and what it now says it is. "
+                "Either alone cannot be acted on."
+            )
         if self.keyed is not None and (not self.keyed or not self.keyed.isdigit()):
             raise ValueError(
                 f"keyed must be digits or null, got {self.keyed!r}. It is the only value on "

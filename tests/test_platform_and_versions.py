@@ -19,7 +19,7 @@ from conftest import FakeClock, FakeUtc, config_for, monitor_for
 from fakes import FakeIdentityService, FakePlatform, RecordingSink, identity_server, platform_server
 from foreign_lane import ForeignLane
 from foreign_lane import make_server as foreign_server
-from gate_agent.contract import MonitorCode
+from gate_agent.contract import MonitorCode, TargetKind
 from gate_agent.monitor import UnsupportedContract
 from serving import serving
 
@@ -285,3 +285,73 @@ def test_an_identity_service_on_a_schema_this_build_does_not_know_is_not_read():
         ]
         == "active"
     )
+
+
+# ---------------------------------------------------------------------------
+# ONE COPY OF THE LANE VERSION SET
+# ---------------------------------------------------------------------------
+
+
+def test_the_lane_version_set_is_defined_exactly_once_in_the_package():
+    """Three copies of one number is three places to forget, and it was forgotten.
+
+    On 2026-08-31 the lane contract went to 2 while `agent.py`, `monitor.py` and
+    `capture.py` each still held their own `(1,)`. The monitor and the whole
+    capture process refused to start against the lane on `lane-controller` main
+    and the agent read every lane as `lane_unavailable` -- and every one of those
+    failures is in the REASSURING direction, because each says only that the
+    lane cannot be read.
+
+    So the set is DEFINED in `contract.py` and nowhere else. The three consumers
+    import it, which is why the identity check below is the assertion: a second
+    definition would be a different tuple object even if it held the same
+    numbers.
+    """
+    import ast
+    from pathlib import Path
+
+    import gate_agent
+    from gate_agent import agent as agent_module
+    from gate_agent import capture as capture_module
+    from gate_agent import contract as contract_module
+    from gate_agent import monitor as monitor_module
+    from gate_agent.contract import KNOWN_LANE_VERSIONS
+    from gate_agent.monitor import KNOWN_VERSIONS
+
+    package = Path(gate_agent.__file__).resolve().parent
+    definitions = []
+    for path in sorted(package.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            targets = (
+                [node.target] if isinstance(node, ast.AnnAssign) else
+                list(node.targets) if isinstance(node, ast.Assign) else []
+            )
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id == "KNOWN_LANE_VERSIONS":
+                    definitions.append(path.name)
+    assert definitions == ["contract.py"], (
+        f"KNOWN_LANE_VERSIONS is assigned in {definitions}; it lives in contract.py alone"
+    )
+
+    # THE CONTROL for the sweep: it can see an assignment when there is one, in
+    # both spellings, so the list above is a statement about the package rather
+    # than about a walk that matches nothing.
+    planted = ast.parse(
+        "KNOWN_LANE_VERSIONS: tuple[int, ...] = (9,)\nKNOWN_LANE_VERSIONS = (9,)\n"
+    )
+    seen = [
+        target.id
+        for node in ast.walk(planted)
+        for target in (
+            [node.target] if isinstance(node, ast.AnnAssign)
+            else list(node.targets) if isinstance(node, ast.Assign) else []
+        )
+        if isinstance(target, ast.Name)
+    ]
+    assert seen == ["KNOWN_LANE_VERSIONS", "KNOWN_LANE_VERSIONS"], seen
+
+    # And every consumer is holding THAT object, not a copy that agrees today.
+    for module in (agent_module, capture_module, monitor_module, contract_module):
+        assert module.KNOWN_LANE_VERSIONS is KNOWN_LANE_VERSIONS, module.__name__
+    assert KNOWN_VERSIONS[TargetKind.LANE] is KNOWN_LANE_VERSIONS

@@ -233,6 +233,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _control import intact, judge  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 
 BREAKS = [
@@ -248,8 +252,13 @@ BREAKS = [
         "why": "the monitor imports the lane instead of speaking its contract",
         "file": "src/gate_agent/monitor.py",
         "from": "from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable",
+        # THE BREAK ADDS ONE IMPORT AND CHANGES NOTHING ELSE. It used to drop
+        # `TargetRefusedUs` from the same line, so `monitor.py` raised NameError
+        # and the suite ERRORED -- which the exit-status rule read as "fails as
+        # required" and the summary-line rule correctly refuses. A break that
+        # does two things measures neither.
         "to": "from lane_controller.contract import MalfunctionCode as _Unused  # noqa: F401\n"
-        "from .client import ReadOnlyClient, TargetUnreachable",
+        "from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable",
     },
     {
         "name": "sinks_reach_a_target",
@@ -477,11 +486,19 @@ BREAKS = [
         "to": "        pass",
     },
     {
+        # It used to add `"plate"` to `SIDECAR_FIELDS` with no attribute behind
+        # it, so `Record.sidecar()` raised AttributeError and fourteen tests
+        # ERRORED. That is a suite that could not run, not a guarantee that went
+        # red. The break now does what its name says: it carries the lane
+        # event's DETAIL onto the record, through the field that already exists
+        # for the event's moment.
         "name": "event_detail_is_copied",
         "why": "a lane event's detail is carried onto the record",
-        "file": "src/gate_agent/store.py",
-        "from": '    "capture_minus_lane_event_ms",\n    "bytes",\n)',
-        "to": '    "capture_minus_lane_event_ms",\n    "bytes",\n    "plate",\n)',
+        "file": "src/gate_agent/capture.py",
+        "from": "            triggers.append((reason, event_cursor, occurred_at))",
+        "to": "            triggers.append(\n"
+              "                (reason, event_cursor, occurred_at + str(event.get(\"detail\")))\n"
+              "            )",
     },
     {
         "name": "entry_pending_triggers",
@@ -758,7 +775,20 @@ BREAKS = [
 
 def stage() -> Path:
     directory = Path(tempfile.mkdtemp(prefix="gate-agent-control-"))
-    for entry in ("src", "tests", "docs", "config", "pyproject.toml"):
+    # THIS LIST MUST MATCH `agent_fail_control.py`'s, and until Z17 it did not:
+    # `scripts` and `README.md` were missing here, so every sweep in
+    # `tests/test_unmeasured_claims.py` -- which globs `scripts/*.py` and
+    # `README.md` -- measured a narrower set of files under THIS script than
+    # under that one, silently, and had done since it was written. A missing file
+    # is one fewer file, not a failure, which is the shape this repository has a
+    # rule about. `test_the_readme_is_in_the_swept_set` and the exclusion
+    # assertion in `test_nothing_claims_this_package_cannot_act` are what go red
+    # now if either entry leaves either list.
+    #
+    # Two lists that must agree and nothing enforcing it is the next round's
+    # cleanup; it is named here rather than done, because one shared staging
+    # helper is a change to both scripts and Z17 is not that round.
+    for entry in ("src", "tests", "docs", "config", "scripts", "pyproject.toml", "README.md"):
         source = ROOT / entry
         target = directory / entry
         if source.is_dir():
@@ -782,25 +812,13 @@ def run(directory: Path) -> subprocess.CompletedProcess:
     )
 
 
-def tail(result: subprocess.CompletedProcess, lines: int = 1) -> str:
-    body = [line for line in result.stdout.strip().splitlines() if line.strip()]
-    return " | ".join(body[-lines:]) if body else "(no output)"
-
-
 failures = 0
 
 print("== control A: the suite must PASS intact ==")
 intact_dir = stage()
 try:
-    intact = run(intact_dir)
-    if intact.returncode == 0:
-        print(f"  control A OK — {tail(intact)}")
-    else:
-        print(
-            f"  CONTROL A FAILED — the suite does not pass even intact: {tail(intact)}",
-            file=sys.stderr,
-        )
-        print(intact.stdout, file=sys.stderr)
+    COLLECTED = intact(run(intact_dir))
+    if COLLECTED < 0:
         failures += 1
 finally:
     shutil.rmtree(intact_dir, ignore_errors=True)
@@ -814,23 +832,17 @@ for brk in BREAKS:
         if brk["from"] not in source:
             # A break whose anchor has moved applies nothing, and the run then
             # reports a passing suite as a failed control -- for the wrong
-            # reason. Named here so the two cannot be confused.
+            # reason. Named here so the two cannot be confused. The judgement
+            # below catches the OTHER shape of the same mistake: an anchor that
+            # is still there but whose replacement makes the suite ERROR.
             print(
                 f"  {brk['name']:29} *** ANCHOR NOT FOUND in {brk['file']} ***", file=sys.stderr
             )
             failures += 1
             continue
         path.write_text(source.replace(brk["from"], brk["to"], 1), encoding="utf-8")
-        broken = run(directory)
-        if broken.returncode == 0:
-            print(
-                f"  {brk['name']:29} *** PASSED WHEN {brk['why'].upper()} —"
-                " the suite is not measuring this ***",
-                file=sys.stderr,
-            )
+        if not judge(brk["name"], brk["why"], COLLECTED, run(directory), width=29):
             failures += 1
-        else:
-            print(f"  {brk['name']:29} fails as required when {brk['why']} — {tail(broken)}")
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 

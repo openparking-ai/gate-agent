@@ -18,7 +18,7 @@ import wave
 from pathlib import Path
 
 import gate_agent
-from gate_agent.contract import AgentCase, Authorisation
+from gate_agent.contract import OPENING_AUTHORISATIONS, AgentCase, Authorisation
 from gate_agent.lines import (
     DRIVER_LINES,
     LINES,
@@ -54,6 +54,41 @@ def test_the_line_set_is_derived_from_the_closed_sets():
     for value in Authorisation:
         assert f"authorisation.{value.value}" in DRIVER_LINES
         assert f"menu.{value.value}" in OPERATOR_LINES
+
+
+def test_a_door_that_can_act_has_its_own_authorisation_line_and_it_claims_less():
+    """THE BRANCH, at the line table: two keys per authorisation that can act.
+
+    The unsuffixed key is the one spoken where nothing at this door can ask for
+    anything, and it says so. The `.acting` key is spoken where this agent is
+    about to ask, and there the same clause is a lie the driver hears one
+    sentence before `ticket.vend_commanded`.
+
+    **The invariant is the DIRECTION.** The acting sentence has to be a prefix
+    of the other one -- word for word, in every shipped language -- so a claim
+    can only ever be DROPPED for the door that acts and never added there. A
+    site-dependent promise that exists only on the acting key would be one no
+    driver at a door that cannot act ever hears anybody check.
+
+    Derived from `OPENING_AUTHORISATIONS`, which is `ACTS` itself: an
+    authorisation that becomes an act gets the pair, and one that is not an act
+    does not get a second sentence nobody plays.
+    """
+    for value in Authorisation:
+        base = f"authorisation.{value.value}"
+        acting = f"{base}.acting"
+        if value not in OPENING_AUTHORISATIONS:
+            assert acting not in DRIVER_LINES, acting
+            continue
+        assert acting in DRIVER_LINES, acting
+        for language in SHIPPED_LANGUAGES:
+            told = TEXT[acting][language].strip()
+            instead = TEXT[base][language].strip()
+            assert told and told != instead, f"{acting} in {language}"
+            assert instead.startswith(told), (
+                f"{acting} in {language} says something {base} does not: "
+                f"{told!r} is not the opening of {instead!r}"
+            )
 
 
 def test_every_line_has_a_file_and_every_file_has_a_line():

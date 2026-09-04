@@ -44,8 +44,15 @@ from lane_controller.simulated import (
 PLATE_ON_THE_WIRE = "PURGEME9"
 
 
-def our_lane(identities=None, events=None):
-    """The standard installation: two arming loops, two closing loops."""
+def our_lane(identities=None, events=None, arrivals: int = 1):
+    """The standard installation: two arming loops, two closing loops.
+
+    `arrivals` is how many times this lane's loop will report a vehicle. One is
+    enough for a test that wants a lane with a decision on it; a test that
+    drives a SECOND decision -- to void a ticket, or to arrive after a consumer
+    has taken up its cursor -- needs more, and the identifier is given one
+    identity per arrival so the two cannot run out of step.
+    """
     config = LaneConfig(
         lane_id="lane-1",
         site_id="site-1",
@@ -64,17 +71,18 @@ def our_lane(identities=None, events=None):
     cache.default_action = "allow"
     return LaneController(
         config,
-        loop=SimulatedLoopInput(arrivals=1),
+        loop=SimulatedLoopInput(arrivals=arrivals),
         camera=CannedCameraFeed(),
         vend=RecordingVendOutput(),
         identifier=StubVehicleIdentifier(
-            identities
+            list(identities)
             if identities is not None
             else [
                 VehicleIdentity(
                     plate=PLATE_ON_THE_WIRE, plate_region="TR", confidence=0.97, presence=True
                 )
             ]
+            * arrivals
         ),
         arming_loop_b=OccupancyLoopInput(),
         closing_loops=ScriptedClosingLoops([]),
@@ -90,7 +98,13 @@ class Requests:
         self.seen: list[tuple[str, str]] = []
 
 
-def our_server(controller=None, port: int = 0, token: str | None = None):
+def our_server(
+    controller=None,
+    port: int = 0,
+    token: str | None = None,
+    act_token: str | None = None,
+    arrive: bool = True,
+):
     """`LaneService` on a socket, with every request recorded.
 
     The recorder wraps `handle_one_request` rather than each `do_*`, so a method
@@ -98,8 +112,19 @@ def our_server(controller=None, port: int = 0, token: str | None = None):
     was refused is still an attempt, and it is the one worth catching.
     """
     controller = controller if controller is not None else our_lane()
-    controller.run_once()
-    server = make_server(LaneService(controller), port=port, token=token)
+    if arrive:
+        # ONE arrival before serving, so a monitor reading this lane finds a
+        # decision on it. A test that needs the decision to happen while
+        # something is WATCHING -- which is every ticket test, because a first
+        # read adopts the cursor and acts on nothing already in the window --
+        # passes `arrive=False` and calls `run_once()` itself.
+        controller.run_once()
+    # `act_token` is what makes the REAL vend route serve at all: the lane
+    # refuses it outright when none is configured, which is its own decision and
+    # the reason a test that wants to exercise a vend has to hand one over.
+    server = make_server(
+        LaneService(controller), port=port, token=token, act_token=act_token
+    )
     requests = Requests()
 
     original = server.RequestHandlerClass.handle_one_request

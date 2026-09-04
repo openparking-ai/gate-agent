@@ -23,14 +23,16 @@ from pathlib import Path
 
 import pytest
 from lane_controller import config as _lane_config
+from lane_controller import contract as lane_contract
 from lane_controller.contract import NEVER_ALARM, MalfunctionCode
 
 from conftest import config_for, monitor_for
 from fakes import RecordingSink
+from foreign_lane import CONTRACT_VERSION as FOREIGN_CONTRACT_VERSION
 from foreign_lane import MALFUNCTION_CODES, NEVER_ALARM_CODES, ForeignLane
 from foreign_lane import make_server as foreign_server
 from gate_agent.client import DEFAULT_TIMEOUT
-from gate_agent.contract import MonitorCode
+from gate_agent.contract import KNOWN_LANE_VERSIONS, MonitorCode
 from ours import our_server
 from serving import serving
 
@@ -64,7 +66,17 @@ def test_the_monitor_reads_either_lane_and_publishes_what_it_said(lane):
     health = monitor.health().to_dict()
     target = next(one for one in health["targets"] if one["name"] == "lane")
 
-    assert target["contract_version"] == 1
+    # PRODUCED, not typed. `1` stood here, and it went stale the moment the
+    # lane's contract went to 2 -- a number in a test is measurement too. Ours
+    # comes from the installed package; the foreign stub publishes its own
+    # constant, copied from the document the way its closed sets are.
+    expected = (
+        lane_contract.CONTRACT_VERSION if _which == "ours" else FOREIGN_CONTRACT_VERSION
+    )
+    assert target["contract_version"] == expected
+    # And both really are on a version this build reads, or the poll above would
+    # have been a refusal rather than a read.
+    assert expected in KNOWN_LANE_VERSIONS
     assert target["polled_at"] is not None
     assert {entry["code"] for entry in target["codes"]} == {
         code.value for code in MalfunctionCode

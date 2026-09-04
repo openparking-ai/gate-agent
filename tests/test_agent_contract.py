@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -104,25 +105,74 @@ def test_the_documents_contract_version_is_the_codes(busy):
         assert doc[name]["contract_version"] == CONTRACT_VERSION, name
 
 
-def test_the_document_says_can_vend_is_false_and_so_does_the_code(busy):
-    """The one field this round exists to keep false, checked in both places.
+def test_can_vend_is_derived_per_lane_from_what_this_agent_actually_holds(busy):
+    """The field whose MEANING this round inverts, and it is derived both times.
 
-    It is DERIVED from the act table rather than written down, so the day
-    something in this package can act, this answer changes with it.
+    For two rounds it was `bool(ACTS)` and the answer was `false` everywhere,
+    because nothing in this package could act. That question is now true
+    everywhere and answers nothing about a SITE: an agent with an act table and
+    no act token opens nothing.
+
+    So it is per lane, and it is `true` only where this agent holds BOTH an act
+    token for that lane and a key to sign a ticket with -- a completion names an
+    identity, and there has to be one to name.
+
+    **It is about the AGENT and not about the lane.** The lane's own `can_vend`
+    is on the lane's surface; republishing it here would be this agent making a
+    claim about another machine out of a read it may not have made since that
+    machine restarted.
     """
-    assert doc_payloads()["agent"]["can_vend"] is False
-    assert busy.describe().to_dict()["can_vend"] is False
-    assert busy.describe().can_vend is False
-    # And the control: the property really does follow the table, so `False` is
-    # a measurement rather than a constant.
-    from gate_agent import contract
+    # `busy` declares a lane and no act token, so there is a lane to answer
+    # about and the answer is `false` -- which is the case that matters: an
+    # empty list would make the summary `false` for a reason that has nothing to
+    # do with what this agent holds.
+    described = busy.describe()
+    assert [one.name for one in described.lanes] == ["entry"]
+    assert described.lanes[0].can_vend is False
+    assert described.can_vend is False
+    assert described.to_dict()["can_vend"] is False
+    assert described.to_dict()["lanes"] == [{"name": "entry", "can_vend": False}]
+    # And the DOCUMENT shows the other side of it, so a reader sees what a lane
+    # with an act token looks like rather than only the empty case.
+    published = doc_payloads()["agent"]
+    assert published["can_vend"] is True
+    assert published["lanes"] == [{"name": "entry", "can_vend": True}]
 
-    contract.ACTS[contract.Authorisation.OPEN_NOW] = "planted"
-    try:
-        assert busy.describe().can_vend is True
-    finally:
-        contract.ACTS.clear()
-    assert busy.describe().can_vend is False
+
+def test_can_vend_needs_the_act_token_AND_the_key_and_neither_alone(tmp_path):
+    """Both halves, each varied on its own. Three of the four combinations are
+    `false`, and a check that only tried the two ends would pass on a field that
+    read either one of them."""
+    from conftest import agent_config_for, agent_for
+    from fake_ua import FakeUa
+    from gate_agent.config import Target, TicketSettings
+    from gate_agent.contract import TargetKind
+
+    def described(act_token, tickets):
+        base = agent_config_for(tmp_path, lane_url="http://127.0.0.1:1")
+        config = replace(
+            base,
+            lanes=(
+                Target(
+                    name="entry",
+                    kind=TargetKind.LANE,
+                    url="http://127.0.0.1:1",
+                    poll_seconds=2.0,
+                    act_token=act_token,
+                ),
+            ),
+            tickets=tickets,
+        )
+        return agent_for(config, FakeUa()).describe()
+
+    settings = TicketSettings(
+        signing_key=b"a-key-long-enough-for-the-floor-0000",
+        directory=tmp_path / "tickets",
+    )
+    assert described("a-token", settings).lanes[0].can_vend is True
+    assert described(None, settings).lanes[0].can_vend is False
+    assert described("a-token", None).lanes[0].can_vend is False
+    assert described(None, None).lanes[0].can_vend is False
 
 
 def test_every_agent_code_ships_on_every_response(busy):
@@ -1005,3 +1055,88 @@ def test_the_adapter_turns_a_404_into_an_event_and_leaves_the_rest_alone(tmp_pat
         "param": "486 Max Calls", "from": "sip:door1@10.0.0.9",
     })
     assert tuple(made._events) == ()
+
+
+def test_a_starting_agent_releases_the_calls_a_previous_process_left(tmp_path):
+    """F0.7. `start()` enumerated NOTHING, and the leftovers were bridged.
+
+    The round-5 merge gate measured it and left it open. baresip is a separate
+    program: it outlives the agent, stays registered, and keeps the calls. A
+    restarted agent answered the next call with the previous process's legs
+    still live, and this user agent's bridge is SITE-WIDE -- so the previous
+    driver and the previous operator were about to be conferenced into a
+    stranger's case.
+
+    `_reconnect()` covers a socket lost inside a RUNNING process. It could never
+    cover this: a new process has no socket to lose.
+
+    The SIP suite runs this against a real baresip holding two real calls
+    (`test_a_restarted_agent_releases_the_calls_the_previous_one_left`). This is
+    the same property where the fail-control can reach it -- that script runs
+    `-m "not sip"`, so a guarantee measured only over there is one no control
+    proves.
+    """
+    from conftest import agent_config_for, agent_for
+    from fake_ua import FakeUa
+    from gate_agent.contract import AgentEventKind
+    from gate_agent.ua import UaCall
+
+    ua = FakeUa()
+    # WHAT THE PREVIOUS PROCESS LEFT: one leg at the door and one at the person,
+    # and one of them still ringing -- a ringing call is the one `_reconnect()`
+    # ANSWERS, so if `start()` shared that rule it would answer this one.
+    ua.held = [
+        UaCall(call_id="left-driver", peer_uri="sip:door1@10.0.0.9", ringing=False,
+               account_user=INTERCOM_ACCOUNT),
+        UaCall(call_id="left-operator", peer_uri="sip:duty@10.0.0.5", ringing=False,
+               account_user="agent-operator"),
+        UaCall(call_id="left-ringing", peer_uri="sip:door1@10.0.0.9", ringing=True,
+               account_user=INTERCOM_ACCOUNT),
+    ]
+    agent = agent_for(agent_config_for(tmp_path, standalone=True), ua)
+
+    # ALL THREE ARE GONE, the ringing one included: nothing here knows how long
+    # it has been ringing, no session exists behind it, and its lane read would
+    # be one this process never made.
+    assert not ua.calls(), [one.call_id for one in ua.calls()]
+    assert [command for command in ua.commands if command[0] == "answer"] == []
+    assert agent.session is None
+
+    # AND THE COUNT IS ON THE RECORD, once, with no call id in it.
+    events = agent.events(0).to_dict()["events"]
+    kind = AgentEventKind.LEFTOVER_CALLS_RELEASED.value
+    released = [one for one in events if one["kind"] == kind]
+    assert len(released) == 1, events
+    assert released[0]["released"] == 3
+    for call_id in ("left-driver", "left-operator", "left-ringing"):
+        assert call_id not in json.dumps(released[0])
+
+    # THE HARM: the next call is a clean case with nothing of the old one in it.
+    ua.incoming("sip:door1@10.0.0.9", call_id="new-1", account_user=INTERCOM_ACCOUNT)
+    agent.poll()
+    assert agent.session is not None and agent.session.driver_call == "new-1"
+    # Nothing the previous process left is still up. Asserted this way round
+    # rather than as an equality with the new call: `FakeUa.incoming` does not
+    # put the arriving call into `held`, so an equality here would be a claim
+    # about the fake's bookkeeping instead of about the leftovers.
+    assert not {one.call_id for one in ua.calls()} & {
+        "left-driver", "left-operator", "left-ringing"
+    }
+
+
+def test_an_agent_that_starts_on_a_quiet_user_agent_records_nothing(tmp_path):
+    """THE CONTROL for the test above: no leftovers, no event.
+
+    A record of nothing having happened, on every start of every agent for ever,
+    is noise in the window that holds what did -- and it would make the count
+    above a field that is always there rather than a fact about a restart.
+    """
+    from conftest import agent_config_for, agent_for
+    from fake_ua import FakeUa
+    from gate_agent.contract import AgentEventKind
+
+    ua = FakeUa()
+    agent = agent_for(agent_config_for(tmp_path, standalone=True), ua)
+    kinds = [event["kind"] for event in agent.events(0).to_dict()["events"]]
+    assert AgentEventKind.LEFTOVER_CALLS_RELEASED.value not in kinds, kinds
+    assert [command for command in ua.commands if command[0] == "hangup"] == []

@@ -74,6 +74,13 @@ MALFUNCTION_CODES = (
 #: same document.
 NEVER_ALARM_CODES = ("reference_not_recognised",)
 
+#: The contract version THIS STUB SPEAKS, copied from the document's header the
+#: same way its closed sets are. One constant rather than the four literals that
+#: used to sit in the four payloads: a stub that spoke version 2 on one route
+#: and version 1 on another is not a lane any consumer could be written against,
+#: and the version is the field every consumer checks first.
+CONTRACT_VERSION = 2
+
 #: And this vendor's OWN caveat for the one it publishes. Written here rather
 #: than copied from ours, because the contract says the caveat travels with the
 #: code on the wire -- so a foreign lane's is a foreign lane's, and a monitor
@@ -87,6 +94,10 @@ VENDOR_CAVEAT = (
 #: This vendor's own word for "the attendant took over at the barrier". It is
 #: not in our `Fallback` and never will be.
 VENDOR_REASON = "barrier_operator_intervened"
+
+#: The one route a consumer may POST to, copied from the document the same way
+#: everything else here is.
+VEND_PATH = "/v1/lane/vend"
 
 
 def _break(name: str) -> bool:
@@ -131,6 +142,11 @@ class ForeignLane:
             # either.
             "at": decided_at(),
             "read_ref": None,
+            # ROUND 6, and it is on the document's version-2 state payload: a
+            # decision is one case and one case is one vend, so a consumer has
+            # to be able to see that somebody has already completed this one.
+            # `False` is a lane whose last decision is still open.
+            "completed": False,
         }
         self.transit: dict = {"state": "none", "since": None}
         self.sources: dict[str, str] = {}
@@ -149,6 +165,26 @@ class ForeignLane:
         #: an ordinary page without checking are "the cursor went backwards" and
         #: "it went backwards and did not say so", and this is the second.
         self.suppress_reset = False
+        #: Whether this lane has an ACT SURFACE AT ALL. **Default False, which
+        #: is the lane this stub has always been** -- every existing test that
+        #: sweeps for a POST reaching a lane still measures a lane that refuses
+        #: one. A test that needs a third party who CAN vend turns it on, and
+        #: that fixture had to exist: `tests/foreign_lane` published
+        #: `can_vend: false` and refused every POST, so no test in the suite
+        #: drove a lane that is not ours through a refusal in ITS OWN
+        #: vocabulary -- which is the seat SETTLED 1 requires this module to sit
+        #: in, and the one place the agent had no words for what it was told.
+        self.can_vend = False
+        #: What its vend route answers: `None` is a `202`, and a string is a
+        #: `409` with that code. **The code is this vendor's own**, and the
+        #: point of the fixture is that it need not be one of ours.
+        self.vend_refusal: str | None = None
+        #: The malfunction the refusal names, where it names one.
+        self.vend_malfunction: str | None = None
+        #: Every completion that reached it: the body, and the idempotency key.
+        self.vends: list[dict] = []
+        #: What this lane's 202 carries as its cursor.
+        self.vend_cursor = 8
         #: How many events this lane can still serve behind its cursor, and what
         #: `GET /v1/lane` publishes as `event_window_depth`. Published from the
         #: same attribute the eviction uses, so a test that widens the window
@@ -185,7 +221,7 @@ class ForeignLane:
             "lane_id": self.lane_id,
             "site_id": self.site_id,
             "direction": self.direction,
-            "contract_version": 1,
+            "contract_version": CONTRACT_VERSION,
             # No loops, so nothing to publish. Not `null` and not our five keys.
             "geometry": {},
             "event_window_depth": self.window,
@@ -194,7 +230,7 @@ class ForeignLane:
                 "has_identity_service": False,
                 "has_platform": False,
                 "has_display": False,
-                "can_vend": False,
+                "can_vend": self.can_vend,
             },
         }
         if _break("future_version"):
@@ -203,7 +239,7 @@ class ForeignLane:
 
     def state(self) -> dict:
         payload = {
-            "contract_version": 1,
+            "contract_version": CONTRACT_VERSION,
             "decision": self.decision,
             "transit": self.transit,
         }
@@ -231,7 +267,7 @@ class ForeignLane:
         if self.drop_never_alarm:
             for entry in codes:
                 del entry["never_alarm"]
-        payload = {"contract_version": 1, "codes": codes}
+        payload = {"contract_version": CONTRACT_VERSION, "codes": codes}
         if _break("future_version"):
             payload["contract_version"] = 99
         return payload
@@ -255,7 +291,7 @@ class ForeignLane:
             served.append(item)
         reset = since > self._seq or (oldest is not None and since + 1 < oldest)
         return {
-            "contract_version": 1,
+            "contract_version": CONTRACT_VERSION,
             "cursor": self._seq,
             "reset": False if self.suppress_reset else reset,
             "dropped": self.dropped,
@@ -303,7 +339,45 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    do_POST = _refuse  # noqa: N815
+    def do_POST(self) -> None:  # noqa: N802
+        """The vend route, and ONLY where this lane says it has one.
+
+        A lane with `can_vend` false answers `405` to everything, exactly as it
+        always did -- so the sweeps that require no POST to reach a lane are
+        measuring the same fixture they were.
+        """
+        if not self.lane.can_vend or urlparse(self.path).path != VEND_PATH:
+            return self._refuse()
+        self._record()
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            body = {}
+        self.lane.vends.append(
+            {"body": body, "idempotency_key": self.headers.get("Idempotency-Key")}
+        )
+        if self.lane.vend_refusal is not None:
+            return self._json(
+                409,
+                {
+                    "contract_version": CONTRACT_VERSION,
+                    "code": self.lane.vend_refusal,
+                    "error": "this lane will not complete that",
+                    "malfunction": self.lane.vend_malfunction,
+                },
+            )
+        return self._json(
+            202,
+            {
+                "contract_version": CONTRACT_VERSION,
+                "vend_commanded": True,
+                "event_cursor": self.lane.vend_cursor,
+                "transit": "pending",
+            },
+        )
+
     do_PUT = _refuse  # noqa: N815
     do_PATCH = _refuse  # noqa: N815
     do_DELETE = _refuse  # noqa: N815

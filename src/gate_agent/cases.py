@@ -1,7 +1,15 @@
 """Why a driver is at the intercom, DERIVED from the lane's own payload.
 
-One pure function, `derive()`, and a table in `docs/CONTRACT.md` with a test per
-row. It is pure on purpose: the case decides what a driver hears, and a decision
+Two pure questions, and they are deliberately not one. `derive()` is WHAT A
+DRIVER HEARS -- malfunction-first, with a table in `docs/CONTRACT.md` and a test
+per row. `offers_ticket()` is WHETHER A TICKET IS OFFERED, and it is decided by
+the DECISION alone: the lane owns which malfunctions block a vend, it publishes
+that subset in its own document and not on its wire, and a second copy here
+would be one that came to disagree with the copy the barrier obeys. They used to
+be one question, and the answer was that a lane with its identification engine
+down -- the case this whole module exists for -- offered no ticket at all.
+
+Both are pure on purpose: the case decides what a driver hears, and a decision
 that depended on the agent's mood, its clock or its previous call would be one
 nobody could reproduce from a lane's payload afterwards.
 
@@ -94,6 +102,44 @@ FALLBACK_CASES: dict[str, AgentCase] = {
 #: set already gets.
 DEFAULT_DECISION_MAX_AGE_SECONDS = 120.0
 
+#: THE CASES A TICKET ANSWERS. Four, and every one of them is a driver whose
+#: IDENTITY could not be established at a lane that is otherwise working.
+#:
+#: What they have in common is the whole rule: the lane made a decision, it was
+#: not able to say who this vehicle is, and a ticket is the identity it could
+#: not read. That is why the other cases are NOT here, one by one:
+#:
+#:   * `entry_refused` -- the lane knows who this is and said no. A ticket would
+#:     overturn a rule, and only a human may do that.
+#:   * `vehicle_not_detected` -- the lane believes the lane is empty, and the
+#:     vend route's FIRST refusal is that same loop read. A ticket here is one
+#:     the lane would refuse `no_vehicle` a moment later.
+#:   * `entry_not_confirmed` -- a vend already happened. The question is whether
+#:     the car went through, not whether it may.
+#:   * `malfunction_active` -- **for the SPOKEN case only. The OFFER is decided
+#:     by the decision** (`offers_ticket`), because a blocking malfunction is
+#:     the LANE'S refusal to give and it gives it at the vend, by name, where
+#:     the human then hears it. A lane whose identification engine is down
+#:     answers `engine_unreachable` AND carries `identity_service_down` active
+#:     in the same breath -- that is the ordinary state, not an exotic one, and
+#:     suppressing the ticket there put every arriving driver on the phone for
+#:     the exact case the ticket exists to close.
+#:   * `lane_unavailable`, `stale_decision`, `unrecognised_reason` -- the lane
+#:     cannot be believed about this vehicle, so a ticket would be minted
+#:     against a decision nobody trusts.
+#:   * `standalone` -- there is no lane, no loop and no presence source at all.
+#:     A button that issued a ticket with no car behind it is the market failure
+#:     Gokhan named (SETTLED 3a); the human is the presence check there.
+#:   * `nothing_to_do` -- the driver already got in.
+TICKET_CASES: frozenset[AgentCase] = frozenset(
+    {
+        AgentCase.IDENTIFICATION_UNAVAILABLE,
+        AgentCase.PLATE_NOT_READ,
+        AgentCase.PLATE_UNCLEAR,
+        AgentCase.VEHICLE_NOT_RECOGNISED,
+    }
+)
+
 #: The transit states that mean the lane could not say whether the vehicle
 #: actually went through. `held` is neither a confirmation nor a refutation and
 #: `unconfirmable` is an ordinary lane with no closing loops -- a third party's
@@ -125,6 +171,11 @@ class LaneReading:
     #: that is a fact about the answer this build was given rather than
     #: something to be lost in a conversion before anybody can branch on it.
     decision_at: str | None = None
+    #: `decision.presence`, exactly as the lane published it: `True`, `False` or
+    #: `None`. **`None` is not `False`** -- it is "nobody measured", which is the
+    #: project's standing acceptance applied to the one field that decides
+    #: whether a ticket is offered at all. A ticket is offered only on `True`.
+    presence: bool | None = None
     #: The codes the lane published as `active` with `never_alarm` FALSE, as it
     #: published them. Filtered where the payload is read, not here, because
     #: `never_alarm` travels on the wire with the code and this package holds no
@@ -202,6 +253,24 @@ def derive(
         return AgentCase.LANE_UNAVAILABLE
     if reading.malfunctions:
         return AgentCase.MALFUNCTION_ACTIVE
+    return decision_case(reading, now, max_age_seconds)
+
+
+def decision_case(
+    reading: LaneReading,
+    now: datetime,
+    max_age_seconds: float = DEFAULT_DECISION_MAX_AGE_SECONDS,
+) -> AgentCase:
+    """The case THE DECISION implies, with the health left out of it.
+
+    The same table as `derive()`'s from the age downwards, and it is a separate
+    function because two different questions are asked of it. What a driver
+    HEARS is `derive()`, malfunction-first: a lane with an active code should be
+    described to the person standing at it as a lane with an active code.
+    Whether a TICKET IS OFFERED is this one, through `offers_ticket` -- the lane
+    decides whether a malfunction blocks a vend, it publishes that subset in its
+    own document and not on the wire, and this build holds no copy of it.
+    """
     if reading.outcome is not None:
         # There IS a decision, so it has an age, and this build either knows it
         # or does not. Ahead of every outcome branch, because the age decides
@@ -243,14 +312,55 @@ def derive(
     return AgentCase.UNRECOGNISED_REASON
 
 
+def offers_ticket(
+    reading: LaneReading,
+    now: datetime,
+    max_age_seconds: float = DEFAULT_DECISION_MAX_AGE_SECONDS,
+) -> bool:
+    """Whether a ticket is OFFERED for this reading. **The decision decides.**
+
+    True when the DECISION's case is one of the four and the lane measured a
+    vehicle. The health is not consulted, and that is the whole of this
+    function: `vend_blocking` is the lane's own subset, it is published in the
+    lane's document and NOT on its wire, and this package holds no copy of it
+    (`test_copied_not_rederived.py`). So a blocking malfunction is the LANE'S
+    refusal to give -- it gives it at the vend, named, and the human hears the
+    code (`operator.ticket_refused` and the code's own sentence) -- while the
+    fifteen codes that block nothing stop suppressing a ticket they never had
+    anything to do with. `disk_nearly_full` on a lane's controller is the
+    clearest of them: it is a disk, and it used to put every arriving driver on
+    the phone.
+
+    **The clock is here for the same reason `derive` has one**, and it is not a
+    convenience: a decision past `[cases] decision_max_age_seconds` was made for
+    somebody else, and a ticket minted against one is a code on a screen for a
+    car that has gone. A signature with no clock in it would have dropped that
+    guard while removing the health one.
+
+    `presence is True` and nothing else -- `None` is "nobody measured", which is
+    every lane by default (SETTLED 3f), and an unmeasured presence putting a
+    code on a screen is this project's own fraud arriving through a display
+    instead of through a loop.
+    """
+    if reading.lane is None or not reading.readable:
+        return False
+    return (
+        decision_case(reading, now, max_age_seconds) in TICKET_CASES
+        and reading.presence is True
+    )
+
+
 __all__ = [
     "DECISION_AGE_NOTE",
     "DEFAULT_DECISION_MAX_AGE_SECONDS",
     "FALLBACK_CASES",
     "OUTCOMES",
     "REQUIRED_FALLBACK_REASONS",
+    "TICKET_CASES",
     "TRANSIT_STATES",
     "UNCONFIRMED_TRANSITS",
     "LaneReading",
+    "decision_case",
     "derive",
+    "offers_ticket",
 ]
