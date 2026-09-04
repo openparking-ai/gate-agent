@@ -532,8 +532,20 @@ PUBLISHED_SETS = {
         digit: value.value for digit, value in AUTHORISATION_DIGITS.items()
     },
     "agent_event_kinds": lambda: [kind.value for kind in AgentEventKind],
+    # THE VOID REASONS, published both ways from round 7. The set is what a
+    # standalone site's own record says happened to a ticket -- it is the only
+    # account of one where there is no platform -- and it grew from five to ten
+    # in the round that stopped writing `lane_decided_again` for six outcomes
+    # that were not a new decision.
+    "void_reasons": lambda: list(_void_reasons()),
     "shipped_languages": lambda: list(_shipped_languages()),
 }
+
+
+def _void_reasons():
+    from gate_agent.tickets import VOID_REASONS
+
+    return VOID_REASONS
 
 
 def _shipped_languages():

@@ -45,6 +45,7 @@ from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable
 from .config import MonitorConfig, Target
 from .contract import (
     CONTRACT_VERSION,
+    KNOWN_LANE_VERSIONS,
     REFUSED_CODE,
     UNREACHABLE_CODE,
     EventPage,
@@ -65,12 +66,6 @@ from .contract import (
 from .sinks import DeliveryFailed
 
 log = logging.getLogger(__name__)
-
-#: Lane contract versions this monitor can read. A target answering anything
-#: else is REFUSED rather than partially read -- the lane contract's own rule,
-#: applied by the consumer it was written for. Half-understanding a payload about
-#: a vehicle is worse than admitting you cannot read it.
-KNOWN_LANE_VERSIONS: tuple[int, ...] = (1,)
 
 #: Vehicle ID record schema versions this monitor can read, from that contract's
 #: `schema_version`. Same rule, same reason.

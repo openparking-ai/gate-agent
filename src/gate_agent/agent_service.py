@@ -4,16 +4,23 @@
     GET /v1/agent/health          every agent code, every time
     GET /v1/agent/events?since=N  what it did, and never a plate
 
-**There is deliberately no route that changes anything, and on this surface that
-is the whole point of the round.** `ACT_ROUTES` is empty; every method other than
-`GET` is answered by one shared refusal, swept exactly as the monitor's and the
+**There is deliberately no route that changes anything ON THIS SURFACE, and that
+is the whole point of it.** `ACT_ROUTES` is empty; every method other than `GET`
+is answered by one shared refusal, swept exactly as the monitor's and the
 capture process's are. A route here that opened a barrier would be the thing
 every outside reviewer of this project has named, reachable by anything that can
 open a TCP connection to a gate controller.
 
-`can_vend` is on the first route and it is `false`, DERIVED from an empty act
-table rather than written down -- so it cannot say `false` while something else
-in this package can act.
+**That is a statement about THIS SURFACE and not about the package.** From round
+7 the agent can command a vend at a lane it holds an act token for and can pulse
+a standalone intercom's relay -- `docs/CONTRACT.md`, "IT CAN NOW COMMAND A
+VEND", is where that is described. What is true here is narrower and it is the
+part that matters for a socket: nothing a CALLER of this surface sends can move
+a barrier.
+
+`can_vend` is on the first route, per lane, DERIVED from the act table and the
+act token rather than written down -- so it cannot say `true` for a lane this
+process holds nothing for, and cannot say `false` while it does.
 
 **Local, always.** Loopback by default; off loopback it refuses to start without
 a shared token -- `InsecureBind`, imported from `service` rather than restated,
@@ -42,9 +49,11 @@ READ_ROUTES: tuple[str, ...] = (
     "/v1/agent/events",
 )
 
-#: Routes that CHANGE something. EMPTY, and this module has no way to grow one
-#: quietly: the agent holds no client capable of a method other than `GET`, so a
-#: route here would have nothing behind it to call.
+#: Routes that CHANGE something. EMPTY, and it is empty by decision rather than
+#: by incapacity: from round 7 this package DOES hold a client that can build a
+#: `POST` (`act.py`, at a lane, with an act token). What is refused here is a
+#: CALLER of this surface reaching it. A route added here would hand that client
+#: to anything that can open a socket to the box.
 ACT_ROUTES: tuple[str, ...] = ()
 
 MAX_QUERY_CURSOR = 2**63 - 1
@@ -64,6 +73,15 @@ class AgentService:
 
     def events(self, since: int):
         return self.agent.events(since)
+
+    def act_surface(self) -> tuple[str, ...]:
+        """What the agent behind this surface can ask a barrier to do.
+
+        Passed straight through from `AgentConfig.act_surface` -- the ONE place
+        this package says it, which the startup banner renders too. Nothing here
+        decides anything; a second opinion is how the two come to disagree.
+        """
+        return self.agent.config.act_surface
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -105,13 +123,37 @@ class _Handler(BaseHTTPRequestHandler):
         Spelt once and shared, so the contract test can sweep the handler and
         require that every `do_*` other than `do_GET` IS this function -- a route
         that opened a barrier would have to stop being it.
+
+        **The body was a fixed sentence and it went false.** It read "this agent
+        opens nothing, here or at any lane" -- true until round 7 gave this
+        package a vend route, and served over HTTP to any caller for the whole of
+        the round that made it false. It is now DERIVED from
+        `AgentConfig.act_surface`, the same property the startup banner renders,
+        so what a caller is told about this process is what the process can
+        actually do. The first clause is unchanged and is about the SURFACE,
+        which is what a caller asked about.
+
+        **It exposes no more than the route beside it already does.** The lane
+        names and intercom URIs in the derived half are on `GET /v1/agent` in
+        full, and this surface is loopback-only unless a site gave it a token --
+        so a caller who can reach a `405` here can already read them. No
+        credential, no `ticket_ref` and no act token is in it, which is the
+        round-6 rule and is swept.
         """
         self.send_response(405)
         self.send_header("Allow", "GET")
+        surface = self.service.act_surface()
+        if surface:
+            can = (
+                "this process can ask a barrier to move where it was configured to: "
+                + "; ".join(surface)
+            )
+        else:
+            can = "nothing in this configuration can ask a barrier to move"
         body = json.dumps(
             {
-                "error": "this surface is read-only; this agent opens nothing, here or at "
-                "any lane. An authorisation is a record of what a person said.",
+                "error": "this surface is read-only and no request to it moves anything. "
+                f"Separately, and not through this surface: {can}.",
                 "contract_version": CONTRACT_VERSION,
             }
         ).encode("utf-8")

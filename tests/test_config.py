@@ -47,6 +47,7 @@ def token_file(tmp_path):
     """A real file holding a real token. There is no key that takes a value."""
     path = tmp_path / "platform.token"
     path.write_text("operator-token\n")
+    path.chmod(0o600)
     return str(path)
 
 
@@ -138,7 +139,8 @@ def test_a_token_file_that_holds_nothing_is_refused(tmp_path):
     """
     empty = tmp_path / "empty.token"
     empty.write_text("   \n")
-    with pytest.raises(ConfigError, match="holds no token"):
+    empty.chmod(0o600)
+    with pytest.raises(ConfigError, match="holds no credential"):
         MonitorConfig.from_dict(
             {
                 **BASE,
@@ -156,6 +158,7 @@ def test_a_token_file_that_holds_nothing_is_refused(tmp_path):
     # token is read out of it rather than being the path.
     real = tmp_path / "real.token"
     real.write_text("operator-token\n")
+    real.chmod(0o600)
     parsed = MonitorConfig.from_dict(
         {
             **BASE,
@@ -183,6 +186,7 @@ def test_a_platform_target_declares_its_garage_and_its_token(tmp_path):
     """
     token = tmp_path / "t"
     token.write_text("operator-token")
+    token.chmod(0o600)
 
     with pytest.raises(ConfigError, match="token_file"):
         config(targets={"platform": {"url": "http://x", "garage_id": "g"}})
@@ -274,6 +278,7 @@ def test_a_webhook_sink_declares_its_token_as_a_file(tmp_path):
 
     token = tmp_path / "hook.token"
     token.write_text("hook-token")
+    token.chmod(0o600)
     parsed = config(
         targets=a_lane(),
         sinks={"webhook": {"url": "https://paging.example/hook", "token_file": str(token)}},
@@ -302,6 +307,7 @@ def test_a_token_file_path_resolves_against_the_configuration_file(tmp_path):
     """
     token = tmp_path / "platform.token"
     token.write_text("operator-token")
+    token.chmod(0o600)
     config_file = tmp_path / "monitor.toml"
     config_file.write_text(
         '[monitor]\nid = "m"\nsite_id = "s"\n\n'
@@ -372,6 +378,7 @@ def test_the_capture_example_configuration_is_refused_as_shipped_and_says_why():
 
     directory = Path(tempfile.mkdtemp())
     (directory / "front.auth").write_text("operator:s3cret\n", encoding="utf-8")
+    (directory / "front.auth").chmod(0o600)
     raw["capture"]["directory"] = str(directory)
     parsed = CaptureConfig.from_dict(raw, relative_to=directory)
     assert [camera.camera_id for camera in parsed.cameras] == ["front"]
@@ -415,6 +422,7 @@ def test_a_webhook_url_carrying_userinfo_is_refused_too(tmp_path):
     """
     token = tmp_path / "webhook.token"
     token.write_text("page-me\n")
+    token.chmod(0o600)
     sinks = {"webhook": {"url": "https://ops:S3CRET@example.com", "token_file": str(token)}}
     with pytest.raises(ConfigError, match="userinfo in URL"):
         config(targets=a_lane(), sinks=sinks)

@@ -159,3 +159,204 @@ def test_what_replaced_it_is_in_the_document_and_says_it_is_not_measured():
 def test_a_claim_nobody_could_reproduce_is_gone(claim):
     """Each one verbatim, so the assertion is about the sentence and not a paraphrase."""
     assert [name for name, text in published().items() if claim in text] == []
+
+
+# ---------------------------------------------------------------------------
+# Z17 — THE CLAIM THAT THIS PACKAGE CANNOT ACT
+# ---------------------------------------------------------------------------
+#
+# Round 7 gave this package its first route to a barrier and left twenty-one
+# published clauses saying it had none -- the README's opening lines, five
+# modules' introductory prose, two sentences in `docs/CONTRACT.md`, and the JSON
+# body served to any non-GET caller. Every one was TRUE at the previous `main`
+# and false from the commit that added `act.py`.
+#
+# Two of them were repaired the round before this one, and the reason the other
+# nineteen survived is the reason this block exists: the two that were fixed were
+# the two somebody had ENUMERATED BY PATH, and the check written to hold them was
+# a phrase match against one file. A list of sites is a guess with the shape of a
+# specification.
+#
+# THE EXPECTATION HERE IS DERIVED FROM THE MEASUREMENT, not from a second copy of
+# the assertion: `ACTS` is what says whether any authorisation in this package
+# reaches a vend, and it is read below rather than assumed.
+
+#: The BLANKET phrasings -- each one claims it of the PACKAGE, the AGENT or "this
+#: build", with no scope on it. Every one of them is a sentence that was in the
+#: tree at `35e0be1`, and none of THESE WORDINGS may appear anywhere.
+#:
+#: THAT IS THE WHOLE OF WHAT THIS PROMISES, and it is smaller than the concept it
+#: is named for: an enumerated list of wording families is silent on a sentence
+#: that says the same thing in words that are not on it. Green here is not
+#: evidence that no such sentence is in the tree -- Z18 found one that was. Where
+#: that gap is closed is stated in `test_nothing_claims_this_package_cannot_act`.
+#:
+#: Deliberately NOT in this list: `opens nothing`, `no opening authority` and
+#: `no vend route` on their own. Those survive in true, SCOPED sentences -- about
+#: the monitor, about the capture process, about a site that declared no act
+#: token, and inside the fail-control break that plants the old banner back --
+#: and a query that fired on them would have to carry an allow-list of about
+#: thirty strings, which is the checklist this block exists to avoid.
+CANNOT_ACT = re.compile(
+    r"no client in this package capable"
+    r"|client in this package (?:still )?cannot build"
+    r"|cannot build a request that is not a[^A-Za-z]*GET"
+    r"|(?:neither|none of them) can open a barrier"
+    r"|it is never an act"
+    r"|has no route that could"
+    r"|this (?:version|build) cannot (?:move|operate) (?:a|the) barrier"
+    r"|^\W*IT OPENS NOTHING"
+    # Four more, added after the first run of this sweep against `35e0be1`
+    # showed it caught fifteen of the twenty-two clauses and not these. Each is
+    # narrow on purpose and each was checked against the survivors below: the
+    # true sentences say "the MONITOR holds no client", "THIS PROCESS holds no
+    # client", "it opens nothing" and "Neither calls a vend", none of which
+    # these reach.
+    r"|None has opening authority"
+    r"|Nothing here calls a vend"
+    r"|the agent holds no client"
+    r"|and open nothing\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+#: Every deleted sentence, verbatim from `35e0be1`, as the POSITIVE CONTROL for
+#: the sweep above. An absence claim is a claim about a SEARCH; without these,
+#: `test_nothing_claims_this_package_cannot_act` asserts a fact about a regex.
+DELETED_AT_35E0BE1 = (
+    # README.md:3
+    "It ships **three processes**, and none of them can open a barrier.",
+    # README.md:15
+    "An authorisation is a record of what somebody said. It is never an act.",
+    # README.md:46
+    "There is no client in this package capable of a method other than `GET`",
+    # README.md:50
+    "one fixed sentence to that person saying this version cannot operate the barrier.",
+    # src/gate_agent/__init__.py:3
+    "It ships TWO processes and neither can open a barrier.",
+    # src/gate_agent/__init__.py:20
+    "There is no client in this package capable of another method",
+    # src/gate_agent/agent.py:8
+    "**IT OPENS NOTHING.** An authorisation is a RECORD of what a person said.",
+    # src/gate_agent/agent.py:11
+    "this package cannot build a request that is not a `GET`.",
+    # src/gate_agent/cli.py:7
+    "**Three processes, beside each other, and none of them can open a barrier.**",
+    # src/gate_agent/contract.py:12 and docs/CONTRACT.md:19 / :720
+    "there is no client in this package capable of a method other than `GET`",
+    # src/gate_agent/contract.py:1281
+    "package still cannot build a request that is not a GET.",
+    # src/gate_agent/contract.py:1356
+    "opens nothing, because this package has no route that could",
+    # README.md:43
+    "**None has opening authority.**",
+    # README.md:44
+    "Nothing here calls a vend, resolves a transit, or writes to a lane.",
+    # src/gate_agent/agent.py:1733
+    "Record it, tell both sides what it means, and open nothing.",
+    # src/gate_agent/agent_service.py:46
+    "the agent holds no client capable of a method other than `GET`",
+)
+
+
+def test_the_sweep_for_a_package_that_cannot_act_sees_every_deleted_sentence():
+    """THE POSITIVE CONTROL, and it comes first because the sweep needs one.
+
+    Each sentence is quoted from the tree at `35e0be1`. If any of them stops
+    matching, the sweep below has narrowed under somebody's edit and its silence
+    means nothing.
+    """
+    blind = [one for one in DELETED_AT_35E0BE1 if not CANNOT_ACT.search(one)]
+    assert blind == [], "the sweep cannot see what it swept for:\n  " + "\n  ".join(blind)
+
+
+def test_the_sweep_does_not_fire_on_the_scoped_sentences_that_survive():
+    """THE OTHER HALF OF THE CONTROL: a query that fires on everything is not one.
+
+    These are true at this tip and must stay: the monitor's and the capture
+    process's own claims, and the round-5 configuration the contract calls
+    supported.
+    """
+    survivors = (
+        "**This surface is READ ONLY, and the MONITOR behind it has no opening authority.**",
+        "The capture process: it photographs a lane, and it opens nothing.",
+        "an agent with an act table and no act token opens nothing.",
+        "The monitor holds no client capable of a method other than `GET`.",
+        "This process holds no client capable of another method.",
+        "Neither calls a vend, resolves a transit, or writes to a lane.",
+        "a site that declares neither still opens nothing",
+        "  OPENS NOTHING: no lane here declares an act token and no intercom declares a relay",
+    )
+    fired = [one for one in survivors if CANNOT_ACT.search(one)]
+    assert fired == [], "the sweep is too wide and would force an allow-list:\n  " + "\n  ".join(
+        fired
+    )
+
+
+def test_nothing_claims_this_package_cannot_act():
+    """Z17. The expectation is DERIVED: `ACTS` is non-empty, so no file may say it is.
+
+    QUERY: `CANNOT_ACT` above, over every `.py`, `.md` and `.toml` this
+    repository publishes, every hit accounted for one by one rather than counted.
+
+    **What this cannot see**, stated beside the absence claim because an absence
+    claim is a claim about a SEARCH: every wording that is not on the list above.
+    The age of the sentence has nothing to do with it. Z18 proved that the
+    expensive way -- `docs/CONTRACT.md:2363` at `75876ee`, the closing summary of
+    the authorisation section, an OLD sentence carried verbatim from
+    `origin/main` and made false by round 7, of exactly this family, in a file
+    this sweep covers, and this test was GREEN over it. The docstring here used
+    to name the blind spot as "a NEW false sentence, written in words nobody has
+    used yet", which is narrower than the truth and is part of why nobody looked.
+
+    **What closes that gap is not this test**, and there are two of them. The
+    first is `test_what_this_can_act_on_is_derived_in_one_place` below, which is
+    structural rather than a word query. The second is outside the repository:
+    the GATE's negation-pairing read over `README.md`, `docs/CONTRACT.md` and
+    `config/agent.example.toml`, a named step of Z14 since 2026-09-04, whose
+    expected result is that every hit is true of the code at the tip under gate,
+    or absent. Widening this expression instead was considered and rejected: a
+    net wide enough to catch a rewording also catches the ~122 legitimate
+    negation sentences beside it and needs an allow-list to tell them apart,
+    which is the checklist this block exists to avoid.
+    """
+    from gate_agent.contract import ACTS
+
+    assert ACTS, (
+        "THE PREMISE OF THIS TEST: this package holds authorisations that act. "
+        "If `ACTS` is ever emptied, these sentences become true again and this "
+        "test must be rewritten rather than deleted."
+    )
+    files = published()
+    # THE TWO FAIL-CONTROL SCRIPTS ARE EXCLUDED, and the reason is the same one
+    # that excludes this file from `published()` itself: their whole content is
+    # sentences that MUST be false, because they are the broken versions each
+    # guarantee is measured against. `the_readme_says_the_package_cannot_open_a_
+    # barrier` carries the README's deleted sentence verbatim, on purpose.
+    # Sweeping them for false sentences is a category error, not an allowance.
+    harness = ("scripts/agent_fail_control.py", "scripts/monitor_fail_control.py")
+    for name in harness:
+        assert name in files, f"{name} is not in the swept set, so this exclusion excludes nothing"
+        del files[name]
+
+    hits = []
+    for name, text in files.items():
+        for line, sentence in sentences(text):
+            if CANNOT_ACT.search(sentence):
+                hits.append(f"{name}:~{line}: {sentence.strip()[:160]!r}")
+    assert hits == [], (
+        "this package can command a vend and these say it cannot:\n  " + "\n  ".join(hits)
+    )
+
+
+def test_the_readme_is_in_the_swept_set():
+    """The sweep above is worthless on a tree that does not carry the README.
+
+    `published()` globs `README.md` and a missing file is silently one fewer
+    file, not a failure -- so the fail-control's staged copy of the tree has to
+    carry it, and this is what goes red if somebody stops staging it. It is the
+    same shape as every other rule here: a check that cannot fail is not one.
+    """
+    assert "README.md" in published(), (
+        "README.md is not in the swept set on this tree, so the Z17 sweep above "
+        "measured every file except the one a reader opens first"
+    )

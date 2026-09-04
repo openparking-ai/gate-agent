@@ -131,9 +131,14 @@ class FakeUa:
 
     def hangup(self, call_id: str) -> None:
         self.commands.append(("hangup", call_id))
+        # AND THE CALL IS GONE. A fake that recorded the command and went on
+        # holding the call could not measure a release at all: every assertion
+        # about what is still up would read the same before and after.
+        self.held = [one for one in self.held if one.call_id != call_id]
 
     def hangup_all(self) -> None:
         self.commands.append(("hangup_all", ""))
+        self.held = []
 
     #: The calls this fake is holding, for a test that asks what a reopened
     #: control socket found. Set by a test; empty otherwise.
@@ -145,6 +150,15 @@ class FakeUa:
         self._check()
         events, self.events = tuple(self.events), []
         return events
+
+    def close(self) -> None:
+        """The seam the real adapter closes its control socket in.
+
+        Here because the fake stands in for the WHOLE seam: `cli.cmd_agent`
+        calls this on the way out, and a fake missing one verb makes an exit
+        path untestable by construction.
+        """
+        self.commands.append(("close", ""))
 
     def reconnect(self) -> tuple[UaCall, ...]:
         """The seam's answer to a socket that was lost. Empty when nothing was.

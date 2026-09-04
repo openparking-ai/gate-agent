@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -40,7 +40,31 @@ from .camera import DEFAULT_MAX_SNAPSHOT_BYTES, DEFAULT_SNAPSHOT_TIMEOUT
 from .cases import DEFAULT_DECISION_MAX_AGE_SECONDS
 from .client import DEFAULT_TIMEOUT
 from .contract import Authorisation, SinkKind, TargetKind
-from .lines import DRIVER_LINES, OPERATOR_LINES, SHIPPED_LANGUAGES, audio_name, missing_text
+from .display import DisplayUnavailable, open_display
+from .lines import (
+    DRIVER_LINES,
+    OPERATOR_LINES,
+    SHIPPED_LANGUAGES,
+    audio_name,
+    missing_display_text,
+    missing_text,
+    undrawable_display_text,
+)
+from .relay import (
+    DEFAULT_ANSWER_MARGIN_S,
+    PORTS,
+    PULSE_MS_BOUNDS,
+    RELAY_KINDS,
+    Relay,
+)
+from .tickets import (
+    DEFAULT_CONFIRM_WINDOW_S,
+    DEFAULT_HELP_WINDOW_S,
+    MINIMUM_SIGNING_KEY,
+    BadTicket,
+    check_field,
+)
+from .tickets import DEFAULT_RETENTION_DAYS as DEFAULT_TICKET_RETENTION_DAYS
 from .ua_baresip import (
     DEFAULT_RECONNECT_SECONDS,
     DEFAULT_UA_TIMEOUT,
@@ -159,6 +183,122 @@ CREDENTIAL_VALUE_KEYS = {
     "dial_secret": "dial_secret_file",
 }
 
+#: The permission bits a file holding ANY credential this package reads may not
+#: have. `0o077` is group and other, so what is required is `0600` or `0400`.
+#:
+#: **It used to guard one key.** `[intercoms.<uri>] dial_secret_file` had it
+#: from the round that made a dial secret an intercom's identity, and nothing
+#: else did -- so a lane's bearer token, the platform's operator token, the
+#: webhook's token, a camera's password and the shared token on the read
+#: surfaces could all be world-readable, and this package would start on them
+#: without a word. A credential every account on the box can read is a
+#: credential every account on the box holds, and which credential it is only
+#: changes what they can do with it.
+SECRET_FORBIDDEN_MODE = 0o077
+
+#: WHAT EACH CREDENTIAL FILE IS, one sentence per key, keyed by the `where` the
+#: refusal names. Read into the refusal message so a person who has just been
+#: told to `chmod 600` something is also told what they are protecting -- and
+#: kept HERE, in one mapping, so a key that gains a credential file without a
+#: sentence is a key somebody has to write one for.
+#:
+#: The key is the `where` with its per-site parts collapsed: `[lanes.*]` covers
+#: `[lanes.entry]` and every other, because the sentence is about the KIND of
+#: credential and not about one site's name for it.
+SECRET_FILE_IS: dict[str, str] = {
+    "[targets.*].token_file": (
+        "the credential this monitor presents to that target. The platform's is an OPERATOR "
+        "token: it reads every garage's devices."
+    ),
+    "[sinks.webhook].token_file": (
+        "the credential this monitor presents to the paging system it POSTs to."
+    ),
+    "[cameras.*].auth_file": (
+        "a camera's `user:password`. Anybody who can read it can photograph whatever that "
+        "camera sees."
+    ),
+    "[lanes.*].token_file": (
+        "the credential this agent presents to that lane's READ routes."
+    ),
+    "[intercoms.*].dial_secret_file": (
+        "the identity of an intercom. Anybody who can read it can call this agent as that "
+        "door and have a person dispatched to a barrier nobody is standing at."
+    ),
+    "--auth-token-file": (
+        "the shared token this process's own read surface requires. It publishes which of a "
+        "site's lanes are broken and when a human was called and did not answer."
+    ),
+    "[tickets].signing_key_file": (
+        "THE KEY EVERY TICKET AT THIS SITE IS SIGNED WITH. Anybody who can read it can mint "
+        "a ticket this site's own exit will accept."
+    ),
+    "[lanes.*].act_token_file": (
+        "the credential that OPENS A BARRIER at that lane. It is not the read token and the "
+        "read token does not authorise it."
+    ),
+    "[intercoms.*].relay.credentials_file": (
+        "an intercom's own `user:password`. Anybody who can read it can pulse that unit's "
+        "relay, which is wired to a barrier."
+    ),
+}
+
+
+def _secret_file_is(where: str) -> str:
+    """The one sentence for this key, with a site's own names collapsed out.
+
+    `[lanes.entry].token_file` and `[intercoms.'sip:door1@x'].dial_secret_file`
+    are the same KIND of credential as every other lane's and every other
+    door's, so the mapping is keyed on the kind. A `where` with no sentence is a
+    programming error here rather than a silent blank in a refusal, so it says
+    so out loud.
+    """
+    collapsed = re.sub(r"^\[([a-z_]+)\.[^\]]+\]", r"[\1.*]", where)
+    return SECRET_FILE_IS.get(collapsed, SECRET_FILE_IS.get(where, ""))
+
+
+def read_secret_file(value, where: str, relative_to: Path | None) -> str:
+    """A credential, out of the file that holds it, WITH THE PERMISSION GUARD.
+
+    THE ONE PLACE this package reads a credential from a disk.
+    `tests/test_config.py` sweeps the source and requires it: a second reader
+    would be a second place for the guard to be missing, which is exactly how
+    this ended up guarding one key out of six.
+
+    Three refusals, in this order:
+
+      * **not a path.** A credential is never a value in a configuration file:
+        a value here is a value in every backup of that file and in everything
+        anybody pastes it into.
+      * **readable by more than its owner.** `0o077` is group and other, so
+        `0600` or `0400`. What the file IS travels in the message from
+        `SECRET_FILE_IS`, because "chmod 600 it" without saying what is at stake
+        is an instruction somebody works around.
+      * **empty or whitespace-only.** Refused rather than read as "no credential
+        configured", which is a truncated file silently turning authentication
+        off on exactly the target that needed it.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{where} must be a path to a file holding the credential")
+    path = _resolve(value.strip(), relative_to)
+    try:
+        mode = path.stat().st_mode
+    except OSError as exc:
+        raise ConfigError(f"{where}: could not read {path}: {exc}") from exc
+    if mode & SECRET_FORBIDDEN_MODE:
+        what = _secret_file_is(where)
+        raise ConfigError(
+            f"{where}: {path} is readable by more than its owner ({mode & 0o777:04o}). "
+            f"This file holds {what} `chmod 600` it."
+        )
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"{where}: could not read {path}: {exc}") from exc
+    token = raw.strip()
+    if not token:
+        raise ConfigError(f"{where}: {path} holds no credential")
+    return token
+
 
 class ConfigError(ValueError):
     """A configuration this monitor will not run on, named at startup.
@@ -194,10 +334,27 @@ class Target:
     #: and an assumption -- see `client.DEFAULT_TIMEOUT` for what it is drawn
     #: against, which is the lane's own bound on the machine BEHIND it.
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    #: LANE ONLY, and it is the credential that OPENS A BARRIER. **A separate
+    #: token from `token`, deliberately and not as belt and braces:** `token`
+    #: reads where a vehicle was, and a read token that also authorised an act
+    #: would mean every consumer holding a read credential held an opening one.
+    #: The lane's own bind rule makes the same split on its side.
+    #:
+    #: `None` means this agent is READ-ONLY at that lane -- `can_vend` is false
+    #: for it on `GET /v1/agent`, no ticket is offered there, and a human's
+    #: `OPEN_NOW` hears `operator.cannot_open`. That is a supported
+    #: configuration and not a broken one: a site may want the intercom to reach
+    #: a person and nothing more.
+    act_token: str | None = None
 
     @property
     def authenticated(self) -> bool:
         return self.token is not None
+
+    @property
+    def can_act(self) -> bool:
+        """Whether this agent holds a credential that opens a barrier here."""
+        return self.act_token is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,28 +669,6 @@ def _refuse_userinfo(url: str, where: str) -> None:
         )
 
 
-def _read_token(value, where: str, relative_to: Path | None) -> str:
-    """A credential, out of the file that holds it.
-
-    An empty or whitespace-only file is refused rather than read as "no
-    credential configured", which is a truncated file silently turning
-    authentication off on exactly the target that needed it.
-    """
-    if not isinstance(value, str) or not value.strip():
-        raise ConfigError(f"{where} must be a path to a file holding the token")
-    path = Path(value)
-    if not path.is_absolute() and relative_to is not None:
-        path = relative_to / path
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConfigError(f"{where}: could not read {path}: {exc}") from exc
-    token = raw.strip()
-    if not token:
-        raise ConfigError(f"{where}: {path} holds no token")
-    return token
-
-
 def _positive(value, where: str, default: float) -> float:
     if value is None:
         return default
@@ -589,7 +724,7 @@ def _targets(
         _refuse_userinfo(url, f"[targets.{kind.value}].url")
         token = None
         if "token_file" in table:
-            token = _read_token(
+            token = read_secret_file(
                 table["token_file"], f"[targets.{kind.value}].token_file", relative_to
             )
         garage_id = None
@@ -708,7 +843,7 @@ def _sinks(raw: dict, relative_to: Path | None) -> tuple[object, ...]:
         sinks.append(
             WebhookSinkConfig(
                 url=url,
-                token=_read_token(
+                token=read_secret_file(
                     webhook["token_file"], "[sinks.webhook].token_file", relative_to
                 ),
             )
@@ -787,16 +922,9 @@ def _read_camera_auth(value, where: str, relative_to: Path | None) -> tuple[str,
     challenge this process cannot meet is a camera that reads as refusing us,
     which sends a human to the wrong machine.
     """
-    if not isinstance(value, str) or not value.strip():
-        raise ConfigError(f"{where} must be a path to a file holding `user:password`")
-    path = Path(value)
-    if not path.is_absolute() and relative_to is not None:
-        path = relative_to / path
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConfigError(f"{where}: could not read {path}: {exc}") from exc
-    line = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+    raw = read_secret_file(value, where, relative_to)
+    path = _resolve(value.strip(), relative_to)
+    line = raw.splitlines()[0].strip() if raw else ""
     if ":" not in line:
         raise ConfigError(
             f"{where}: {path} does not hold `user:password` on its first line. An empty or "
@@ -862,6 +990,7 @@ __all__ = [
     "MonitorConfig",
     "Target",
     "WebhookSinkConfig",
+    "opening_line",
 ]
 
 
@@ -885,6 +1014,17 @@ STANDALONE = "none"
 #: port can do all three.
 DEFAULT_UA_HOST = "127.0.0.1"
 DEFAULT_UA_PORT = 4444
+
+#: The published default for `[lanes.<name>] poll_seconds`: how often the agent
+#: follows a lane's events looking for a decision worth a ticket.
+#:
+#: **AN ASSUMPTION, and it is a different one from the monitor's 30 seconds.**
+#: The monitor is watching for faults, which are minutes-scale; this is watching
+#: for a car that has just been refused, and the driver is looking at a display.
+#: Nothing has measured how long somebody will look at a blank one before
+#: deciding nothing is coming, and two seconds is drawn from that rather than
+#: from any measurement of a lane.
+DEFAULT_LANE_POLL_SECONDS = 2.0
 
 #: The published default for how long the human has to answer before the driver
 #: is told nobody did.
@@ -946,12 +1086,6 @@ MINIMUM_DIAL_SECRET = 16
 #: address that means something else is an intercom that can never call in.
 DIAL_SECRET_SHAPE = re.compile(r"\A[A-Za-z0-9._~-]+\Z")
 
-#: The permission bits a file holding a dial secret may not have. The secret IS
-#: the intercom's identity, so a world- or group-readable one is an identity
-#: every account on the box can assert.
-SECRET_FORBIDDEN_MODE = 0o077
-
-
 @dataclass(frozen=True, slots=True, repr=False)
 class Intercom:
     """One declared intercom: how it is identified, its lane, and a name to say.
@@ -978,11 +1112,26 @@ class Intercom:
     lane: str | None
     name_audio: Path
     account_user: str
+    #: The `[displays.<name>]` this door's driver can see, or `None`.
+    #:
+    #: DECLARED, and there is no default: a guessed display is a code shown at a
+    #: barrier somebody is not standing at. **An intercom with none offers no
+    #: ticket** -- its cases go to a human exactly as they did in round 5, which
+    #: is a supported configuration and not a degraded one.
+    display: str | None = None
+    #: This door's OWN relay, and it exists only where `lane = "none"`.
+    #:
+    #: Where there is a lane, the LANE writes the identity and moves its own
+    #: barrier; an agent pulsing a second relay at the same gate would be a
+    #: barrier that opened with no record on the machine that keeps the records.
+    #: The loader refuses the table on an intercom with a lane, by name.
+    relay: object = None
 
     def __repr__(self) -> str:
         return (
             f"Intercom(sip_uri={self.sip_uri!r}, lane={self.lane!r}, "
-            f"name_audio={self.name_audio!r}, account_user=<not shown>)"
+            f"name_audio={self.name_audio!r}, display={self.display!r}, "
+            f"relay={self.relay!r}, account_user=<not shown>)"
         )
 
 
@@ -1002,6 +1151,157 @@ class UserAgentSettings:
     operator_aor: str
     timeout_seconds: float = DEFAULT_UA_TIMEOUT
     reconnect_seconds: float = DEFAULT_RECONNECT_SECONDS
+
+
+def _displays(raw: dict, relative_to: Path | None) -> dict:
+    """`[displays.<name>]`, and the geometry each one is READ to have.
+
+    The geometry is not here and cannot be: `virtual_size` and `bits_per_pixel`
+    come from the driver, at startup, through `display.read_geometry`. A site
+    that typed its own resolution would be a site whose display is silently
+    wrong on the day somebody changes a cable -- and a frame written at the
+    wrong stride is not a smaller picture, it is diagonal noise.
+
+    So this reads the device path, opens the screen, and refuses at STARTUP on
+    anything that is not a screen this build can write. An intercom whose
+    display refused is one that offers no ticket, and that is a configuration
+    somebody fixes at installation rather than a driver discovering it.
+    """
+    displays = {}
+    for name in sorted(raw):
+        table = raw[name]
+        if not isinstance(table, dict):
+            raise ConfigError(f"[displays.{name}] must be a table")
+        device = table.get("framebuffer")
+        if not isinstance(device, str) or not device.strip():
+            raise ConfigError(
+                f"[displays.{name}] does not declare framebuffer. It is the device this "
+                "agent writes a frame to -- `/dev/fb0` on most boards -- and there is no "
+                "default: a guessed one is a frame written to whatever else is on that box."
+            )
+        # OPTIONAL, and it exists for a real case rather than for the tests that
+        # also use it: `sysfs_for` derives `/sys/class/graphics/<fb0>` from the
+        # device's own name, which is right for every framebuffer named the way
+        # the kernel names one and wrong for a device that is not.
+        sysfs = table.get("sysfs")
+        if sysfs is not None and (not isinstance(sysfs, str) or not sysfs.strip()):
+            raise ConfigError(f"[displays.{name}].sysfs must be a path")
+        try:
+            displays[name] = open_display(
+                name,
+                _resolve(device.strip(), relative_to),
+                _resolve(sysfs.strip(), relative_to) if sysfs else None,
+            )
+        except DisplayUnavailable as exc:
+            raise ConfigError(f"[displays.{name}]: {exc}") from exc
+    return displays
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class TicketSettings:
+    """`[tickets]`. Declared where the agent can offer or command anything.
+
+    **Required exactly when it is needed, and not otherwise.** An agent with no
+    display and no act token is round 5 exactly: it answers, it speaks the case,
+    it calls a person, and it opens nothing. Making a signing key mandatory
+    there would be a site generating a credential to satisfy a file rather than
+    to protect anything. The moment an intercom declares a display or a lane
+    declares an act token, this becomes required and startup says which.
+
+    **It has a `__repr__` of its own and that is not cosmetic.** The generated
+    one puts `signing_key` -- the key every ticket at this site is signed with --
+    into every log line, every traceback and every test failure that touches a
+    configuration. The intercom's dial secret has the same guard for the same
+    reason.
+    """
+
+    #: Read ONCE, at startup, out of the file that holds it. It is bytes here
+    #: rather than a string because that is what HMAC takes, and a value that
+    #: has to be encoded at every use is a value somebody encodes differently
+    #: once.
+    signing_key: bytes
+    #: Where the records go. DECLARED, no default: a default would put a site's
+    #: record of every arrival somewhere nobody chose, and it is the one place
+    #: on this box a `ticket_ref` is written down.
+    directory: Path
+    retention_days: int = DEFAULT_TICKET_RETENTION_DAYS
+    confirm_window_s: float = DEFAULT_CONFIRM_WINDOW_S
+    help_window_s: float = DEFAULT_HELP_WINDOW_S
+
+    def __repr__(self) -> str:
+        return (
+            f"TicketSettings(signing_key=<not shown>, directory={self.directory!r}, "
+            f"retention_days={self.retention_days!r}, "
+            f"confirm_window_s={self.confirm_window_s!r}, "
+            f"help_window_s={self.help_window_s!r})"
+        )
+
+
+def _tickets(raw: dict, relative_to: Path | None, needed_by: tuple[str, ...]):
+    """`[tickets]`, and every refusal it can earn.
+
+    `needed_by` is what makes this section required -- the displays and act
+    tokens already read out of the file -- so the refusal can say WHICH
+    declaration made it necessary rather than telling a site it needs a section
+    for reasons it has to work out.
+    """
+    if not raw:
+        if not needed_by:
+            return None
+        raise ConfigError(
+            "[tickets] is not declared, and this configuration needs it: "
+            + ", ".join(needed_by)
+            + ". A ticket is signed with a per-site key this agent alone holds, and there is "
+            "no default and there cannot be one -- a key this package chose would be a key "
+            "every installation shares. Declare [tickets] with signing_key_file and directory."
+        )
+    if "signing_key_file" not in raw:
+        raise ConfigError(
+            "[tickets] does not declare signing_key_file. It is the key every ticket at this "
+            "site is signed with, it is a FILE and never a value, and there is no default: a "
+            "key this package chose would be one every installation shares, so any of them "
+            "could mint a ticket for any other."
+        )
+    key = read_secret_file(
+        raw["signing_key_file"], "[tickets].signing_key_file", relative_to
+    )
+    if len(key) < MINIMUM_SIGNING_KEY:
+        raise ConfigError(
+            f"[tickets].signing_key_file: the key is {len(key)} characters and this build "
+            f"refuses anything shorter than {MINIMUM_SIGNING_KEY}. That floor is a choice this "
+            "package made and not a measurement -- what makes a key unguessable is that it was "
+            "generated at RANDOM, which nothing here can see. What it refuses is the one case "
+            "needing no measurement: a key short enough to have been typed."
+        )
+    directory = raw.get("directory")
+    if not isinstance(directory, str) or not directory.strip():
+        raise ConfigError(
+            "[tickets] does not declare directory. It is where this site's ticket records "
+            "are kept -- the standalone site has this and no platform -- and it is the one "
+            "place on this box a ticket_ref is written down, so there is no default: a "
+            "default would put a record of every arrival somewhere nobody chose."
+        )
+    retention = _positive_int(
+        raw.get("retention_days"), "[tickets].retention_days", DEFAULT_TICKET_RETENTION_DAYS
+    )
+    if not RETENTION_DAYS_BOUNDS[0] <= retention <= RETENTION_DAYS_BOUNDS[1]:
+        raise ConfigError(
+            f"[tickets].retention_days is {retention} and this build takes "
+            f"{RETENTION_DAYS_BOUNDS[0]} to {RETENTION_DAYS_BOUNDS[1]}. The same bounds as the "
+            "capture store's, for the same reason: a zero deletes what was just written and a "
+            "century is not a retention rule."
+        )
+    return TicketSettings(
+        signing_key=key.encode("utf-8"),
+        directory=_resolve(directory.strip(), relative_to),
+        retention_days=retention,
+        confirm_window_s=_positive(
+            raw.get("confirm_window_s"), "[tickets].confirm_window_s", DEFAULT_CONFIRM_WINDOW_S
+        ),
+        help_window_s=_positive(
+            raw.get("help_window_s"), "[tickets].help_window_s", DEFAULT_HELP_WINDOW_S
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1034,6 +1334,54 @@ class AgentConfig:
     decision_max_age_seconds: float = DEFAULT_DECISION_MAX_AGE_SECONDS
     line_timeout_seconds: float = DEFAULT_LINE_TIMEOUT_SECONDS
     name_audio_max_seconds: float = DEFAULT_NAME_AUDIO_MAX_SECONDS
+    #: `[tickets]`, or `None` where this agent can neither offer nor command
+    #: anything -- no display declared and no lane with an act token. That is
+    #: round 5 exactly and it is a supported configuration.
+    tickets: TicketSettings | None = None
+    #: The declared screens, by name, each with the geometry its DRIVER
+    #: published at startup. Empty where a site declared none.
+    displays: dict = field(default_factory=dict)
+
+    @property
+    def act_surface(self) -> tuple[str, ...]:
+        """Everything THIS configuration can ask a barrier to do. One phrase each.
+
+        **THE ONE PLACE THIS PACKAGE SAYS WHAT IT CAN ACT ON**, and every other
+        surface that says it renders THIS -- the startup banner (`opening_line`
+        below) and the `405` body the agent's read surface answers with. Two
+        renderings of one fact; no second hand-written copy, because the
+        hand-written one is always the one that lies.
+
+        Read from the same fields the BEHAVIOUR is built from: `Target.can_act`,
+        which is what `Agent._acts` is built from, and the intercoms that
+        declared a relay, which is what the standalone path pulses. So a sentence
+        here cannot disagree with what the process would actually do.
+
+        Empty means this configuration can ask a barrier for nothing -- round 5
+        exactly, and a supported configuration rather than a degraded one.
+        """
+        return tuple(
+            [f"vend at {name}" for name in sorted(lane.name for lane in self.lanes if lane.can_act)]
+            + [
+                f"pulse the relay at {uri}"
+                for uri in sorted(
+                    one.sip_uri for one in self.intercoms if one.relay is not None
+                )
+            ]
+        )
+
+    @property
+    def can_vend_at(self) -> tuple[str, ...]:
+        """Which lanes this agent could command a vend at. DERIVED, never typed.
+
+        A lane is on this list when it has an act token AND this agent can mint
+        a ticket to name in the completion. `GET /v1/agent` publishes `can_vend`
+        per lane from here, so the surface cannot say `true` for a lane the code
+        would refuse to act at.
+        """
+        if self.tickets is None:
+            return ()
+        return tuple(lane.name for lane in self.lanes if lane.can_act)
 
     @classmethod
     def from_file(cls, path: str | Path) -> AgentConfig:
@@ -1068,12 +1416,21 @@ class AgentConfig:
         # it: an intercom whose account collides with the one the agent dials
         # out from would put both legs of a case on one account.
         user_agent = _user_agent(_table(raw, "user_agent"))
+        # And the DISPLAYS before the intercoms, because an intercom names one:
+        # a door pointed at a screen nobody declared would publish `has_display`
+        # and show a driver nothing.
+        displays = _displays(_table(raw, "displays", required=False), relative_to)
         intercoms = _intercoms(
             _table(raw, "intercoms", required=False), lanes, relative_to,
-            operator_aor=user_agent.operator_aor,
+            operator_aor=user_agent.operator_aor, displays=displays,
         )
         driver_languages, operator_language = _languages(_table(raw, "languages"))
         _refuse_missing_lines(driver_languages, operator_language, audio_directory)
+        if any(intercom.display for intercom in intercoms):
+            # ONLY where something will be drawn. A site with no display is not
+            # asked to have words for one, and is not refused for a language
+            # whose display line this package has not written.
+            _refuse_undrawable_display_lines(driver_languages)
         escalation = _table(raw, "escalation")
         human = escalation.get("human_sip_uri")
         if not isinstance(human, str) or not human.strip():
@@ -1089,6 +1446,26 @@ class AgentConfig:
                 raise ConfigError("[escalation].transfer_sip_uri must be a SIP URI")
             _refuse_sip_credential(transfer, "[escalation].transfer_sip_uri")
         authorisations = _authorisations(_table(raw, "authorisations"), transfer)
+        # WHAT MAKES `[tickets]` NECESSARY, named so the refusal can say which
+        # declaration did it. Derived from what has already been read out of the
+        # file rather than from a second pass over the raw table.
+        needed_by = tuple(
+            f"[lanes.{lane.name}] declares act_token_file" for lane in lanes if lane.can_act
+        ) + tuple(
+            f"[intercoms.{intercom.sip_uri!r}] declares display"
+            for intercom in intercoms
+            if intercom.display
+        ) + tuple(
+            # A RELAY NEEDS IT TOO, and not because it shows anything: a
+            # standalone relay moves a barrier with no lane behind it, so this
+            # agent's own record is the only thing that says it happened -- and
+            # that record has to exist before the pulse.
+            f"[intercoms.{intercom.sip_uri!r}] declares a relay"
+            for intercom in intercoms
+            if intercom.relay is not None
+        )
+        tickets = _tickets(_table(raw, "tickets", required=False), relative_to, needed_by)
+        _refuse_unticketable_fields(str(agent["site_id"]), lanes, intercoms)
         return cls(
             agent_id=str(agent["id"]),
             site_id=str(agent["site_id"]),
@@ -1132,6 +1509,8 @@ class AgentConfig:
                 DEFAULT_LINE_TIMEOUT_SECONDS,
             ),
             name_audio_max_seconds=name_audio_max,
+            tickets=tickets,
+            displays=displays,
         )
 
     def lane(self, name: str) -> Target | None:
@@ -1176,14 +1555,34 @@ def _agent_lanes(raw: dict, relative_to: Path | None) -> tuple[Target, ...]:
         _refuse_userinfo(url, f"[lanes.{name}].url")
         token = None
         if "token_file" in table:
-            token = _read_token(table["token_file"], f"[lanes.{name}].token_file", relative_to)
+            token = read_secret_file(table["token_file"], f"[lanes.{name}].token_file", relative_to)
+        act_token = None
+        if "act_token_file" in table:
+            # THE CREDENTIAL THAT OPENS A BARRIER, and it is declared per lane
+            # rather than per agent: a site may run one intercom that can act
+            # and another that cannot, and an agent-wide act token would give
+            # every lane the strongest of them.
+            act_token = read_secret_file(
+                table["act_token_file"], f"[lanes.{name}].act_token_file", relative_to
+            )
         lanes.append(
             Target(
                 name=name,
                 kind=TargetKind.LANE,
                 url=url.rstrip("/"),
-                poll_seconds=DEFAULT_POLL_SECONDS,
+                # HOW OFTEN this agent follows that lane's events. An
+                # ASSUMPTION: nothing has measured how long a driver will look
+                # at a blank display before deciding nothing is coming. Two
+                # seconds is drawn from a barrier that has just refused
+                # somebody, and it is per lane because a site with ten of them
+                # and one agent is a site that may want it slower.
+                poll_seconds=_positive(
+                    table.get("poll_seconds"),
+                    f"[lanes.{name}].poll_seconds",
+                    DEFAULT_LANE_POLL_SECONDS,
+                ),
                 token=token,
+                act_token=act_token,
                 timeout_seconds=_positive(
                     table.get("timeout_seconds"),
                     f"[lanes.{name}].timeout_seconds",
@@ -1199,6 +1598,7 @@ def _intercoms(
     lanes: tuple[Target, ...],
     relative_to: Path | None,
     operator_aor: str,
+    displays: dict | None = None,
 ):
     """`[intercoms.<sip-uri>]`, and every refusal an intercom can earn.
 
@@ -1292,8 +1692,23 @@ def _intercoms(
         accounts[account_user] = sip_uri
         if lane != STANDALONE:
             claimed.add(lane)
+        relay = _relay(table.get("relay"), sip_uri, lane, relative_to)
+        display = table.get("display")
+        if display is not None:
+            if not isinstance(display, str) or not display.strip():
+                raise ConfigError(
+                    f"[intercoms.{sip_uri!r}].display must be the name of a [displays.<name>]"
+                )
+            if display not in (displays or {}):
+                raise ConfigError(
+                    f"[intercoms.{sip_uri!r}].display is {display!r} and there is no "
+                    f"[displays.{display}]. A door pointed at a screen nobody declared would "
+                    "publish `has_display` and show a driver nothing."
+                )
         intercoms.append(Intercom(sip_uri=sip_uri, lane=None if lane == STANDALONE else lane,
-                                  name_audio=path, account_user=account_user))
+                                  name_audio=path, account_user=account_user,
+                                  display=display, relay=relay))
+    _one_display_per_lane(intercoms)
     orphans = sorted(names - claimed)
     if orphans:
         raise ConfigError(
@@ -1304,6 +1719,156 @@ def _intercoms(
             "was mistyped, in which case every call at that door is refused."
         )
     return tuple(intercoms)
+
+
+def _refuse_unticketable_fields(site_id: str, lanes, intercoms) -> None:
+    """Every configured value that ends up IN A TICKET, checked at STARTUP.
+
+    `site`, `lane` and -- for a standalone door, whose ticket names the door
+    because there is no lane -- the intercom's URI. The canonical form is
+    newline-separated and a field holding the separator is refused at the mint;
+    nothing checked the configuration, so a site named with a newline started,
+    published a healthy surface, and refused its FIRST TICKET at three in the
+    morning, with a traceback in a log, `_advance()` skipped for that poll, and
+    nothing on the health surface saying why.
+
+    The same shape as the font check beside it: a character the shipped font
+    cannot draw is a startup refusal naming the line and the language, and this
+    is a startup refusal naming the field. One function does the checking
+    (`tickets.check_field`), so the rule cannot come apart from the mint's.
+    """
+    for value, what in (
+        (site_id, "[agent].site_id"),
+        *((lane.name, f"[lanes.{lane.name!r}]'s name") for lane in lanes),
+        *(
+            (intercom.sip_uri, f"[intercoms.{intercom.sip_uri!r}]'s URI")
+            for intercom in intercoms
+        ),
+    ):
+        try:
+            check_field(value, what)
+        except BadTicket as exc:
+            raise ConfigError(f"{exc} Refusing to start.") from exc
+
+
+def _one_display_per_lane(intercoms) -> None:
+    """Two intercoms with a screen at one lane is REFUSED, naming both.
+
+    A pending ticket is one per LANE, and every screen at that lane was shown
+    it -- so one code stood on two door stations, and a press at either
+    confirmed it and opened the barrier. What the design says a press proves is
+    that somebody at THAT barrier pressed; with two of them it proved that
+    somebody at one of these barriers did, and whoever photographed the second
+    screen was holding the first driver's ticket.
+
+    Refused at startup rather than resolved at runtime because there is no
+    resolution: which of two screens a code should be on is a question about a
+    building, and the site is the only one that can answer it. A second intercom
+    at the same lane with NO display is fine and is the ordinary two-door lane:
+    the ticket is bound to the one screen that shows it, and a press at the
+    other door is the round-5 path.
+    """
+    seen: dict[str, str] = {}
+    for intercom in intercoms:
+        if intercom.lane is None or not intercom.display:
+            continue
+        first = seen.get(intercom.lane)
+        if first is not None:
+            raise ConfigError(
+                f"[intercoms.{first!r}] and [intercoms.{intercom.sip_uri!r}] both declare a "
+                f"display and both name lane {intercom.lane!r}. A lane has ONE pending "
+                "ticket, so the same code would stand on both screens and a press at either "
+                "would confirm it -- whoever photographed the second screen would be holding "
+                "the first driver's ticket. Give the lane one screen; a second door with no "
+                "display answers as it did in round 5."
+            )
+        seen[intercom.lane] = intercom.sip_uri
+
+
+def _relay(raw, sip_uri: str, lane: str, relative_to: Path | None):
+    """`[intercoms.<uri>.relay]`, and every refusal it can earn.
+
+    Present only where `lane = "none"`. That refusal is FIRST because it is the
+    one that matters: a relay beside a lane is a second thing that opens one
+    barrier, and the lane is the thing that keeps the record.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError(f"[intercoms.{sip_uri!r}.relay] must be a table")
+    if lane != STANDALONE:
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}] declares a relay AND a lane ({lane!r}). Where there is "
+            "a lane, the LANE writes the identity and flushes it before its own relay moves; "
+            "an agent pulsing a second relay at the same gate would be a barrier that opened "
+            "with no record on the machine that keeps the records. A relay belongs only to "
+            'an intercom with `lane = "none"`.'
+        )
+    kind = raw.get("kind")
+    if kind not in RELAY_KINDS:
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}.relay].kind is {kind!r} and this build drives "
+            f"{', '.join(repr(one) for one in RELAY_KINDS)}. 2N and Akuvox have their own "
+            "APIs and their own authentication, and a kind written without a device to try "
+            "it against would be an untested path wearing the same name as a tested one."
+        )
+    url = raw.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ConfigError(f"[intercoms.{sip_uri!r}.relay] does not declare a url")
+    _refuse_userinfo(url, f"[intercoms.{sip_uri!r}.relay].url")
+    port = raw.get("port")
+    if port not in PORTS:
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}.relay].port is {port!r} and this unit has "
+            f"{', '.join(str(one) for one in PORTS)}. Axis numbers its ports from ONE, "
+            "where one is the port physically labelled '1', and an off-by-one here is a "
+            "relay that pulses the wrong thing or nothing."
+        )
+    pulse = raw.get("pulse_ms")
+    if isinstance(pulse, bool) or not isinstance(pulse, int) or pulse <= 0:
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}.relay] does not declare pulse_ms as a positive whole "
+            "number of milliseconds. There is no default and there cannot be one: how long a "
+            "contact must close for a barrier to accept it is that BARRIER's specification, "
+            "and a number this package chose would be a guess about somebody else's "
+            "equipment written into every installation."
+        )
+    if not PULSE_MS_BOUNDS[0] <= pulse <= PULSE_MS_BOUNDS[1]:
+        # BOUNDED, and it is the only per-site number in this round that was
+        # neither a published default nor a declared value inside anything. The
+        # HTTP timeout is derived from it, so an unbounded pulse is an unbounded
+        # time for which this process holds a connection open for one press.
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}.relay].pulse_ms is {pulse} and this build takes "
+            f"{PULSE_MS_BOUNDS[0]} to {PULSE_MS_BOUNDS[1]} milliseconds. Below the first "
+            "there is no contact anything could mean; past the second is a barrier this "
+            "build should not be driving, because the request that pulses it is held open "
+            "for the whole of it."
+        )
+    margin = _positive(
+        raw.get("answer_margin_s"),
+        f"[intercoms.{sip_uri!r}.relay].answer_margin_s",
+        DEFAULT_ANSWER_MARGIN_S,
+    )
+    if "credentials_file" not in raw:
+        raise ConfigError(
+            f"[intercoms.{sip_uri!r}.relay] does not declare credentials_file. It is the "
+            "unit's `user:password`, it is a FILE and never a value, and there is no default."
+        )
+    username, password = _read_camera_auth(
+        raw["credentials_file"],
+        f"[intercoms.{sip_uri!r}].relay.credentials_file",
+        relative_to,
+    )
+    return Relay(
+        kind=kind,
+        url=url.strip().rstrip("/"),
+        port=port,
+        pulse_ms=pulse,
+        username=username,
+        password=password,
+        answer_margin_s=margin,
+    )
 
 
 def _sip_user(uri: str) -> str:
@@ -1336,18 +1901,9 @@ def _dial_secret(value, sip_uri: str, relative_to: Path | None) -> str:
             f"`sip:{ACCOUNT_USER_PREFIX}<that string>@<this agent's host>` into the unit."
         )
     path = _resolve(value.strip(), relative_to)
-    try:
-        mode = path.stat().st_mode
-    except OSError as exc:
-        raise ConfigError(f"{where}: could not read {path}: {exc}") from exc
-    if mode & SECRET_FORBIDDEN_MODE:
-        raise ConfigError(
-            f"{where}: {path} is readable by more than its owner "
-            f"({mode & 0o777:04o}). This file holds the identity of an intercom: anybody "
-            "who can read it can call this agent as that door and have a person dispatched "
-            "to a barrier nobody is standing at. `chmod 600` it."
-        )
-    secret = _read_token(str(path), where, None)
+    # THE SAME GUARD AS EVERY OTHER CREDENTIAL. This key had one of its own
+    # first, and for a whole round it was the only key that had one at all.
+    secret = read_secret_file(str(path), where, None)
     if len(secret) < MINIMUM_DIAL_SECRET:
         raise ConfigError(
             f"{where}: the secret in {path} is {len(secret)} characters. This build refuses "
@@ -1426,6 +1982,34 @@ def _refuse_missing_lines(driver_languages, operator_language, directory: Path) 
             "is not skipped and not played in another language: it would be a driver at a "
             "barrier hearing silence, which tells them nothing and looks like a dead "
             "intercom."
+        )
+
+
+def _refuse_undrawable_display_lines(driver_languages) -> None:
+    """Every display line, in every declared language, checked for WORDS and GLYPHS.
+
+    Two different failures and they are named separately, because the repairs
+    are different: a language with no display line needs somebody to write one,
+    and a line the font cannot draw needs a glyph. Both are refused at STARTUP.
+
+    **Never a blank and never a substitution.** A blank is a driver told
+    nothing; a substitution is a driver told something else. This is the same
+    rule `_refuse_missing_lines` applies to the spoken lines, applied to the
+    drawn one.
+    """
+    missing = missing_display_text(driver_languages)
+    if missing:
+        raise ConfigError(
+            "this build has no display text for " + ", ".join(missing) + ". An intercom here "
+            "declares a display, so a driver at it would be shown a code with no instruction "
+            "under it in that language. Refusing to start."
+        )
+    undrawable = undrawable_display_text(driver_languages)
+    if undrawable:
+        raise ConfigError(
+            "the shipped font cannot draw " + "; ".join(undrawable) + ". A character with no "
+            "glyph would be a HOLE in the frame at three in the morning -- never a blank and "
+            "never a substitution. Refusing to start."
         )
 
 
@@ -1523,3 +2107,30 @@ def _user_agent(raw: dict) -> UserAgentSettings:
             DEFAULT_RECONNECT_SECONDS,
         ),
     )
+
+
+def opening_line(config: AgentConfig) -> str:
+    """The startup banner: what this process can ask a barrier to do.
+
+    **Never a fixed sentence, and that is the whole point of this function.**
+    Until round 7 this line read "OPENS NOTHING: no vend route here, none at any
+    lane on this contract version". Round 7 gave the package a vend route, and
+    the line went on saying the opposite for a whole round -- because a string
+    cannot go stale in a way anything measures, and nothing was measuring it.
+    Round 7's re-gate then found the same sentence, unmeasured, in seven more
+    files, so it lives HERE now, once, beside the fact it renders.
+
+    It renders `AgentConfig.act_surface` and holds no list of its own. The agent
+    service's `405` body renders the same property, so the two cannot disagree
+    about what this process can do.
+
+    "ASK" and not "open": whether the boom moves is the barrier's answer and
+    nothing in this estate has watched one move.
+    """
+    surface = config.act_surface
+    if not surface:
+        return (
+            "  OPENS NOTHING: no lane here declares an act token and no intercom declares "
+            "a relay, so nothing in this configuration can ask a barrier to move"
+        )
+    return "  CAN ASK A BARRIER TO MOVE: " + "; ".join(surface)

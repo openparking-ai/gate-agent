@@ -33,14 +33,27 @@ language is a driver told something in a language nobody chose for them.
 
 from __future__ import annotations
 
-from .contract import AgentCase, Authorisation
+from .contract import (
+    OPENING_AUTHORISATIONS,
+    VEND_REFUSALS,
+    AgentCase,
+    Authorisation,
+)
 
 #: The lines the DRIVER hears, in every declared driver language.
-#: Derived: one per case, one per authorisation, plus the four the dialogue
-#: itself needs.
+#: Derived: one per case, one per authorisation, one MORE per authorisation
+#: that can act, plus the four the dialogue itself needs.
 DRIVER_LINES: tuple[str, ...] = (
     *(f"case.{case.value}" for case in AgentCase),
     *(f"authorisation.{value.value}" for value in Authorisation),
+    #: THE SAME AUTHORISATION, SPOKEN AT A DOOR THAT WILL ASK FOR SOMETHING.
+    #: Derived from `OPENING_AUTHORISATIONS` -- the act table itself -- so an
+    #: authorisation that becomes an act cannot get a route to a barrier and
+    #: keep the sentence that says it has none. Which of the two a driver hears
+    #: is decided per call, at the moment the agent knows whether THIS door
+    #: will ask: `Agent._say_authorisation`, the same branch that decides
+    #: whether the person hears `operator.cannot_open`.
+    *(f"authorisation.{value.value}.acting" for value in OPENING_AUTHORISATIONS),
     "driver.human_unreachable",
     "driver.nothing_usable",
     #: The person ANSWERED and then put the phone down before keying anything.
@@ -48,7 +61,27 @@ DRIVER_LINES: tuple[str, ...] = (
     #: instruction" is not what happened and a driver told it goes on holding.
     "driver.operator_hung_up",
     "driver.hold_reprompt",
+    #: What a driver is told once their press has been taken as a confirmation,
+    #: and what the lane then said. **`commanded`, never `opened`**: the boom is
+    #: `no_source` on the lane's own health surface, so nothing in this estate
+    #: has measured a barrier moving.
+    "ticket.confirmed",
+    "ticket.vend_commanded",
+    "ticket.vend_refused",
+    #: What a driver is told when the code went up WHILE THEY WERE ON THE PHONE.
+    #: The screen is where a driver looks, and it is enough on its own -- until
+    #: they are already in a call, at which point nothing has told them the code
+    #: is behind them. Without this, the press that followed confirmed a ticket
+    #: they had never seen and never photographed, and they drove in with a stay
+    #: whose only identity was a reference nobody held.
+    "ticket.on_screen",
 )
+
+#: The line for a refusal code this build has no words for. Named here so the
+#: agent, the line set and the test that keys them one-to-one all read the same
+#: string -- and so that "unknown" cannot quietly become one of the lane's own
+#: codes without the test noticing.
+UNKNOWN_REFUSAL = "operator.vend_refused.unknown"
 
 #: The lines the OPERATOR hears, in the operator language only.
 OPERATOR_LINES: tuple[str, ...] = (
@@ -57,9 +90,53 @@ OPERATOR_LINES: tuple[str, ...] = (
     "operator.menu_repeat",
     "operator.menu_callback_number",
     "operator.cannot_open",
+    "operator.vend_commanded",
+    #: SAID BEFORE THE CODE'S OWN SENTENCE, on every refused vend. A person
+    #: briefed as an ordinary case, with no line saying a ticket was confirmed
+    #: and refused, is a person who has to ask the driver over an intercom at
+    #: three in the morning -- and who is then offered `OPEN_NOW`, which will
+    #: meet the same refusal.
+    "operator.ticket_refused",
+    #: Why this call was already in progress when the person picked up.
+    "operator.help_after_ticket",
+    #: ONE SENTENCE PER PUBLISHED REFUSAL CODE, derived from the set rather than
+    #: listed: a code the lane can answer and this build has no words for would
+    #: be a person told "it was refused" and not told what to do about it.
+    *(f"operator.vend_refused.{code}" for code in VEND_REFUSALS),
+    #: AND THE ONE FOR A CODE THAT IS NOT IN THAT SET. The set above is OUR
+    #: lane's, checked equal to its enum in both directions -- which is the
+    #: right check for our lane and no check at all for the third-party seat
+    #: this module is built to sit in (SETTLED 1). A foreign lane answers its
+    #: own vocabulary, and the person used to be told nothing at all about the
+    #: refusal: no sentence existed, so `()` was passed and the briefing was an
+    #: ordinary case.
+    UNKNOWN_REFUSAL,
 )
 
 LINES: tuple[str, ...] = DRIVER_LINES + OPERATOR_LINES
+
+#: The lines that are DRAWN rather than spoken, one per declared driver
+#: language, on the display beside the ticket.
+#:
+#: **They are a separate set from `LINES` and they have no audio.** A sentence
+#: on a screen and a sentence in a call are different things: nobody plays this
+#: one, `scripts/build_audio.py` does not generate a file for it, and the
+#: manifest has no row for it. Folding it into `LINES` would have produced a WAV
+#: nothing plays and a licence row for a recording nobody hears.
+DISPLAY_LINES: tuple[str, ...] = ("display.instruction",)
+
+#: **UPPER CASE, and it is a decision.** The font this package ships draws upper
+#: case only -- see `font.py` for why, and the short version is that half a font
+#: is half the drawing and half the review. A driver reads this through a
+#: windscreen at a few metres, which is the case upper case is better at
+#: anyway. A character the font cannot draw is a STARTUP REFUSAL naming the line
+#: and the language, never a blank on a screen.
+DISPLAY_TEXT: dict[str, dict[str, str]] = {
+    "display.instruction": {
+        "en": "TAKE A PHOTO OF THIS CODE, THEN PRESS THE BUTTON",
+        "es-ES": "HAGA UNA FOTO DE ESTE CÓDIGO Y PULSE EL BOTÓN",
+    },
+}
 
 #: The languages this repository ships text and audio for. A site may declare
 #: only these; anything else is refused at startup with this list in the message,
@@ -154,20 +231,36 @@ TEXT: dict[str, dict[str, str]] = {
         "es-ES": "Esta entrada no tiene nada pendiente para usted. Adiós.",
     },
     # --- what the driver is told the human decided ------------------------
-    # `open_now` and `open_and_flag` do NOT say the barrier is opening. It is
-    # not: nothing in this version can move one, and a driver who believes a
-    # barrier is about to lift is worse off than one who was told to wait.
+    # NEITHER PAIR SAYS THE BARRIER IS OPENING, and the pair is why there are
+    # two of each. Until round 7 nothing here could move a barrier, so one
+    # sentence was true everywhere: "this system cannot open it, wait for
+    # them". A door with an act token can now ask, and at that door the same
+    # sentence is a lie the driver hears immediately before "the barrier has
+    # been asked to open" -- two sentences contradicting each other, the false
+    # one first. So the clause that claims no route lives ONLY on the keys
+    # spoken where there is none, and the `.acting` keys say what is true at a
+    # door that will ask: a person authorised it, and nothing about a boom.
+    # What happens next is `ticket.vend_commanded`'s to say, once something has
+    # actually been asked.
     "authorisation.open_now": {
         "en": "A person has authorised your entry. This system cannot open the barrier "
               "itself, so please wait for them.",
         "es-ES": "Una persona ha autorizado su entrada. Este sistema no puede abrir la barrera "
               "por sí mismo; espere a que lo hagan.",
     },
+    "authorisation.open_now.acting": {
+        "en": "A person has authorised your entry.",
+        "es-ES": "Una persona ha autorizado su entrada.",
+    },
     "authorisation.open_and_flag": {
         "en": "A person has authorised your entry and made a note of it. This system cannot "
               "open the barrier itself, so please wait for them.",
         "es-ES": "Una persona ha autorizado su entrada y lo ha anotado. Este sistema no puede "
               "abrir la barrera por sí mismo; espere a que lo hagan.",
+    },
+    "authorisation.open_and_flag.acting": {
+        "en": "A person has authorised your entry and made a note of it.",
+        "es-ES": "Una persona ha autorizado su entrada y lo ha anotado.",
     },
     "authorisation.do_not_open": {
         "en": "A person has decided not to open the barrier.",
@@ -289,11 +382,99 @@ TEXT: dict[str, dict[str, str]] = {
         "en": "Key the call-back number, then hash.",
         "es-ES": "Marque el número de devolución de llamada y luego almohadilla.",
     },
-    # Played to the HUMAN, at the moment they key an authorisation this version
-    # can only record. It is one fixed sentence and it is not optional.
+    # Played to the HUMAN when nothing at this door can act: no act token for
+    # its lane, or a standalone intercom with no relay. It is one fixed sentence
+    # and it is not optional -- a person who believes a barrier moved when it did
+    # not is worse off than one who was never called.
     "operator.cannot_open": {
-        "en": "Recorded. This version cannot operate the barrier.",
-        "es-ES": "Registrado. Esta versión no puede accionar la barrera.",
+        "en": "Recorded. This entrance is not set up for this system to open it.",
+        "es-ES": "Registrado. Esta entrada no está configurada para que este sistema la abra.",
+    },
+    # --- the ticket, to the driver ----------------------------------------
+    # NEVER "the barrier is opening". The lane commands its relay and nothing in
+    # this estate has measured a boom moving: `boom_did_not_rise` is `no_source`
+    # on the lane's own health surface.
+    "ticket.confirmed": {
+        "en": "Thank you. I have your ticket.",
+        "es-ES": "Gracias. Tengo su ticket.",
+    },
+    "ticket.vend_commanded": {
+        "en": "The barrier has been asked to open. Please drive forward when it does.",
+        "es-ES": "Se ha pedido que se abra la barrera. Avance cuando lo haga.",
+    },
+    "ticket.vend_refused": {
+        "en": "The entrance did not accept that. I am connecting you to a person.",
+        "es-ES": "La entrada no lo ha aceptado. Le paso con una persona.",
+    },
+    # Said IN THE CALL, about a code that went up during it. It says where to
+    # look, what to do, and that the button is what completes it -- because the
+    # press is what binds the ticket to this arrival.
+    "ticket.on_screen": {
+        "en": "There is a code on the screen. Take a photo of it, then press the button "
+              "again.",
+        "es-ES": "Hay un código en la pantalla. Hágale una foto y pulse el botón otra vez.",
+    },
+    # --- the ticket, to the operator --------------------------------------
+    "operator.vend_commanded": {
+        "en": "The barrier has been asked to open.",
+        "es-ES": "Se ha pedido que se abra la barrera.",
+    },
+    # ALWAYS, on any refused vend, before whatever the code's own sentence is.
+    "operator.ticket_refused": {
+        "en": "This driver's ticket was refused by the entrance.",
+        "es-ES": "La entrada ha rechazado el ticket de este conductor.",
+    },
+    "operator.help_after_ticket": {
+        "en": "This driver was given a ticket a moment ago and has called back.",
+        "es-ES": "A este conductor se le ha dado un ticket hace un momento y ha vuelto a "
+              "llamar.",
+    },
+    # ONE PER PUBLISHED REFUSAL CODE. Each says what the lane refused and what
+    # the person can do about it, because "it was refused" is a sentence that
+    # leaves somebody standing at a barrier with nothing to try.
+    "operator.vend_refused.no_vehicle": {
+        "en": "The entrance says there is no vehicle on the loop.",
+        "es-ES": "La entrada dice que no hay ningún vehículo en el lazo.",
+    },
+    "operator.vend_refused.malfunction_active": {
+        "en": "The entrance has a fault that stops it opening safely.",
+        "es-ES": "La entrada tiene una avería que le impide abrir con seguridad.",
+    },
+    "operator.vend_refused.geometry_incomplete": {
+        "en": "Only one of the entrance loops is covered.",
+        "es-ES": "Solo uno de los lazos de la entrada está cubierto.",
+    },
+    "operator.vend_refused.decision_in_future": {
+        "en": "The entrance's clock disagrees with this system's.",
+        "es-ES": "El reloj de la entrada no coincide con el de este sistema.",
+    },
+    "operator.vend_refused.decision_stale": {
+        "en": "The entrance says this is too old to act on.",
+        "es-ES": "La entrada dice que esto es demasiado antiguo para actuar.",
+    },
+    "operator.vend_refused.decision_mismatch": {
+        "en": "The entrance has moved on to another vehicle.",
+        "es-ES": "La entrada ya ha pasado a otro vehículo.",
+    },
+    "operator.vend_refused.already_completed": {
+        "en": "This entry has already been opened once.",
+        "es-ES": "Esta entrada ya se ha abierto una vez.",
+    },
+    "operator.vend_refused.not_completable": {
+        "en": "The entrance has nothing outstanding to open for.",
+        "es-ES": "La entrada no tiene nada pendiente que abrir.",
+    },
+    "operator.vend_refused.busy": {
+        "en": "The entrance is already opening for somebody.",
+        "es-ES": "La entrada ya se está abriendo para alguien.",
+    },
+    # AND THE REFUSAL THIS BUILD HAS NO WORDS FOR. It says exactly that and
+    # claims nothing else: a lane that is not ours has its own vocabulary, and
+    # guessing at which of ours it meant would tell a person to do something
+    # about a fault this build invented for them.
+    UNKNOWN_REFUSAL: {
+        "en": "The entrance gave a reason I have no words for.",
+        "es-ES": "La entrada ha dado un motivo para el que no tengo palabras.",
     },
 }
 
@@ -316,6 +497,44 @@ def missing_text(driver_languages, operator_language) -> tuple[str, ...]:
     return tuple(missing)
 
 
+def missing_display_text(driver_languages) -> tuple[str, ...]:
+    """Every `(line, language)` this repository has no DISPLAY words for.
+
+    The same shape and the same reason as `missing_text`: an installer told
+    about one missing language at a time restarts the process once per line.
+    """
+    return tuple(
+        f"{line} [{language}]"
+        for line in DISPLAY_LINES
+        for language in driver_languages
+        if not DISPLAY_TEXT.get(line, {}).get(language)
+    )
+
+
+def undrawable_display_text(driver_languages) -> tuple[str, ...]:
+    """Every display line the FONT cannot draw, with the characters it lacks.
+
+    A separate question from having the words: a line can exist and still hold a
+    character this package has no glyph for, and that would be a hole in a frame
+    at three in the morning rather than a refusal at installation.
+    """
+    from .font import missing as missing_glyphs
+
+    out = []
+    for line in DISPLAY_LINES:
+        for language in driver_languages:
+            text = DISPLAY_TEXT.get(line, {}).get(language)
+            if not text:
+                continue
+            absent = missing_glyphs(text)
+            if absent:
+                out.append(
+                    f"{line} [{language}]: no glyph for "
+                    + ", ".join(repr(one) for one in absent)
+                )
+    return tuple(out)
+
+
 def audio_name(line: str, language: str) -> str:
     """The file a line's audio lives in, DERIVED from the key and the language.
 
@@ -327,11 +546,15 @@ def audio_name(line: str, language: str) -> str:
 
 
 __all__ = [
+    "DISPLAY_LINES",
+    "DISPLAY_TEXT",
     "DRIVER_LINES",
     "LINES",
     "OPERATOR_LINES",
     "SHIPPED_LANGUAGES",
     "TEXT",
     "audio_name",
+    "missing_display_text",
     "missing_text",
+    "undrawable_display_text",
 ]
