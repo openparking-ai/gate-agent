@@ -1780,7 +1780,6 @@ class Agent:
         EXIT IS THEN THE HUMAN'S -- `docs/CONTRACT.md` says so rather than
         leaving an operator to discover it.
         """
-        self._say(session, UaLeg.DRIVER, f"authorisation.{value.value}")
         if session.intercom.lane is None:
             return self._standalone_opens(session, value)
         lane = session.intercom.lane
@@ -1792,13 +1791,36 @@ class Agent:
             # ticket with, or a standalone intercom with no relay. One fixed
             # sentence, and it is not optional -- a person who believes a barrier
             # moved when it did not is worse off than one who was never called.
+            self._say_authorisation(session, value, acting=False)
             self._say(session, UaLeg.OPERATOR, "operator.cannot_open",
                       operator=True)
             session.state = State.CLOSING
             return
+        self._say_authorisation(session, value, acting=True)
         session.state = State.CLOSING
         session.deadline = None
         self._command_vend(session, pending, ACTS[value])
+
+    def _say_authorisation(self, session: Session, value: Authorisation, *,
+                           acting: bool) -> None:
+        """The driver's sentence for a human's OPEN, on the SAME branch the
+        person's `operator.cannot_open` is on.
+
+        One decision, read twice: `acting` is false exactly where that sentence
+        is spoken -- no act token for this lane, no ticket to name, or a
+        standalone door with no relay -- and true exactly where this agent is
+        about to ask for something. It is not `AgentConfig.act_surface`, which
+        is the site's declaration and is what the banner and the 405 body
+        render; a site can declare an act surface and still have THIS door
+        unable to use it, and the driver is at that door.
+
+        The keys differ by one suffix on purpose: the `.acting` one carries no
+        clause about what this system cannot do, because at a door that is
+        about to ask, that clause is false and the driver hears
+        `ticket.vend_commanded` immediately after it.
+        """
+        key = f"authorisation.{value.value}"
+        self._say(session, UaLeg.DRIVER, f"{key}.acting" if acting else key)
 
     def _standalone_opens(self, session: Session, value: Authorisation) -> None:
         """STANDALONE: the intercom's own relay, on the human's word only.
@@ -1816,6 +1838,7 @@ class Agent:
         """
         relay = self._relays.get(session.intercom.sip_uri)
         if relay is None:
+            self._say_authorisation(session, value, acting=False)
             self._say(session, UaLeg.OPERATOR, "operator.cannot_open",
                       operator=True)
             session.state = State.CLOSING
@@ -1832,6 +1855,7 @@ class Agent:
             # store itself refused a write -- and a barrier that opened anyway
             # would be one this site cannot prove it opened.
             log.error("no ticket record could be written; the relay is NOT pulsed")
+            self._say_authorisation(session, value, acting=False)
             self._say(session, UaLeg.OPERATOR, "operator.cannot_open", operator=True)
             session.state = State.CLOSING
             return
@@ -1842,6 +1866,7 @@ class Agent:
         # else, or was not there at all -- so `/v1/agent/events`, which at a
         # standalone site is the only machine-readable account of a barrier,
         # said the relay was pulsed when it was not.
+        self._say_authorisation(session, value, acting=True)
         self._start_pulse(session, relay, pending, value)
 
     def _start_pulse(self, session: Session, relay, pending: Pending, value) -> None:

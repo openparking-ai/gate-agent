@@ -736,6 +736,20 @@ BREAKS = [
         "to": "        if True:",
     },
     {
+        # Z19. The DRIVER's half of the same branch. The person's sentence was
+        # made conditional in round 7 and the driver's was not, so at a door
+        # that can act the driver heard "this system cannot open the barrier
+        # itself" and then "the barrier has been asked to open" -- the false one
+        # first. This restores the unconditional key.
+        "name": "the_driver_is_told_it_cannot_open_where_it_can",
+        "why": "the driver is told this system has no route to the barrier, "
+               "one sentence before it asks one to open",
+        "file": "src/gate_agent/agent.py",
+        "from": '        key = f"authorisation.{value.value}"\n'
+                '        self._say(session, UaLeg.DRIVER, f"{key}.acting" if acting else key)',
+        "to": '        self._say(session, UaLeg.DRIVER, f"authorisation.{value.value}")',
+    },
+    {
         "name": "the_ticket_ref_goes_on_an_event",
         "why": "the identifier of a stay reaches a surface outside the retention rule",
         "file": "src/gate_agent/agent.py",
