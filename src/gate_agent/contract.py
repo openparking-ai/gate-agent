@@ -1444,7 +1444,10 @@ VEND_REFUSALS: tuple[str, ...] = (
 #: **Whether one of them CAN act is not decided here.** It depends on the lane:
 #: an act token declared for it, and a ticket to name in the completion. The
 #: agent asks that at the moment a human keys a digit, and `operator.cannot_open`
-#: is spoken only where the answer is no.
+#: is spoken only where the answer is no. The DRIVER's sentence is on the same
+#: branch: `authorisation.<value>` where nothing can act and says so, and
+#: `authorisation.<value>.acting` -- keyed off this table -- where something
+#: can, because there the clause about what this system cannot do is false.
 OPENING_AUTHORISATIONS: tuple[Authorisation, ...] = tuple(ACTS)
 
 

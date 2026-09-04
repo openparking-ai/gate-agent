@@ -61,6 +61,18 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
+    "en/authorisation.open_and_flag.acting.wav": {
+      "line": "authorisation.open_and_flag.acting",
+      "language": "en",
+      "text": "A person has authorised your entry and made a note of it.",
+      "text_provenance": "en",
+      "sha256": "7a84e4cb4954f2f57b3ad9f7ecbf2a001c7c129b5c378dd3f6c1f8378cf734ed",
+      "bytes": 59880,
+      "sample_rate": 8000,
+      "voice": "en-us",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
     "en/authorisation.open_and_flag.wav": {
       "line": "authorisation.open_and_flag",
       "language": "en",
@@ -68,6 +80,18 @@
       "text_provenance": "en",
       "sha256": "3a8d2a783d87502b9a578ab6586cdfefd41e2cbb93e988381e763b572ae55224",
       "bytes": 137696,
+      "sample_rate": 8000,
+      "voice": "en-us",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "en/authorisation.open_now.acting.wav": {
+      "line": "authorisation.open_now.acting",
+      "language": "en",
+      "text": "A person has authorised your entry.",
+      "text_provenance": "en",
+      "sha256": "e6e3f75fa17406939d9842ee497859b156a83821f8828e448d75a5c53421285a",
+      "bytes": 39554,
       "sample_rate": 8000,
       "voice": "en-us",
       "words_per_minute": 150,
@@ -829,6 +853,18 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
+    "es-ES/authorisation.open_and_flag.acting.wav": {
+      "line": "authorisation.open_and_flag.acting",
+      "language": "es-ES",
+      "text": "Una persona ha autorizado su entrada y lo ha anotado.",
+      "text_provenance": "es-ES",
+      "sha256": "8f7ac47feb01e051240d15caf69bd67ca685338077f2596230347a3fea09b271",
+      "bytes": 55992,
+      "sample_rate": 8000,
+      "voice": "es",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
     "es-ES/authorisation.open_and_flag.wav": {
       "line": "authorisation.open_and_flag",
       "language": "es-ES",
@@ -836,6 +872,18 @@
       "text_provenance": "es-ES",
       "sha256": "5b8dd5bb448a14e3e75bf9a8cc7a671d3df86b58ac83fa556e98e763c79b50c4",
       "bytes": 134996,
+      "sample_rate": 8000,
+      "voice": "es",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "es-ES/authorisation.open_now.acting.wav": {
+      "line": "authorisation.open_now.acting",
+      "language": "es-ES",
+      "text": "Una persona ha autorizado su entrada.",
+      "text_provenance": "es-ES",
+      "sha256": "44635aa406154202cd8b85af3c9ec2bf108409352b2768e89695dec146d37c80",
+      "bytes": 42948,
       "sample_rate": 8000,
       "voice": "es",
       "words_per_minute": 150,

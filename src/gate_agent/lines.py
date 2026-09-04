@@ -33,14 +33,27 @@ language is a driver told something in a language nobody chose for them.
 
 from __future__ import annotations
 
-from .contract import VEND_REFUSALS, AgentCase, Authorisation
+from .contract import (
+    OPENING_AUTHORISATIONS,
+    VEND_REFUSALS,
+    AgentCase,
+    Authorisation,
+)
 
 #: The lines the DRIVER hears, in every declared driver language.
-#: Derived: one per case, one per authorisation, plus the four the dialogue
-#: itself needs.
+#: Derived: one per case, one per authorisation, one MORE per authorisation
+#: that can act, plus the four the dialogue itself needs.
 DRIVER_LINES: tuple[str, ...] = (
     *(f"case.{case.value}" for case in AgentCase),
     *(f"authorisation.{value.value}" for value in Authorisation),
+    #: THE SAME AUTHORISATION, SPOKEN AT A DOOR THAT WILL ASK FOR SOMETHING.
+    #: Derived from `OPENING_AUTHORISATIONS` -- the act table itself -- so an
+    #: authorisation that becomes an act cannot get a route to a barrier and
+    #: keep the sentence that says it has none. Which of the two a driver hears
+    #: is decided per call, at the moment the agent knows whether THIS door
+    #: will ask: `Agent._say_authorisation`, the same branch that decides
+    #: whether the person hears `operator.cannot_open`.
+    *(f"authorisation.{value.value}.acting" for value in OPENING_AUTHORISATIONS),
     "driver.human_unreachable",
     "driver.nothing_usable",
     #: The person ANSWERED and then put the phone down before keying anything.
@@ -218,20 +231,36 @@ TEXT: dict[str, dict[str, str]] = {
         "es-ES": "Esta entrada no tiene nada pendiente para usted. Adiós.",
     },
     # --- what the driver is told the human decided ------------------------
-    # `open_now` and `open_and_flag` do NOT say the barrier is opening. It is
-    # not: nothing in this version can move one, and a driver who believes a
-    # barrier is about to lift is worse off than one who was told to wait.
+    # NEITHER PAIR SAYS THE BARRIER IS OPENING, and the pair is why there are
+    # two of each. Until round 7 nothing here could move a barrier, so one
+    # sentence was true everywhere: "this system cannot open it, wait for
+    # them". A door with an act token can now ask, and at that door the same
+    # sentence is a lie the driver hears immediately before "the barrier has
+    # been asked to open" -- two sentences contradicting each other, the false
+    # one first. So the clause that claims no route lives ONLY on the keys
+    # spoken where there is none, and the `.acting` keys say what is true at a
+    # door that will ask: a person authorised it, and nothing about a boom.
+    # What happens next is `ticket.vend_commanded`'s to say, once something has
+    # actually been asked.
     "authorisation.open_now": {
         "en": "A person has authorised your entry. This system cannot open the barrier "
               "itself, so please wait for them.",
         "es-ES": "Una persona ha autorizado su entrada. Este sistema no puede abrir la barrera "
               "por sí mismo; espere a que lo hagan.",
     },
+    "authorisation.open_now.acting": {
+        "en": "A person has authorised your entry.",
+        "es-ES": "Una persona ha autorizado su entrada.",
+    },
     "authorisation.open_and_flag": {
         "en": "A person has authorised your entry and made a note of it. This system cannot "
               "open the barrier itself, so please wait for them.",
         "es-ES": "Una persona ha autorizado su entrada y lo ha anotado. Este sistema no puede "
               "abrir la barrera por sí mismo; espere a que lo hagan.",
+    },
+    "authorisation.open_and_flag.acting": {
+        "en": "A person has authorised your entry and made a note of it.",
+        "es-ES": "Una persona ha autorizado su entrada y lo ha anotado.",
     },
     "authorisation.do_not_open": {
         "en": "A person has decided not to open the barrier.",

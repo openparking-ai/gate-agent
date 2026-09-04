@@ -847,6 +847,44 @@ def test_cannot_open_is_spoken_where_nothing_can_act_and_not_where_something_can
         assert events_of(agent2, AgentEventKind.VEND_COMMANDED)
 
 
+def test_the_driver_is_not_told_it_cannot_open_at_a_door_that_is_about_to_ask(tmp_path):
+    """THE SAME TWO COLUMNS, on the leg the driver is standing at.
+
+    Round 7 made the person's sentence conditional and left the driver's
+    unconditional, so at a door with an act token the driver heard "A person has
+    authorised your entry. This system cannot open the barrier itself, so please
+    wait for them" and then, a moment later, "The barrier has been asked to
+    open" -- two sentences contradicting each other, the false one first, in
+    both languages, as shipped audio.
+
+    Where nothing can act the sentence is TRUE and it stays: this asserts both,
+    because a fix that simply stopped saying it would leave a driver at a door
+    that will never open told nothing at all.
+    """
+    server = our_server(lane := a_lane("deny", None), act_token=ACT_TOKEN, arrive=False)
+    with serving(server) as url:
+        # NO ACT TOKEN: nothing here will ask, and the driver is told so.
+        agent, ua, _screen = agent_on(tmp_path, url, act_token=None)
+        arrive(agent, lane)
+        press(agent, ua)
+        open_now(agent, ua, "1")
+        heard = [path for leg, path in ua.played if leg == "driver"]
+        assert any("authorisation.open_now.wav" in one for one in heard), heard
+        assert not any("authorisation.open_now.acting" in one for one in heard), heard
+        assert events_of(agent, AgentEventKind.VEND_COMMANDED) == []
+
+        # WITH ONE: the barrier IS about to be asked, so the driver hears the
+        # sentence that claims nothing about what this system cannot do.
+        agent2, ua2, _screen2 = agent_on(tmp_path, url)
+        arrive(agent2, lane)
+        press(agent2, ua2)
+        open_now(agent2, ua2, "1")
+        heard2 = [path for leg, path in ua2.played if leg == "driver"]
+        assert any("authorisation.open_now.acting" in one for one in heard2), heard2
+        assert not any(one.endswith("authorisation.open_now.wav") for one in heard2), heard2
+        assert len(events_of(agent2, AgentEventKind.VEND_COMMANDED)) == 1
+
+
 # ---------------------------------------------------------------------------
 # The reference goes in exactly one place
 # ---------------------------------------------------------------------------
