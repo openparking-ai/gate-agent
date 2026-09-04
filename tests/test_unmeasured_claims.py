@@ -183,7 +183,13 @@ def test_a_claim_nobody_could_reproduce_is_gone(claim):
 
 #: The BLANKET phrasings -- each one claims it of the PACKAGE, the AGENT or "this
 #: build", with no scope on it. Every one of them is a sentence that was in the
-#: tree at `35e0be1`, and after Z17 none may appear anywhere.
+#: tree at `35e0be1`, and none of THESE WORDINGS may appear anywhere.
+#:
+#: THAT IS THE WHOLE OF WHAT THIS PROMISES, and it is smaller than the concept it
+#: is named for: an enumerated list of wording families is silent on a sentence
+#: that says the same thing in words that are not on it. Green here is not
+#: evidence that no such sentence is in the tree -- Z18 found one that was. Where
+#: that gap is closed is stated in `test_nothing_claims_this_package_cannot_act`.
 #:
 #: Deliberately NOT in this list: `opens nothing`, `no opening authority` and
 #: `no vend route` on their own. Those survive in true, SCOPED sentences -- about
@@ -292,11 +298,26 @@ def test_nothing_claims_this_package_cannot_act():
     QUERY: `CANNOT_ACT` above, over every `.py`, `.md` and `.toml` this
     repository publishes, every hit accounted for one by one rather than counted.
 
-    **What this cannot see**, stated beside the absence claim because a word
-    query has exactly one blind spot and it is the important one: a NEW false
-    sentence, written in words nobody has used yet. That is why
-    `test_what_this_can_act_on_is_derived_in_one_place` below is structural and
-    this one is not, and why the receipt says so too.
+    **What this cannot see**, stated beside the absence claim because an absence
+    claim is a claim about a SEARCH: every wording that is not on the list above.
+    The age of the sentence has nothing to do with it. Z18 proved that the
+    expensive way -- `docs/CONTRACT.md:2363` at `75876ee`, the closing summary of
+    the authorisation section, an OLD sentence carried verbatim from
+    `origin/main` and made false by round 7, of exactly this family, in a file
+    this sweep covers, and this test was GREEN over it. The docstring here used
+    to name the blind spot as "a NEW false sentence, written in words nobody has
+    used yet", which is narrower than the truth and is part of why nobody looked.
+
+    **What closes that gap is not this test**, and there are two of them. The
+    first is `test_what_this_can_act_on_is_derived_in_one_place` below, which is
+    structural rather than a word query. The second is outside the repository:
+    the GATE's negation-pairing read over `README.md`, `docs/CONTRACT.md` and
+    `config/agent.example.toml`, a named step of Z14 since 2026-09-04, whose
+    expected result is that every hit is true of the code at the tip under gate,
+    or absent. Widening this expression instead was considered and rejected: a
+    net wide enough to catch a rewording also catches the ~122 legitimate
+    negation sentences beside it and needs an allow-list to tell them apart,
+    which is the checklist this block exists to avoid.
     """
     from gate_agent.contract import ACTS
 

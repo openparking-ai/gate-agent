@@ -2360,8 +2360,6 @@ assumptions** — nothing here measures how long a person takes to reach a phone
   they are still on hold, because silence on a door station is indistinguishable
   from a dead intercom.
 
-**Neither timer opens anything, and neither does any authorisation.**
-
 ## `GET /v1/agent` — who it is, and what it answers
 
 <!--payload:agent-->
