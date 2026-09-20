@@ -7,13 +7,28 @@ data in most places this installs -- a decision, not a detail."*
 
 **One record is two files.** The JPEG exactly as the camera sent it, never
 re-encoded -- so the size measured is the camera's and not this package's -- and
-a sidecar of seven fields saying when it was taken, by which camera, why, and
+a sidecar of eight fields saying when it was taken, by which camera, why, and
 which lane event it answers. **No plate, no plate region, no vehicle attribute
 and no event detail goes in either.** The join to who the car was is the lane
-event cursor held in the sidecar and the platform's durable record, one place
+event reference held in the sidecar and the platform's durable record, one place
 each; putting a plate here would make this directory a second copy of an
 identity, on a box in a gate housing, outside every retention mechanism that
 already exists for one.
+
+**The reference is a cursor AND the lane's own `event_id`.** The cursor is what
+this process polled by, and the lane's contract says it is not durable across a
+restart -- so a record joined by the cursor alone stops naming anything the day
+the lane restarts. `event_id` is the key the lane's platform keeps that event
+under, and it survives. It is carried when the lane's page carries one and is
+`null` otherwise: a lane that publishes no `event_id` is still photographed.
+
+**The sidecar carries no version, and that decides how a field is added.** The
+reader judges a sidecar by which fields are present. A record written before
+`lane_event_id` existed carries the seven fields it had then, and a reader that
+REQUIRED the eighth would find every such record incomplete and delete it --
+JPEG and sidecar -- at the next start, on every box, counted
+`store_record_incomplete`. So the seven are required and the eighth is read
+with `.get`: additive-optional, or it purges a site's whole store on restart.
 
 **Written atomically.** Both files are written to temporary names in the same
 directory and then renamed. A crash before the first rename leaves no record at
@@ -89,6 +104,24 @@ SIDECAR_FIELDS = (
     "reason",
     "lane_event_cursor",
     "lane_event_at",
+    "lane_event_id",
+    "capture_minus_lane_event_ms",
+    "bytes",
+)
+
+#: The fields a sidecar MUST carry to be read back as a record: the seven every
+#: record ever written carries. `lane_event_id` is not here on purpose. The
+#: sidecar has no version number, so presence is the only judgement the reader
+#: can make -- and a reader that required a field added later would delete every
+#: record written before it, JPEG and sidecar, at the next start, on every box.
+#: A field added to `SIDECAR_FIELDS` is added here ONLY if no record on any disk
+#: was written without it, which is never.
+SIDECAR_FIELDS_REQUIRED = (
+    "captured_at",
+    "camera_id",
+    "reason",
+    "lane_event_cursor",
+    "lane_event_at",
     "capture_minus_lane_event_ms",
     "bytes",
 )
@@ -126,7 +159,7 @@ class StoreRecordRefused(Exception):
 
 @dataclass(frozen=True, slots=True)
 class Record:
-    """One stored capture: the sidecar's seven fields, and where the bytes are."""
+    """One stored capture: the sidecar's eight fields, and where the bytes are."""
 
     id: str
     captured_at: str
@@ -134,6 +167,11 @@ class Record:
     reason: str
     lane_event_cursor: int | None
     lane_event_at: str | None
+    #: The lane's own `event_id` for the event this capture answers -- the key
+    #: that survives a lane restart, which the cursor does not. `None` on an
+    #: interval capture, on a page whose events carry none, and on every record
+    #: written before this field existed.
+    lane_event_id: str | None
     capture_minus_lane_event_ms: int | None
     bytes: int
     image_path: Path
@@ -324,6 +362,7 @@ class CaptureStore:
         captured_at: datetime,
         lane_event_cursor: int | None = None,
         lane_event_at: str | None = None,
+        lane_event_id: str | None = None,
     ) -> Record:
         """One record, BUILT THROUGH THE CONTRACT, then written atomically.
 
@@ -388,6 +427,7 @@ class CaptureStore:
             reason=reason,
             lane_event_cursor=lane_event_cursor,
             lane_event_at=lane_event_at,
+            lane_event_id=lane_event_id,
             capture_minus_lane_event_ms=difference_ms,
             bytes=len(image),
             image_path=self.directory / f"{record_id}{IMAGE_SUFFIX}",
@@ -650,6 +690,7 @@ def _refuse_unpublishable(record: Record) -> None:
             reason=record.reason,
             lane_event_cursor=record.lane_event_cursor,
             lane_event_at=record.lane_event_at,
+            lane_event_id=record.lane_event_id,
             capture_minus_lane_event_ms=record.capture_minus_lane_event_ms,
             bytes=record.bytes,
             image_url=f"/v1/capture/images/{record.id}",
@@ -675,15 +716,17 @@ def _write_atomic_body(path: Path, body: bytes) -> None:
 def _read_record(record_id: str, image: Path, sidecar: Path) -> Record | None:
     """One record off the disk, or `None` if the pair is not a record.
 
-    A sidecar that will not parse, or that is missing a field, is not a record
-    that can be interpreted generously: it is half of one, and it goes through
-    the same path as an image with no sidecar at all.
+    A sidecar that will not parse, or that is missing one of the REQUIRED
+    fields, is not a record that can be interpreted generously: it is half of
+    one, and it goes through the same path as an image with no sidecar at all.
+    A sidecar missing `lane_event_id` is not that: it is a record written before
+    the field existed, and it is read back with the field `None`.
     """
     try:
         body = json.loads(sidecar.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(body, dict) or any(name not in body for name in SIDECAR_FIELDS):
+    if not isinstance(body, dict) or any(name not in body for name in SIDECAR_FIELDS_REQUIRED):
         return None
     try:
         size = image.stat().st_size
@@ -696,6 +739,9 @@ def _read_record(record_id: str, image: Path, sidecar: Path) -> Record | None:
         reason=str(body["reason"]),
         lane_event_cursor=body["lane_event_cursor"],
         lane_event_at=body["lane_event_at"],
+        # `.get`, NEVER `[]`: absent on every record written before the field
+        # existed, and absence is not incompleteness. See `SIDECAR_FIELDS_REQUIRED`.
+        lane_event_id=body.get("lane_event_id"),
         capture_minus_lane_event_ms=body["capture_minus_lane_event_ms"],
         # The size on the DISK, not the number the sidecar remembers. They agree
         # unless something truncated the image, and where they disagree the disk
@@ -744,6 +790,7 @@ __all__ = [
     "MIN_PROJECTION_SECONDS",
     "RECORD_ID",
     "SIDECAR_FIELDS",
+    "SIDECAR_FIELDS_REQUIRED",
     "SIDECAR_SUFFIX",
     "TEMP_PREFIX",
     "CaptureStore",

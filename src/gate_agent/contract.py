@@ -705,7 +705,7 @@ class EventPage:
 #
 # **It has no opening authority either, and it holds no identity.** It reads a
 # camera and it reads a lane's read contract, both `GET`, and it writes to its
-# own directory. The store carries the JPEG the camera sent and seven fields
+# own directory. The store carries the JPEG the camera sent and eight fields
 # about WHEN and WHY it was taken. No plate, no plate region, no vehicle
 # attribute and no event detail -- the join to who the car was is the lane event
 # reference held here and the platform's durable record, one place each.
@@ -1181,7 +1181,7 @@ CAPTURE_MINUS_LANE_EVENT_NOTE = (
 class RecordRef:
     """One stored capture, as the records route publishes it. SIDECAR ONLY.
 
-    The seven fields are the sidecar's, and there is nothing else in the sidecar
+    The eight fields are the sidecar's, and there is nothing else in the sidecar
     to publish. **No plate, no plate region, no vehicle attribute and no event
     detail** -- not withheld here, absent from the store, which is why this
     dataclass has nowhere to put one.
@@ -1196,10 +1196,21 @@ class RecordRef:
     camera_id: str
     reason: str
     #: The lane event this capture answers, by CURSOR and by the time the LANE
-    #: recorded, and nothing else from that event. This is the whole join: who
-    #: the car was lives at the lane's platform, under this cursor.
+    #: recorded, and nothing else from that event but its id below. Who the car
+    #: was lives at the lane's platform; the cursor is how this process polled
+    #: for the event, and the lane contract says it does not survive a restart.
     lane_event_cursor: int | None
     lane_event_at: str | None
+    #: The lane's own `event_id` for that event: THE DURABLE HALF of the join.
+    #: The cursor is not durable across a lane restart -- the lane contract says
+    #: so -- and `event_id` is the key the lane's platform keeps the event under.
+    #: `null` on an interval capture, on a record from a lane whose page carries
+    #: no `event_id`, and on every record written before this field existed.
+    #: ADDITIVE-OPTIONAL, AND NO INVARIANT TIES IT TO THE CURSOR: the sidecar has
+    #: no version, so a rule that required it beside `lane_event_cursor` would
+    #: refuse -- and the store would purge -- every lane-triggered record on
+    #: every disk written before it.
+    lane_event_id: str | None
     #: `captured_at` minus `lane_event_at`, in milliseconds. NAMED FOR THE
     #: SUBTRACTION IT IS, and what it spans is stated once, in
     #: `CAPTURE_MINUS_LANE_EVENT_NOTE`, published into `docs/CONTRACT.md` from
@@ -1217,6 +1228,8 @@ class RecordRef:
             raise ValueError(f"reason must be one of {tuple(CaptureReason)}, got {self.reason!r}")
         if self.lane_event_at is not None:
             _iso_utc(self.lane_event_at, "lane_event_at")
+        if self.lane_event_id is not None:
+            _text(self.lane_event_id, "lane_event_id")
         if (self.lane_event_cursor is None) != (self.lane_event_at is None):
             raise ValueError(
                 "a lane event reference is a cursor AND the time the lane recorded, or neither"

@@ -918,8 +918,26 @@ hand a site's camera password to whichever host it named.
 - **the JPEG exactly as the camera sent it**, never re-encoded — so the size
   measured is the camera's and not this package's;
 - **a sidecar** of `captured_at`, `camera_id`, `reason`, `lane_event_cursor`,
-  `lane_event_at`, `capture_minus_lane_event_ms` and `bytes`. Seven fields, and
-  there is no eighth.
+  `lane_event_at`, `lane_event_id`, `capture_minus_lane_event_ms` and `bytes`.
+  Eight fields, and there is no ninth.
+
+**`lane_event_id` is the durable half of the join.** The cursor is what this
+process polled the lane by, and the lane contract says it is **not durable
+across a restart** — so a record joined by the cursor alone stops naming
+anything the day the lane restarts. `event_id` is the lane's own id for that
+event, the key its platform keeps the event under, and it survives. It is
+carried when the lane's page carries one; a lane that publishes no `event_id`
+is still photographed, with the field `null`.
+
+**The sidecar carries no version number, and that decides how a field is
+added.** The reader judges a sidecar by which fields are present. Every record
+written before `lane_event_id` existed carries the seven fields it had then,
+and a reader that REQUIRED the eighth would find every such record incomplete
+and delete it — JPEG and sidecar — at the next start, on every box, counted
+`store_record_incomplete`. So the seven are required, `lane_event_id` is read
+with `.get`, and such a record is served with it `null`. Additive-optional, or
+it purges a site's whole store on restart. The same rule binds any field added
+after this one.
 
 **A record's name is a timestamp, the camera id and a sequence number, and
 nothing else.** A directory listing is readable by anyone who can read the
@@ -1223,6 +1241,7 @@ value**, because nothing here has ever measured one.
       "reason": "lane_vend",
       "lane_event_cursor": 7,
       "lane_event_at": "2026-08-30T14:03:11.102913+00:00",
+      "lane_event_id": "9f2c1a7d-4e8b-40c2-a1f6-d3b8e5c07a91",
       "capture_minus_lane_event_ms": 380,
       "bytes": null,
       "image_url": "/v1/capture/images/20260830T140311482Z_front_000002"

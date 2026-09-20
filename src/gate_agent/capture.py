@@ -43,8 +43,10 @@ customer of this process, not a degraded installation.
 **Nothing it stores identifies a vehicle.** Not a plate, not a plate region, not
 a colour, not a make -- and not a lane event's `detail`, which is where the lane
 puts what it knows. What a record carries about the trigger is the event's
-CURSOR and the time the lane recorded, which is a reference and not a copy. The
-join to who the car was lives at the lane's platform, under that cursor.
+CURSOR, the time the lane recorded, and the lane's own `event_id`, which is a
+reference and not a copy. The join to who the car was lives at the lane's
+platform, under that `event_id` -- the cursor is the lane's catch-up window and
+does not survive its restart; the id does.
 """
 
 from __future__ import annotations
@@ -419,20 +421,34 @@ class CaptureProcess:
                     f"a {event.get('kind')!r} event's occurred_at {occurred_at!r} carries no "
                     "UTC offset; this contract requires an explicit one"
                 )
-            triggers.append((reason, event_cursor, occurred_at))
+            # THE DURABLE HALF OF THE REFERENCE. The lane's `event_id` is the
+            # key its platform keeps the event under, and it survives the lane
+            # restart that resets the cursor. Carried when the page carries
+            # one; a lane that publishes none is still photographed, with the
+            # field `null`. One that publishes something other than a non-empty
+            # string is a page this build cannot interpret, refused whole like
+            # a cursor that is not an int.
+            event_id = event.get("event_id")
+            if event_id is not None and (not isinstance(event_id, str) or not event_id):
+                return self._refuse_page(
+                    f"a {event.get('kind')!r} event's event_id {event_id!r} is not a string"
+                )
+            triggers.append((reason, event_cursor, occurred_at, event_id))
 
         self._code(CaptureCode.LANE_CONTRACT_UNSUPPORTED, subject, HealthState.OK)
         self._code(CaptureCode.LANE_BACKLOG_LOST, subject, HealthState.OK)
-        for reason, event_cursor, occurred_at in triggers:
+        for reason, event_cursor, occurred_at, event_id in triggers:
             for camera_id in self._cameras:
                 # NOTHING from `event["detail"]`. Not read here, not passed, not
-                # available to the writer: the cursor and the time are the whole
-                # reference, and `entry_pending`'s `plate_region` is why.
+                # available to the writer: the cursor, the time and the id are
+                # the whole reference, and `entry_pending`'s `plate_region` is
+                # why.
                 self.capture(
                     camera_id,
                     reason,
                     lane_event_cursor=event_cursor,
                     lane_event_at=occurred_at,
+                    lane_event_id=event_id,
                 )
         self._cursor = cursor
 
@@ -444,6 +460,7 @@ class CaptureProcess:
         reason: CaptureReason,
         lane_event_cursor: int | None = None,
         lane_event_at: str | None = None,
+        lane_event_id: str | None = None,
     ):
         """One snapshot from one camera, stored, with every ending named."""
         camera = self._cameras[camera_id]
@@ -491,6 +508,7 @@ class CaptureProcess:
                 captured_at=self._now(),
                 lane_event_cursor=lane_event_cursor,
                 lane_event_at=lane_event_at,
+                lane_event_id=lane_event_id,
             )
         except StoreOverBudget as exc:
             log.error("%s", exc)
@@ -627,6 +645,7 @@ class CaptureProcess:
                         reason=record.reason,
                         lane_event_cursor=record.lane_event_cursor,
                         lane_event_at=record.lane_event_at,
+                        lane_event_id=record.lane_event_id,
                         capture_minus_lane_event_ms=record.capture_minus_lane_event_ms,
                         bytes=record.bytes,
                         image_url=f"/v1/capture/images/{record.id}",
