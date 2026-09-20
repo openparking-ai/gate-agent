@@ -82,7 +82,12 @@ WORDS_PER_MINUTE = 150
 TEXT_PROVENANCE: dict[str, dict] = {
     "en": {
         "written_by": "The Claude Code session that built this module, 2026-08-30, "
-        "commit 5084a76 on openparking-ai/gate-agent.",
+        "commit 5084a76 on openparking-ai/gate-agent -- EXCEPT the two "
+        "`vehicle_too_close` lines (`ticket.vend_refused.vehicle_too_close` and "
+        "`operator.vend_refused.vehicle_too_close`), added 2026-09-20 by a later session "
+        "when the lane's refusal set gained that code. The driver's English sentence was "
+        "approved by Gokhan in its final wording; the operator's was reported to him "
+        "and not objected to.",
         "from": "Nothing. English is the SOURCE: every line was written here first and "
         "every other language is a translation of it.",
         "reviewed_by": "No professional editor and no native-speaker review. The words are "
@@ -96,7 +101,11 @@ TEXT_PROVENANCE: dict[str, dict] = {
         "reviewed_by": "No native speaker and no professional translator. It was read line "
         "by line against its English source by an independent review session on 2026-08-30, "
         "which found every line a faithful rendering in a consistent `usted` register -- "
-        "that is a check on FAITHFULNESS, not a sign-off on register or regional fit.",
+        "that is a check on FAITHFULNESS, not a sign-off on register or regional fit. "
+        "THAT REVIEW DID NOT SEE the two `vehicle_too_close` lines: they were added "
+        "2026-09-20, are machine translations of their approved English in the same sense "
+        "as the rest, and have had no review of any kind -- no native speaker, no "
+        "professional translator, and no independent read against the English.",
         "register": "Castilian. `matrícula`, `aparcamiento`, `almohadilla`, `Pulse`. This "
         "is why the key is `es-ES` and not `es`: at a garage in Texas or Bogotá several of "
         "those words are wrong, and a generic tag would have chosen a register for that "

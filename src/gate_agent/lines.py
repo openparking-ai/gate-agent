@@ -68,6 +68,12 @@ DRIVER_LINES: tuple[str, ...] = (
     "ticket.confirmed",
     "ticket.vend_commanded",
     "ticket.vend_refused",
+    #: THE ONE REFUSAL A DRIVER IS TOLD BY NAME. Every other code lands on the
+    #: generic sentence above. LISTED and not derived from `VEND_REFUSALS` the
+    #: way the operator's are: deriving would demand a driver sentence for every
+    #: code, nine of which nobody has written or approved. A later line for a
+    #: second code is a second key here, and nothing else.
+    "ticket.vend_refused.vehicle_too_close",
     #: What a driver is told when the code went up WHILE THEY WERE ON THE PHONE.
     #: The screen is where a driver looks, and it is enough on its own -- until
     #: they are already in a call, at which point nothing has told them the code
@@ -406,6 +412,15 @@ TEXT: dict[str, dict[str, str]] = {
         "en": "The entrance did not accept that. I am connecting you to a person.",
         "es-ES": "La entrada no lo ha aceptado. Le paso con una persona.",
     },
+    # Said to the driver who has just confirmed a ticket and is waiting for the
+    # barrier, about the car behind them -- and a person is still connected.
+    # `barrier`, not `gate`: the word the driver's own lines already use.
+    "ticket.vend_refused.vehicle_too_close": {
+        "en": "The vehicle behind you is too close for the barrier to open. "
+              "Please ask them to back up a little, then it will open.",
+        "es-ES": "El vehículo de detrás está demasiado cerca para que la barrera "
+              "pueda abrirse. Pídale que retroceda un poco y se abrirá.",
+    },
     # Said IN THE CALL, about a code that went up during it. It says where to
     # look, what to do, and that the button is what completes it -- because the
     # press is what binds the ticket to this arrival.
@@ -443,6 +458,10 @@ TEXT: dict[str, dict[str, str]] = {
     "operator.vend_refused.geometry_incomplete": {
         "en": "Only one of the entrance loops is covered.",
         "es-ES": "Solo uno de los lazos de la entrada está cubierto.",
+    },
+    "operator.vend_refused.vehicle_too_close": {
+        "en": "The entrance says the vehicle behind is too close.",
+        "es-ES": "La entrada dice que el vehículo de detrás está demasiado cerca.",
     },
     "operator.vend_refused.decision_in_future": {
         "en": "The entrance's clock disagrees with this system's.",

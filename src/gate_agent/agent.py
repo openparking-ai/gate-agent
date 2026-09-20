@@ -1539,7 +1539,19 @@ class Agent:
         refusal = named if named in self._durations_for_lines() else UNKNOWN_REFUSAL
         lines = ("operator.ticket_refused", refusal)
         self._remember_help(session, ("operator.help_after_ticket",) + lines)
-        self._say(session, UaLeg.DRIVER, "ticket.vend_refused")
+        # THE DRIVER, the same shape: the code's own sentence where this build
+        # has one, the generic sentence where it does not. The driver's set is
+        # LISTED, not derived (`lines.DRIVER_LINES`), so most codes -- and every
+        # foreign lane's own vocabulary -- land on the fallback. Either way the
+        # person is still connected on the next line: a driver told the car
+        # behind is too close, whose car behind does not move, has a sentence
+        # and no way out otherwise.
+        told = f"ticket.vend_refused.{answer.code}"
+        self._say(
+            session,
+            UaLeg.DRIVER,
+            told if told in self._durations_for_lines() else "ticket.vend_refused",
+        )
         self._to_a_human(session, lines)
 
     def _remember_help(self, session: Session, lines: tuple) -> None:
