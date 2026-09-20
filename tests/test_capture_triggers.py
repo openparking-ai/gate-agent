@@ -13,6 +13,8 @@ consumer of that contract, which is the seat a third party takes.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from cameras import FakeCamera, camera_server, jpeg
@@ -141,6 +143,75 @@ def test_an_arrival_and_a_vend_each_take_a_picture(wired):
         CaptureReason.LANE_VEND.value,
     ]
     assert [one["lane_event_cursor"] for one in stored] == [2, 3]
+
+
+def test_a_lane_page_carrying_event_id_is_a_sidecar_carrying_it(wired):
+    """THE DURABLE KEY. The cursor is the lane's catch-up window and the lane
+    contract says it does not survive a restart; `event_id` is the key the lane's
+    platform keeps the event under, and it does. A record joined by the cursor
+    alone stops naming anything the day the lane restarts -- and the entry
+    photograph is then unreachable from the stay it belongs to.
+
+    Asserted on the ROUTE and on the DISK: the sidecar is what survives, and a
+    route that published a value the sidecar did not hold would be a memory.
+    """
+    lane, _camera, process, _now = wired
+    lane.record("frames_captured", AT, {"count": 3, "camera": "sim-cam-1"})
+    lane.record("vended", AT, {"reason": "cached_allow"})
+    published = [
+        one["event_id"] for one in lane.log if one["kind"] in ("frames_captured", "vended")
+    ]
+    assert published == ["fl-0002", "fl-0003"], "the foreign lane stopped publishing event_id"
+    process.poll(force=True)
+
+    stored = triggered(process)
+    assert [one["lane_event_id"] for one in stored] == published
+    for one in stored:
+        sidecar = json.loads(
+            (process.store.directory / f"{one['id']}.json").read_text(encoding="utf-8")
+        )
+        assert sidecar["lane_event_id"] == one["lane_event_id"]
+
+    # And the interval capture the same poll took carries none: there is no
+    # lane event to name.
+    interval = [
+        one
+        for one in process.records(0).to_dict()["records"]
+        if one["reason"] == CaptureReason.INTERVAL.value
+    ]
+    assert interval and all(one["lane_event_id"] is None for one in interval)
+
+
+def test_a_lane_page_carrying_no_event_id_is_still_followed(wired):
+    """ADDITIVE-OPTIONAL at the wire too. A lane that publishes no `event_id`
+    -- an older build, or a third party's -- is photographed as before, with the
+    field `null`. One that publishes something that is not a string is a page
+    this build cannot interpret, and it is refused WHOLE like a cursor that is
+    not an int: nothing photographed under a lane reason, the cursor not adopted.
+    """
+    lane, _camera, process, _now = wired
+    lane.record("vended", AT)
+    del lane.log[-1]["event_id"]
+    process.poll(force=True)
+    stored = triggered(process)
+    assert [one["reason"] for one in stored] == [CaptureReason.LANE_VEND.value]
+    assert stored[0]["lane_event_id"] is None
+    assert stored[0]["lane_event_cursor"] == 2
+    assert states(process)[(UNSUPPORTED, "lane")] == "ok"
+
+    lane.record("vended", AT)
+    lane.log[-1]["event_id"] = 3
+    process.poll(force=True)
+    assert len(triggered(process)) == 1, "an event_id this build cannot carry was followed"
+    assert states(process)[(UNSUPPORTED, "lane")] == "active"
+
+    # Recovers by itself once the lane serves a page that can be read, and the
+    # refused event is then followed with its id, because it is still in the
+    # window.
+    lane.log[-1]["event_id"] = "fl-0003"
+    process.poll(force=True)
+    assert states(process)[(UNSUPPORTED, "lane")] == "ok"
+    assert [one["lane_event_id"] for one in triggered(process)] == [None, "fl-0003"]
 
 
 def test_entry_pending_is_not_a_trigger_and_its_detail_is_never_copied(wired):

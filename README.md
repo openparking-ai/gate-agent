@@ -98,8 +98,9 @@ the payload with the code, and this package holds no list of its own — two lis
 drift, and the drift is a technician dispatched because a car arrived.
 
 **Nothing it stores identifies a vehicle.** A capture record is the JPEG the
-camera sent and seven fields saying when it was taken, by which camera, why, and
-which lane event it answers by CURSOR. No plate, no plate region, no vehicle
+camera sent and eight fields saying when it was taken, by which camera, why, and
+which lane event it answers — by CURSOR and by the lane's own `event_id`, which
+is the one that survives a lane restart. No plate, no plate region, no vehicle
 attribute, and nothing from a lane event's `detail` — which is where a lane puts
 what it knows. Swept over every route and every byte in the store, with a plate
 planted in a lane event as the control.

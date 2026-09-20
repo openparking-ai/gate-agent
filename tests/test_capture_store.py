@@ -20,6 +20,7 @@ from cameras import jpeg
 from gate_agent.store import (
     IMAGE_SUFFIX,
     SIDECAR_FIELDS,
+    SIDECAR_FIELDS_REQUIRED,
     SIDECAR_SUFFIX,
     TEMP_PREFIX,
     CaptureStore,
@@ -92,7 +93,7 @@ def test_a_directory_that_will_not_take_a_write_is_refused_at_startup(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_a_record_is_a_jpeg_as_received_and_seven_fields(tmp_path):
+def test_a_record_is_a_jpeg_as_received_and_eight_fields(tmp_path):
     """Never re-encoded: the size measured is the camera's, not this package's."""
     store = store_at(tmp_path)
     image = jpeg(b"the camera's own bytes")
@@ -104,9 +105,56 @@ def test_a_record_is_a_jpeg_as_received_and_seven_fields(tmp_path):
         (store.directory / f"{record.id}{SIDECAR_SUFFIX}").read_text(encoding="utf-8")
     )
     assert set(sidecar) == set(SIDECAR_FIELDS), (
-        "the sidecar's fields are the contract's seven and nothing else -- a field added here "
+        "the sidecar's fields are the contract's eight and nothing else -- a field added here "
         "is a field about a vehicle unless somebody argued for it"
     )
+
+
+def test_a_sidecar_written_before_lane_event_id_existed_is_read_back_not_purged(tmp_path):
+    """THE FIELD IS OPTIONAL, AND THAT IS LOAD-BEARING.
+
+    The sidecar carries no version number; the reader judges by which fields
+    are present. Every record written before `lane_event_id` existed carries
+    the seven fields it had then. A reader that REQUIRED the eighth would find
+    every such record incomplete at the next start and delete it -- JPEG and
+    sidecar -- on every box, counted `store_record_incomplete`. That was
+    measured before this field was added: with the eighth required, files went
+    2 -> 0 and `incomplete` named the record. This holds the other design.
+    """
+    store = store_at(tmp_path)
+    record = store.write(
+        jpeg(b"before the field existed"), camera_id="front", reason="lane_vend",
+        captured_at=START, lane_event_cursor=7, lane_event_at=START.isoformat(),
+        lane_event_id="9f2c1a7d-4e8b-40c2-a1f6-d3b8e5c07a91",
+    )
+    sidecar_path = store.directory / f"{record.id}{SIDECAR_SUFFIX}"
+    body = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert body["lane_event_id"] == "9f2c1a7d-4e8b-40c2-a1f6-d3b8e5c07a91"
+
+    # A sidecar as an older build wrote it: the seven, and no eighth.
+    del body["lane_event_id"]
+    assert set(body) == set(SIDECAR_FIELDS_REQUIRED)
+    sidecar_path.write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
+
+    reopened = store_at(tmp_path)  # `store_at` opens, and opening is the rebuild
+    held = [one for _cursor, one in reopened.records()]
+    assert [one.id for one in held] == [record.id], "a record written before the field was purged"
+    assert held[0].lane_event_id is None
+    assert held[0].lane_event_cursor == 7
+    assert reopened.incomplete == ()
+    assert sorted(path.name for path in store.directory.iterdir()) == sorted(
+        [f"{record.id}{IMAGE_SUFFIX}", f"{record.id}{SIDECAR_SUFFIX}"]
+    )
+
+    # THE CONTROL, in the same store: a sidecar missing one of the SEVEN is
+    # still half a record, reported and purged -- so the survival above is the
+    # reader tolerating this one field, not the reader tolerating anything.
+    del body["lane_event_at"]
+    sidecar_path.write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
+    again = store_at(tmp_path)
+    assert again.records() == ()
+    assert again.incomplete == (record.id,)
+    assert list(store.directory.iterdir()) == []
 
 
 def test_a_records_name_is_a_timestamp_a_camera_and_a_sequence(tmp_path):

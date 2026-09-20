@@ -223,6 +223,20 @@ mean the suite is not holding the fix.
                          a cursor behind the one this process holds, with
                          `reset:false`, is taken -- so the same events are
                          photographed again on every poll, for ever.
+
+THE DURABLE KEY (EXIT E1, 3.1). The lane's `event_id` on the sidecar, beside the
+cursor that does not survive a lane restart. Optional on the read side, and the
+control is on the WRITE: a reader that required it would purge every record on
+every disk written before it.
+
+  the_event_id_is_dropped
+                         a lane page carrying `event_id` is written to a sidecar
+                         that does not. The photograph is then joined to the stay
+                         by a cursor the next lane restart resets.
+  the_reader_requires_the_key
+                         the reader requires the eighth field. Every record
+                         written before it is half a record at the next start:
+                         purged, JPEG and sidecar, on every box, silently.
 """
 
 from __future__ import annotations
@@ -495,9 +509,10 @@ BREAKS = [
         "name": "event_detail_is_copied",
         "why": "a lane event's detail is carried onto the record",
         "file": "src/gate_agent/capture.py",
-        "from": "            triggers.append((reason, event_cursor, occurred_at))",
+        "from": "            triggers.append((reason, event_cursor, occurred_at, event_id))",
         "to": "            triggers.append(\n"
-              "                (reason, event_cursor, occurred_at + str(event.get(\"detail\")))\n"
+              "                (reason, event_cursor, occurred_at + str(event.get(\"detail\")), "
+              "event_id)\n"
               "            )",
     },
     {
@@ -769,6 +784,29 @@ BREAKS = [
         "file": "src/gate_agent/capture.py",
         "from": "        if cursor < self._cursor:",
         "to": "        if False:",
+    },
+    {
+        # E1's durable key. The control is on the WRITE, which is what that
+        # round changed, and not on the read, which it must not change: a
+        # reader that required the field would purge every record written
+        # before it, and "plant a record without it and prove the read route
+        # refuses it" would have been that purge, on every box.
+        "name": "the_event_id_is_dropped",
+        "why": "a lane page carrying `event_id` is written to a sidecar that does not",
+        "file": "src/gate_agent/capture.py",
+        "from": '            event_id = event.get("event_id")',
+        "to": "            event_id = None",
+    },
+    {
+        # The other direction, and the one that destroys: the reader REQUIRES
+        # the eighth field. Every record on every disk written before it is
+        # then half a record at the next start -- purged, JPEG and sidecar.
+        "name": "the_reader_requires_the_key",
+        "why": "a sidecar written before `lane_event_id` existed is purged at the next start",
+        "file": "src/gate_agent/store.py",
+        "from": '    "lane_event_at",\n    "capture_minus_lane_event_ms",\n    "bytes",\n)\n',
+        "to": '    "lane_event_at",\n    "lane_event_id",\n    "capture_minus_lane_event_ms",\n'
+        '    "bytes",\n)\n',
     },
 ]
 

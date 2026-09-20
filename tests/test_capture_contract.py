@@ -393,7 +393,8 @@ def test_the_records_route_carries_sidecar_fields_and_never_bytes_inline(running
     for record in page["records"]:
         assert set(record) == {
             "cursor", "id", "captured_at", "camera_id", "reason", "lane_event_cursor",
-            "lane_event_at", "capture_minus_lane_event_ms", "bytes", "image_url",
+            "lane_event_at", "lane_event_id", "capture_minus_lane_event_ms", "bytes",
+            "image_url",
         }
         assert record["reason"] in {reason.value for reason in CaptureReason}
         assert record["image_url"].startswith(IMAGES_PREFIX)
@@ -483,13 +484,13 @@ def test_a_planted_plate_in_a_lane_event_reaches_no_route_and_no_file(tmp_path):
         assert b"plate" not in body, f"the word `plate` is in the store: {path.name}"
 
 
-def test_a_records_sidecar_holds_the_seven_fields_and_nothing_about_a_vehicle(running):
+def test_a_records_sidecar_holds_the_eight_fields_and_nothing_about_a_vehicle(running):
     """The store's schema, read off the disk rather than off the dataclass."""
     for path in sorted(running.store.directory.glob("*.json")):
         body = json.loads(path.read_text(encoding="utf-8"))
         assert set(body) == {
             "captured_at", "camera_id", "reason", "lane_event_cursor", "lane_event_at",
-            "capture_minus_lane_event_ms", "bytes",
+            "lane_event_id", "capture_minus_lane_event_ms", "bytes",
         }
 
 
