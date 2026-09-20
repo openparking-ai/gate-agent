@@ -1745,6 +1745,20 @@ translated, and the case goes to a person who is **always told two things**:
 and then the sentence for that code, or `operator.vend_refused.unknown` — *the
 entrance gave a reason I have no words for* — where this build has none.
 
+**The DRIVER hears one sentence, and which one depends on the code.** For
+`vehicle_too_close` it is `ticket.vend_refused.vehicle_too_close` — *the vehicle
+behind you is too close for the barrier to open; please ask them to back up a
+little, then it will open* — the one refusal a driver is told by name, because
+it is the one they can do something about. For every other code, ours or a
+foreign lane's own, it is the generic `ticket.vend_refused` — *the entrance did
+not accept that, I am connecting you to a person*. The driver's per-code lines
+are LISTED in `lines.DRIVER_LINES`, not derived from the refusal set the way the
+operator's are: a derived set would demand a driver sentence for every code,
+and nobody has written or approved those. A second code-specific line is a
+second listed key. **Either way the call then goes to a person** — a driver
+told the car behind is too close, whose car behind does not move, has a
+sentence and no way out otherwise.
+
 **The second half of that is the third-party seat, and it was missing.** The
 sentence table is set-equal to OUR lane's `VendRefusal`, which is the right check
 for our lane and no check at all for a lane that is not ours (SETTLED 1). A

@@ -1144,6 +1144,17 @@ BREAKS = [
         "to": "        refusal = named if named in self._durations_for_lines() else None",
     },
     {
+        "name": "the_driver_hears_a_key_with_no_audio",
+        "why": "the driver's refusal line is derived for every code, so a code this build "
+               "has no driver words for -- most of the published set, and every foreign "
+               "lane's own -- plays nothing and raises audio_missing instead of the "
+               "generic sentence",
+        "file": "src/gate_agent/agent.py",
+        "from": "            told if told in self._durations_for_lines() "
+                "else \"ticket.vend_refused\",",
+        "to": "            told,",
+    },
+    {
         "name": "the_person_is_not_told_a_ticket_was_refused",
         "why": "the operator is briefed as an ordinary case with no line saying a ticket "
                "was confirmed and refused",

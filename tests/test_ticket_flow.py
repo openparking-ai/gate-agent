@@ -1250,6 +1250,89 @@ def test_the_unknown_sentence_is_what_makes_that_briefing_true(tmp_path):
             agent_module.UNKNOWN_REFUSAL = original
 
 
+def driver_refusal_lines(ua) -> list[str]:
+    """The `ticket.vend_refused*` files played to the DRIVER, by basename."""
+    return [
+        str(path).rsplit("/", 1)[-1]
+        for leg, path in ua.played
+        if leg == "driver" and "ticket.vend_refused" in str(path)
+    ]
+
+
+def test_vehicle_too_close_is_the_one_refusal_a_driver_hears_by_name(tmp_path):
+    """The first code-specific sentence a driver ever hears -- AND A PERSON IS
+    STILL CALLED after it.
+
+    The driver's refusal lines are LISTED, with exactly one code-specific
+    member; this is that member, refused by a lane answering the code out of
+    the published set. The second half is the transfer, asserted positively:
+    a driver told the car behind is too close, whose car behind does not move,
+    would otherwise have a sentence and no way out. `_to_a_human(session,
+    lines)` still runs on the line after the sentence, so the person is called
+    AND briefed with the refusal.
+
+    Measured while writing this: with that call deleted, a person is STILL
+    dialled -- the press had already put the session on its way to one -- but
+    they arrive briefed as an ordinary case, with no line saying a ticket was
+    refused. So the briefing assertions below are what hold `_to_a_human` in
+    place; the dial alone would not.
+    """
+    from foreign_lane import make_server as foreign_server
+
+    lane = a_vending_foreign_lane()
+    with serving(foreign_server(lane)) as url:
+        agent, ua, _screen = agent_on(tmp_path, url)
+        lane.vend_refusal = "vehicle_too_close"
+        foreign_decides(agent, lane, "no_plate_read")
+        press(agent, ua)
+        assert [one["code"] for one in events_of(agent, AgentEventKind.VEND_REFUSED)] == [
+            "vehicle_too_close"
+        ]
+        # THE SPECIFIC SENTENCE, and not the generic one.
+        assert driver_refusal_lines(ua) == ["ticket.vend_refused.vehicle_too_close.wav"]
+        # AND THEN A PERSON. `operator_hears` fails if nobody was dialled.
+        heard = operator_hears(agent, ua)
+        assert events_of(agent, AgentEventKind.HUMAN_CALLED)
+        assert any("operator.ticket_refused" in one for one in heard), heard
+        assert any("operator.vend_refused.vehicle_too_close" in one for one in heard), heard
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # A code in the PUBLISHED set that this build has no driver words for.
+        "no_vehicle",
+        # A foreign lane's own vocabulary, which no set here has ever held.
+        "barrier_operator_intervened",
+    ],
+)
+def test_a_refusal_with_no_driver_words_lands_on_the_generic_sentence(tmp_path, code):
+    """THE FALLBACK, positively. The driver's per-code set is not derived from
+    `VEND_REFUSALS`, so most published codes -- and every code a third party's
+    lane invents -- must reach the driver as the one generic sentence, never as
+    a key that has no audio behind it. And the person is still called."""
+    from foreign_lane import make_server as foreign_server
+
+    lane = a_vending_foreign_lane()
+    with serving(foreign_server(lane)) as url:
+        agent, ua, _screen = agent_on(tmp_path, url)
+        lane.vend_refusal = code
+        foreign_decides(agent, lane, "no_plate_read")
+        press(agent, ua)
+        assert [one["code"] for one in events_of(agent, AgentEventKind.VEND_REFUSED)] == [
+            code
+        ]
+        assert driver_refusal_lines(ua) == ["ticket.vend_refused.wav"]
+        # No `AUDIO_MISSING`: the fallback chose a line that exists rather than
+        # deriving one that does not.
+        codes = agent.health().to_dict()["codes"]
+        assert not any(
+            one["code"] == "audio_missing" and one["state"] == "active" for one in codes
+        ), codes
+        operator_hears(agent, ua)
+        assert events_of(agent, AgentEventKind.HUMAN_CALLED)
+
+
 # ---------------------------------------------------------------------------
 # THE PRESS INSIDE THE POLL GAP
 # ---------------------------------------------------------------------------

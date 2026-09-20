@@ -51,6 +51,7 @@ MALFUNCTION_CODES = (
     "boom_did_not_close",
     "vend_relay_fault",
     "arming_loop_stuck_occupied",
+    "deactivate_loop_stuck_occupied",
     "arming_loops_disagree",
     "closing_loops_never_firing",
     "camera_feed_lost",

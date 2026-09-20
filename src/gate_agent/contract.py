@@ -1441,6 +1441,7 @@ VEND_REFUSALS: tuple[str, ...] = (
     "no_vehicle",
     "malfunction_active",
     "geometry_incomplete",
+    "vehicle_too_close",
     "decision_in_future",
     "decision_stale",
     "decision_mismatch",

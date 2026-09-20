@@ -3,14 +3,14 @@
   "tool_version": "eSpeak NG text-to-speech: 1.52.0",
   "text_provenance": {
     "en": {
-      "written_by": "The Claude Code session that built this module, 2026-08-30, commit 5084a76 on openparking-ai/gate-agent.",
+      "written_by": "The Claude Code session that built this module, 2026-08-30, commit 5084a76 on openparking-ai/gate-agent -- EXCEPT the two `vehicle_too_close` lines (`ticket.vend_refused.vehicle_too_close` and `operator.vend_refused.vehicle_too_close`), added 2026-09-20 by a later session when the lane's refusal set gained that code. The driver's English sentence was approved by Gokhan in its final wording; the operator's was reported to him and not objected to.",
       "from": "Nothing. English is the SOURCE: every line was written here first and every other language is a translation of it.",
       "reviewed_by": "No professional editor and no native-speaker review. The words are held to what plays only by the sha256 rows below."
     },
     "es-ES": {
       "written_by": "The same session and the same commit as the English. It is a MACHINE TRANSLATION in the ordinary sense -- written by the model that wrote the English, not by a translator and not by a translation service.",
       "from": "The English line of the same key, in `gate_agent.lines.TEXT`.",
-      "reviewed_by": "No native speaker and no professional translator. It was read line by line against its English source by an independent review session on 2026-08-30, which found every line a faithful rendering in a consistent `usted` register -- that is a check on FAITHFULNESS, not a sign-off on register or regional fit.",
+      "reviewed_by": "No native speaker and no professional translator. It was read line by line against its English source by an independent review session on 2026-08-30, which found every line a faithful rendering in a consistent `usted` register -- that is a check on FAITHFULNESS, not a sign-off on register or regional fit. THAT REVIEW DID NOT SEE the two `vehicle_too_close` lines: they were added 2026-09-20, are machine translations of their approved English in the same sense as the rest, and have had no review of any kind -- no native speaker, no professional translator, and no independent read against the English.",
       "register": "Castilian. `matrícula`, `aparcamiento`, `almohadilla`, `Pulse`. This is why the key is `es-ES` and not `es`: at a garage in Texas or Bogotá several of those words are wrong, and a generic tag would have chosen a register for that site's drivers without telling anybody."
     }
   },
@@ -601,6 +601,18 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
+    "en/operator.vend_refused.vehicle_too_close.wav": {
+      "line": "operator.vend_refused.vehicle_too_close",
+      "language": "en",
+      "text": "The entrance says the vehicle behind is too close.",
+      "text_provenance": "en",
+      "sha256": "2997bbbe452a81c1360777a797cc50d05469d795507ce9150ffd3ca8e9eecbd0",
+      "bytes": 54340,
+      "sample_rate": 8000,
+      "voice": "en-us",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
     "en/operator_case.entry_not_confirmed.wav": {
       "line": "operator_case.entry_not_confirmed",
       "language": "en",
@@ -800,6 +812,18 @@
       "text_provenance": "en",
       "sha256": "2a10eade45a282e93eac62b0b7318811b95f2215418464873baf8025cc6e9eee",
       "bytes": 78098,
+      "sample_rate": 8000,
+      "voice": "en-us",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "en/ticket.vend_refused.vehicle_too_close.wav": {
+      "line": "ticket.vend_refused.vehicle_too_close",
+      "language": "en",
+      "text": "The vehicle behind you is too close for the barrier to open. Please ask them to back up a little, then it will open.",
+      "text_provenance": "en",
+      "sha256": "2b949d73692456a729c2e37dfaa1f620704885569419b45c42ad3a94c5687863",
+      "bytes": 118162,
       "sample_rate": 8000,
       "voice": "en-us",
       "words_per_minute": 150,
@@ -1393,6 +1417,18 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
+    "es-ES/operator.vend_refused.vehicle_too_close.wav": {
+      "line": "operator.vend_refused.vehicle_too_close",
+      "language": "es-ES",
+      "text": "La entrada dice que el vehículo de detrás está demasiado cerca.",
+      "text_provenance": "es-ES",
+      "sha256": "694b631d980ac0967f829b3342829b8193c24de34f7095976a29ebc0e33b8bf6",
+      "bytes": 67756,
+      "sample_rate": 8000,
+      "voice": "es",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
     "es-ES/operator_case.entry_not_confirmed.wav": {
       "line": "operator_case.entry_not_confirmed",
       "language": "es-ES",
@@ -1592,6 +1628,18 @@
       "text_provenance": "es-ES",
       "sha256": "7141e6047b6778f68681408a41c48dd5bedba954970fec5559889f0d96484f6b",
       "bytes": 65284,
+      "sample_rate": 8000,
+      "voice": "es",
+      "words_per_minute": 150,
+      "licence": "espeak-ng-formant"
+    },
+    "es-ES/ticket.vend_refused.vehicle_too_close.wav": {
+      "line": "ticket.vend_refused.vehicle_too_close",
+      "language": "es-ES",
+      "text": "El vehículo de detrás está demasiado cerca para que la barrera pueda abrirse. Pídale que retroceda un poco y se abrirá.",
+      "text_provenance": "es-ES",
+      "sha256": "c16af51a4aa98914699f47d8e5dc97f77dc6df508890b759e5ecee6ee7ca47d9",
+      "bytes": 126546,
       "sample_rate": 8000,
       "voice": "es",
       "words_per_minute": 150,
