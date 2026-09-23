@@ -250,8 +250,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _control import intact, judge  # noqa: E402
+from _shard import report, select  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: How many CI jobs this script is cut into, and THE ONE COPY of that number:
+#: the workflow builds its matrix from `--plan`, which prints it, and
+#: `_shard.select` refuses any other count it is handed. Chosen from
+#: measurement -- one break is one staged suite run, measured at 62 to 108
+#: seconds on GitHub's runners (`b37c39b`, `ed9f859`), and
+#: 64 breaks at `ed9f859` is 32 per shard, 33 suite runs with control A, about
+#: 60 minutes at the slow end against a six-hour ceiling. Raise it when a
+#: shard's wall time nears two hours.
+SHARDS = 2
 
 BREAKS = [
     {
@@ -850,8 +861,12 @@ def run(directory: Path) -> subprocess.CompletedProcess:
     )
 
 
+INDICES, LABEL = select(BREAKS, SHARDS, sys.argv[1:])
 failures = 0
 
+# CONTROL A RUNS IN EVERY SHARD, before any break is applied: each shard is its
+# own runner, and a break is only evidence against an intact suite measured on
+# the same machine.
 print("== control A: the suite must PASS intact ==")
 intact_dir = stage()
 try:
@@ -861,8 +876,11 @@ try:
 finally:
     shutil.rmtree(intact_dir, ignore_errors=True)
 
-print("\n== control B: each break must make it FAIL ==")
-for brk in BREAKS:
+print(f"\n== control B: each break must make it FAIL — shard {LABEL} ==")
+ran = 0
+for number in INDICES:
+    brk = BREAKS[number]
+    ran += 1
     directory = stage()
     try:
         path = directory / brk["file"]
@@ -883,6 +901,8 @@ for brk in BREAKS:
             failures += 1
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+
+report(ran, len(BREAKS), LABEL, INDICES)
 
 if failures:
     print(

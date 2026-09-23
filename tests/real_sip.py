@@ -30,10 +30,13 @@ from __future__ import annotations
 
 import math
 import os
+import random
+import re
 import shutil
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 import wave
@@ -146,10 +149,82 @@ def tone_share(path: Path, hz: float = 440.0, window: float = 0.5) -> list[float
     return shares
 
 
-def free_port(kind=socket.SOCK_DGRAM) -> int:
-    with socket.socket(socket.AF_INET, kind) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+#: THE PORTS A BARESIP IS GIVEN COME FROM HERE, NOT FROM THE KERNEL. This used
+#: to bind port 0, read the number, CLOSE the socket and hand the number over --
+#: and between that close and baresip's own bind, anything asking the kernel for
+#: a port could be given the same one. Measured on `dc9453f`, 3.11: nine errors,
+#: `tcp: sock_bind: ... Address already in use [98] (af=2, 127.0.0.1:49658)`.
+#: It also probed the SIP port on UDP alone, and baresip binds it on UDP AND TCP,
+#: and binds the next port up on TCP for TLS -- measured with `lsof` against a
+#: running instance -- so two of the four ports it binds were never checked.
+#:
+#: So: a block BELOW the kernel's ephemeral range, which nothing asking for port
+#: 0 is ever given; every port probed on TCP and UDP before it is handed out;
+#: and no port handed out twice by this process. RTP gets its own block below
+#: that, named in each instance's configuration, so baresip's own media sockets
+#: cannot land on a port handed to another instance either.
+PORTS = range(20000, 30000)
+RTP_PORTS = (10000, 19998)
+_handed_out: set[int] = set()
+_handing = threading.Lock()
+
+
+def ephemeral_range() -> tuple[int, int]:
+    """The range the kernel picks from for port 0, read from the kernel."""
+    linux = Path("/proc/sys/net/ipv4/ip_local_port_range")
+    if linux.exists():
+        low, high = linux.read_text().split()
+        return int(low), int(high)
+    if sys.platform == "darwin":
+        read = [
+            subprocess.run(
+                ["sysctl", "-n", f"net.inet.ip.portrange.{end}"],
+                capture_output=True, text=True, check=True,
+            ).stdout
+            for end in ("first", "last")
+        ]
+        return int(read[0]), int(read[1])
+    raise AssertionError(f"cannot read the ephemeral port range on {sys.platform}")
+
+
+def _bindable(port: int) -> bool:
+    for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+        with socket.socket(socket.AF_INET, kind) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                return False
+    return True
+
+
+def reserve(count: int) -> int:
+    """The first of `count` consecutive ports nobody holds, now handed out."""
+    low, high = ephemeral_range()
+    for block in (PORTS, range(RTP_PORTS[0], RTP_PORTS[1] + 1)):
+        if block.start <= high and low < block.stop:
+            raise AssertionError(
+                f"ports {block.start}..{block.stop - 1} overlap this machine's ephemeral range "
+                f"{low}..{high}, so the kernel could hand one of them to anybody"
+            )
+    with _handing:
+        offset = random.randrange(len(PORTS))
+        for step in range(len(PORTS)):
+            first = PORTS.start + (offset + step) % len(PORTS)
+            wanted = range(first, first + count)
+            if wanted.stop > PORTS.stop or _handed_out.intersection(wanted):
+                continue
+            if all(_bindable(port) for port in wanted):
+                _handed_out.update(wanted)
+                return first
+    raise AssertionError(f"no {count} consecutive free ports in {PORTS.start}..{PORTS.stop - 1}")
+
+
+class PortTaken(AssertionError):
+    """baresip could not bind a port it was given: something else holds it."""
+
+
+class BaresipDied(AssertionError):
+    """baresip exited before its control socket opened, for a reason of its own."""
 
 
 class Registrar:
@@ -231,8 +306,11 @@ class Instance:
         self.root = root / name
         self.root.mkdir(parents=True, exist_ok=True)
         self.name = name
-        self.sip_port = free_port()
-        self.ctrl_port = free_port(socket.SOCK_STREAM)
+        # THREE PORTS, consecutive: SIP on UDP and TCP, the next one up for TLS,
+        # which baresip binds whether or not anybody uses it, and the control
+        # socket.
+        self.sip_port = reserve(3)
+        self.ctrl_port = self.sip_port + 2
         self.log = self.root / "baresip.log"
         self.recording = self.root / "heard.wav"
         silence = tone(self.root / "silence.wav", hz=0.0, seconds=600.0)
@@ -264,6 +342,7 @@ class Instance:
                     "auenc_format            s16",
                     "audec_format            s16",
                     "audio_telev_pt          101",
+                    f"rtp_ports               {RTP_PORTS[0]}-{RTP_PORTS[1]}",
                     f"module_path             {module_path()}",
                     *(f"module                  {one}" for one in MODULES),
                     f"ctrl_tcp_listen         127.0.0.1:{self.ctrl_port}",
@@ -283,12 +362,51 @@ class Instance:
             [baresip(), "-f", str(self.root)], stdout=handle, stderr=subprocess.STDOUT
         )
         for _ in range(100):
+            if self.process.poll() is not None:
+                break
             try:
                 with socket.create_connection(("127.0.0.1", self.ctrl_port), timeout=0.2):
-                    return self
+                    pass
             except OSError:
                 time.sleep(0.1)
-        raise AssertionError(f"{self.name} never opened its control socket:\n{self.tail()}")
+                continue
+            # Something answered. It is ours only if baresip is still alive and
+            # did not fail a bind on the way up -- a control port somebody else
+            # holds would answer too.
+            time.sleep(0.2)
+            if self.process.poll() is None and not self._refused_bind():
+                return self
+            break
+        self._fail()
+
+    def _refused_bind(self) -> str | None:
+        text = self.log.read_text("utf-8", "replace") if self.log.exists() else ""
+        text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        found = re.search(r"[^\n]*Address already in use[^\n]*", text)
+        return found.group(0).strip() if found else None
+
+    def _fail(self) -> None:
+        """Say WHICH thing happened. Both used to read "never opened its control
+        socket", which is why a port collision took a red main to notice."""
+        ports = f"sip {self.sip_port} (udp+tcp), tls {self.sip_port + 1}, ctrl {self.ctrl_port}"
+        exited = self.process.poll() if self.process is not None else None
+        state = "running" if exited is None else f"exited {exited}"
+        taken = self._refused_bind()
+        self.stop()
+        if taken:
+            raise PortTaken(
+                f"{self.name}: PORT TAKEN -- a port it was given was bound by something else "
+                f"first ({ports}; baresip {state}): {taken}\n{self.tail()}"
+            )
+        if exited is not None:
+            raise BaresipDied(
+                f"{self.name}: BARESIP DIED -- exit {exited} before its control socket opened, "
+                f"and no bind was refused ({ports}):\n{self.tail()}"
+            )
+        raise AssertionError(
+            f"{self.name}: baresip is running but its control socket never opened "
+            f"({ports}):\n{self.tail()}"
+        )
 
     def stop(self) -> None:
         if self.process is not None:

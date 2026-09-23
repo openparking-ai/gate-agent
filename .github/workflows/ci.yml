@@ -12,6 +12,10 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
+    # Every job here names its own limit, above what it was measured to take and
+    # far below GitHub's six-hour ceiling, so a hang reports as a hang. Measured
+    # on `ed9f859`: lint 30 seconds.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }
@@ -35,9 +39,165 @@ jobs:
           node .github/scripts/check-no-real-data.js --self-test
           node .github/scripts/check-no-real-data.js
 
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The fail-control matrix is READ FROM THE SCRIPTS, not written here. Each
+    # script holds its shard count as `SHARDS` and prints it with `--plan`, so
+    # there is no second copy of that number to drift -- a matrix that listed
+    # shards 1..3 of 4 would leave a quarter of the breaks unmeasured and every
+    # job green.
+    outputs:
+      parts: ${{ steps.plan.outputs.parts }}
+      plan: ${{ steps.plan.outputs.plan }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: plan
+        shell: bash
+        run: |
+          python - <<'PLAN' >> "$GITHUB_OUTPUT"
+          import json, subprocess, sys
+          plan = {}
+          for script in ("agent", "monitor"):
+              out = subprocess.run(
+                  [sys.executable, f"scripts/{script}_fail_control.py", "--plan"],
+                  capture_output=True, text=True, check=True,
+              ).stdout
+              plan[script] = json.loads(out)
+          parts = [
+              {"script": script, "index": index, "count": meta["shards"]}
+              for script, meta in plan.items()
+              for index in range(1, meta["shards"] + 1)
+          ]
+          print("parts=" + json.dumps(parts))
+          print("plan=" + json.dumps(plan))
+          PLAN
+          cat "$GITHUB_OUTPUT"
+
+  fail-control:
+    name: fail-control (${{ matrix.python-version }}, ${{ matrix.part.script }} ${{ matrix.part.index }}/${{ matrix.part.count }})
+    needs: plan
+    runs-on: ubuntu-latest
+    # Measured per staged suite run: 62 to 108 seconds (`b37c39b`, `ed9f859`).
+    # The largest shard is 38 runs, about 70 minutes at the slow end. Two hours
+    # is the budget a shard is sized against; past it, this reports a hang or a
+    # shard that has outgrown its count rather than GitHub's six-hour kill.
+    timeout-minutes: 120
+    strategy:
+      # A RED SHARD MAY NOT CANCEL ITS SIBLINGS, for the reason `test` gives:
+      # a cancelled shard is a slice of breaks nobody measured.
+      fail-fast: false
+      matrix:
+        # BOTH INTERPRETERS, as before. A fail-control is cheap signal about
+        # the interpreter, and dropping a leg is measuring less.
+        python-version: ['3.11', '3.12']
+        part: ${{ fromJSON(needs.plan.outputs.parts) }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e '.[dev]'
+
+      # No baresip here, and that is not an omission: both scripts run the
+      # suite as `-m "not sip"`, for the reason their `run()` gives, so no break
+      # below touches the SIP measurements. Those run in `test`, on both
+      # interpreters, with REQUIRE_SIP=1.
+      #
+      # THE MONITOR AND CAPTURE SCRIPT:
+      # Breaks each property these two processes exist to have and requires the
+      # suite to go red on every one. For the monitor: its lack of any opening
+      # authority, its distance from the lane it reads, `unknown` not being
+      # `ok`, transitions rather than states, `never_alarm` read from the wire
+      # as a BOOLEAN, a `state` outside the contract's three refused, an HTTP
+      # refusal reported as an answer rather than as silence, `lane_id` only on
+      # a lane's notifications, the startup message built from one enumeration,
+      # nothing following a redirect, credentials from files and never from a
+      # URL, the site's threshold rather than a constant, and a sink failure
+      # being reported. For the capture process: no POST at a camera, no import
+      # of the lane it reads, one opener and it follows nothing, no credential
+      # in a snapshot URL, no lane event detail on a record, `entry_pending`
+      # not a trigger, an atomic write, an index rebuilt from the disk, an
+      # orphan reported, a purge that applies BOTH age and size, a refused
+      # write that is named, the retention default having one copy, no size
+      # figure in the document, `camera_feed_frozen` on identical bytes only, a
+      # dead camera never reading `ok`, a credential on the images route, an id
+      # never becoming a path, and a camera's name surviving to the message.
+      # AND THE ROUND-4 CUT, one break per blocker: a record filed without
+      # being built through the contract, a naive lane timestamp followed
+      # rather than refusing the page, the records route raising on what it
+      # finds, a purge run for a capture that can never fit, an unbounded size
+      # purge, crash leftovers surviving a rebuild, a live write leaving its
+      # temporary files, the ends of a list published as oldest and newest, a
+      # size purge taking the first written, a stepped clock going unsaid, a
+      # lost backlog raising no code and counting nothing, a snapshot read with
+      # no deadline over it, a camera that never answered absent from the
+      # health payload, the two-clocks note coming apart from its one copy, a
+      # negative subtraction hidden, and a backwards cursor adopted.
+      # Each break fails in the REASSURING direction, because that is the
+      # direction this kind of software fails in when nobody is looking.
+      #
+      # THE AGENT SCRIPT:
+      # Breaks each property the AGENT exists to have and requires the suite
+      # to go red on every one: a verb that opens something, an act existing
+      # at all, the socket module able to see a lane, a socket opened
+      # elsewhere, an undeclared intercom guessed at, an unrecognised reason
+      # mapped to the nearest thing we know, a dead engine told to a driver as
+      # a dirty plate, `never_alarm` read from a list instead of the wire, an
+      # invented reason in the subset, a missing recording started on, a
+      # language skipped, the site's order replaced by ours, a disabled
+      # authorisation accepted, a disabled authorisation offered, the person
+      # not told the barrier cannot move, the bridge made before the briefing,
+      # each of the three timers never firing, a second call answered, the one
+      # caller-supplied field taking anything, a user agent version not
+      # checked, an unknown registration published as healthy, a health
+      # payload shipping a subset, a sentence edited without its audio, an
+      # intercom with no lane, a site that enables nothing, a transfer quietly
+      # not offered, one account for both legs, a password in a SIP URI, the
+      # agent's surface accepting a write, and it binding off loopback with no
+      # credential.
+      - name: Fail-control — ${{ matrix.part.script }}, shard ${{ matrix.part.index }}/${{ matrix.part.count }}
+        shell: bash
+        run: |
+          set +e
+          python "scripts/${{ matrix.part.script }}_fail_control.py" \
+            --shard "${{ matrix.part.index }}/${{ matrix.part.count }}" 2>&1 | tee run.log
+          status=${PIPESTATUS[0]}
+          mkdir -p coverage
+          { grep -E '^ran [0-9]+ of [0-9]+ breaks' run.log; echo "exit=$status"; } \
+            > "coverage/${{ matrix.part.script }}-${{ matrix.part.index }}.txt"
+          exit "$status"
+
+      - name: Report what this shard ran
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}-${{ matrix.part.script }}-${{ matrix.part.index }}
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 30
+
   test:
     name: test
+    # `test (3.11)` and `test (3.12)` are the contexts branch protection
+    # requires, and the fail-controls used to be steps inside them. They are
+    # their own jobs now so that no job comes near six hours -- and a red shard
+    # must STILL stop a merge. So this job waits for every shard, runs whatever
+    # they did, and its last step fails unless THIS interpreter's shards all
+    # passed and together ran every break exactly once. `always()` and not
+    # `!cancelled()`: a job skipped because a dependency failed reports as
+    # "skipped", which branch protection accepts as passing.
+    needs: [plan, fail-control]
+    if: always()
     runs-on: ubuntu-latest
+    # Measured on `ed9f859`: about five minutes, baresip build included.
+    timeout-minutes: 30
     strategy:
       # A RED LEG MAY NOT CANCEL ITS SIBLING. With fail-fast on, 3.11 going red
       # cancelled 3.12 and left it UNMEASURED -- which happened twice on this
@@ -101,57 +261,20 @@ jobs:
           REQUIRE_SIP: "1"
         run: pytest -q
 
-      - name: Fail-control — monitor and capture
-        # Breaks each property these two processes exist to have and requires the
-        # suite to go red on every one. For the monitor: its lack of any opening
-        # authority, its distance from the lane it reads, `unknown` not being
-        # `ok`, transitions rather than states, `never_alarm` read from the wire
-        # as a BOOLEAN, a `state` outside the contract's three refused, an HTTP
-        # refusal reported as an answer rather than as silence, `lane_id` only on
-        # a lane's notifications, the startup message built from one enumeration,
-        # nothing following a redirect, credentials from files and never from a
-        # URL, the site's threshold rather than a constant, and a sink failure
-        # being reported. For the capture process: no POST at a camera, no import
-        # of the lane it reads, one opener and it follows nothing, no credential
-        # in a snapshot URL, no lane event detail on a record, `entry_pending`
-        # not a trigger, an atomic write, an index rebuilt from the disk, an
-        # orphan reported, a purge that applies BOTH age and size, a refused
-        # write that is named, the retention default having one copy, no size
-        # figure in the document, `camera_feed_frozen` on identical bytes only, a
-        # dead camera never reading `ok`, a credential on the images route, an id
-        # never becoming a path, and a camera's name surviving to the message.
-        # AND THE ROUND-4 CUT, one break per blocker: a record filed without
-        # being built through the contract, a naive lane timestamp followed
-        # rather than refusing the page, the records route raising on what it
-        # finds, a purge run for a capture that can never fit, an unbounded size
-        # purge, crash leftovers surviving a rebuild, a live write leaving its
-        # temporary files, the ends of a list published as oldest and newest, a
-        # size purge taking the first written, a stepped clock going unsaid, a
-        # lost backlog raising no code and counting nothing, a snapshot read with
-        # no deadline over it, a camera that never answered absent from the
-        # health payload, the two-clocks note coming apart from its one copy, a
-        # negative subtraction hidden, and a backwards cursor adopted.
-        # Each break fails in the REASSURING direction, because that is the
-        # direction this kind of software fails in when nobody is looking.
-        run: python scripts/monitor_fail_control.py
+      - name: Collect what every fail-control shard ran
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-${{ matrix.python-version }}-*
+          merge-multiple: true
+          path: coverage
 
-      - name: Fail-control — the agent
-        # Breaks each property the AGENT exists to have and requires the suite
-        # to go red on every one: a verb that opens something, an act existing
-        # at all, the socket module able to see a lane, a socket opened
-        # elsewhere, an undeclared intercom guessed at, an unrecognised reason
-        # mapped to the nearest thing we know, a dead engine told to a driver as
-        # a dirty plate, `never_alarm` read from a list instead of the wire, an
-        # invented reason in the subset, a missing recording started on, a
-        # language skipped, the site's order replaced by ours, a disabled
-        # authorisation accepted, a disabled authorisation offered, the person
-        # not told the barrier cannot move, the bridge made before the briefing,
-        # each of the three timers never firing, a second call answered, the one
-        # caller-supplied field taking anything, a user agent version not
-        # checked, an unknown registration published as healthy, a health
-        # payload shipping a subset, a sentence edited without its audio, an
-        # intercom with no lane, a site that enables nothing, a transfer quietly
-        # not offered, one account for both legs, a password in a SIP URI, the
-        # agent's surface accepting a write, and it binding off loopback with no
-        # credential.
-        run: python scripts/agent_fail_control.py
+      - name: Every break ran, exactly once, and every shard passed
+        # The coverage guard. Reads each shard's `ran K of TOTAL breaks, shard
+        # i/N, indices a..b` line and exit status, for THIS interpreter, against
+        # the counts the scripts themselves printed in `plan` -- a shard that was
+        # killed, cancelled or never scheduled has no report, and that is red.
+        if: always()
+        env:
+          PLAN: ${{ needs.plan.outputs.plan }}
+        run: python scripts/_shard.py verify coverage "$PLAN"
