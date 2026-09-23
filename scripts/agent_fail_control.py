@@ -1236,6 +1236,68 @@ BREAKS = [
         "from": "        _refuse_unticketable_fields(str(agent[\"site_id\"]), lanes, intercoms)",
         "to": "        pass",
     },
+    {
+        # F-FEE. The fee frame (`fee.py`) and its words. Every anchor below is
+        # UNIQUE in its file -- `replace(..., 1)` lands on the first match and
+        # checks nothing else, so a copied line would be a break that lands
+        # somewhere it was not aimed.
+        "name": "an_unknown_currency_is_written_with_two_decimals",
+        "why": "a zero-decimal fee is drawn a hundred times too small",
+        "file": "src/gate_agent/fee.py",
+        "from": "    exponent = MINOR_UNITS.get(currency)\n",
+        "to": "    exponent = MINOR_UNITS.get(currency, 2)\n",
+    },
+    {
+        "name": "the_figure_is_added_up_from_the_lines",
+        "why": "the display shows a second answer to the question the engine answered",
+        "file": "src/gate_agent/fee.py",
+        "from": "    figure = figure_for(fee, currency)\n",
+        "to": "    figure = figure_for(sum(line[\"delta_minor\"] for line in record[\"breakdown\"]), "
+              "currency)\n",
+    },
+    {
+        "name": "a_zero_fee_is_drawn_as_a_figure",
+        "why": "a driver with nothing to pay is shown a fee of nothing and no sentence",
+        "file": "src/gate_agent/fee.py",
+        "from": "    if fee == 0:\n",
+        "to": "    if False:\n",
+    },
+    {
+        "name": "every_unpriced_record_reads_as_covered",
+        "why": "a refused or unpriced stay is told it is covered",
+        "file": "src/gate_agent/fee.py",
+        "from": "    if status == COVERED:\n",
+        "to": "    if status != PRICED:\n",
+    },
+    {
+        "name": "a_figure_with_no_room_is_left_off_under_its_label",
+        "why": "a label with nothing under it, instead of the sentence that says why",
+        "file": "src/gate_agent/fee.py",
+        "from": "        if figure_scale < 1:\n",
+        "to": "        if False:\n",
+    },
+    {
+        "name": "the_label_is_drawn_at_the_figures_scale",
+        "why": "the label crowds out the figure, or is left out for being too wide",
+        "file": "src/gate_agent/fee.py",
+        "from": "            scale = min(max(1, figure_scale // 3),\n"
+                "                        _largest_scale(label, inner_w, inner_h))\n",
+        "to": "            scale = figure_scale\n",
+    },
+    {
+        "name": "a_frame_with_no_line_is_drawn_empty",
+        "why": "an empty screen at an exit, which tells a driver nothing",
+        "file": "src/gate_agent/fee.py",
+        "from": "    if not drawn:\n",
+        "to": "    if False:\n",
+    },
+    {
+        "name": "the_fee_frame_tells_a_driver_to_pay",
+        "why": "a driver is told to pay where nothing in this version takes payment",
+        "file": "src/gate_agent/lines.py",
+        "from": "        \"en\": \"THE FEE CANNOT BE SHOWN HERE\",\n",
+        "to": "        \"en\": \"PLEASE PAY AT THE CARD READER\",\n",
+    },
 ]
 
 

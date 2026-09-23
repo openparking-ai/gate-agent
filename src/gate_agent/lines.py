@@ -129,7 +129,17 @@ LINES: tuple[str, ...] = DRIVER_LINES + OPERATOR_LINES
 #: one, `scripts/build_audio.py` does not generate a file for it, and the
 #: manifest has no row for it. Folding it into `LINES` would have produced a WAV
 #: nothing plays and a licence row for a recording nobody hears.
-DISPLAY_LINES: tuple[str, ...] = ("display.instruction",)
+DISPLAY_LINES: tuple[str, ...] = (
+    "display.instruction",
+    #: THE FEE FRAME's four (`fee.py`): the label over a figure, and the three
+    #: sentences for an exit with no payment. Checked at startup like the
+    #: ticket's instruction -- words in every declared language, and a glyph
+    #: for every character.
+    "display.fee.label",
+    "display.fee.nothing_to_pay",
+    "display.fee.covered",
+    "display.fee.not_shown",
+)
 
 #: **UPPER CASE, and it is a decision.** The font this package ships draws upper
 #: case only -- see `font.py` for why, and the short version is that half a font
@@ -141,6 +151,25 @@ DISPLAY_TEXT: dict[str, dict[str, str]] = {
     "display.instruction": {
         "en": "TAKE A PHOTO OF THIS CODE, THEN PRESS THE BUTTON",
         "es-ES": "HAGA UNA FOTO DE ESTE CÓDIGO Y PULSE EL BOTÓN",
+    },
+    # THE FEE FRAME. No sentence here tells a driver to PAY: nothing collects
+    # in this version, and an instruction to pay where nothing takes payment
+    # is a false one. The label names the figure under it and nothing more.
+    "display.fee.label": {
+        "en": "PARKING FEE",
+        "es-ES": "IMPORTE DEL APARCAMIENTO",
+    },
+    "display.fee.nothing_to_pay": {
+        "en": "NOTHING TO PAY",
+        "es-ES": "NADA QUE PAGAR",
+    },
+    "display.fee.covered": {
+        "en": "COVERED. NOTHING TO PAY",
+        "es-ES": "CUBIERTO. NADA QUE PAGAR",
+    },
+    "display.fee.not_shown": {
+        "en": "THE FEE CANNOT BE SHOWN HERE",
+        "es-ES": "EL IMPORTE NO SE PUEDE MOSTRAR AQUÍ",
     },
 }
 
