@@ -1252,8 +1252,8 @@ BREAKS = [
         "why": "the display shows a second answer to the question the engine answered",
         "file": "src/gate_agent/fee.py",
         "from": "    figure = figure_for(fee, currency)\n",
-        "to": "    figure = figure_for(sum(line[\"delta_minor\"] for line in record[\"breakdown\"]), "
-              "currency)\n",
+        "to": "    figure = figure_for(sum(line[\"delta_minor\"] "
+              "for line in record[\"breakdown\"]), currency)\n",
     },
     {
         "name": "a_zero_fee_is_drawn_as_a_figure",
