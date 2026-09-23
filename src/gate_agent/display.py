@@ -29,6 +29,11 @@ over an intercom -- and one instruction line per declared driver language sits
 under that. Nothing else: a display at a barrier is read in a few seconds
 through a windscreen.
 
+**At an exit there is a second frame: the fee** (`fee.py`), drawn from the fee
+the lane publishes for the car at its barrier -- the number its card reader
+was handed. Which of the two a screen shows when both want it is
+`frame_wanted`, below, and the rule is written there and nowhere else.
+
 **Idle is a black frame, and so is exit.** Not a logo, not a clock: a screen
 showing anything at all invites a driver to read it, and there is nothing to
 say between arrivals. **On exit the frame is blacked**, and that is now built
@@ -56,6 +61,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from . import font, qr
@@ -88,6 +94,66 @@ class DisplayUnavailable(Exception):
     there is no code to photograph. The agent's answer is the same either way --
     no ticket is offered and the press goes to a person.
     """
+
+
+class Frame(StrEnum):
+    """What one screen at a lane shows. CLOSED: `frame_wanted` answers for every
+    combination of the two things that want a screen, and a third would need
+    its own row in that answer before it could draw anything."""
+
+    #: The signed ticket: a code, its reference, the instruction.
+    TICKET = "ticket"
+    #: The exit's fee, or the sentence that says why there is none to pay
+    #: (`fee.fee_frame_for`), from the lane's published `exit_fee`.
+    FEE = "fee"
+    #: Nothing. Idle, and what a screen goes to only when NOTHING wants it.
+    BLANK = "blank"
+
+
+def frame_wanted(ticket_up: bool, fee_up: bool) -> Frame:
+    """WHICH FRAME WINS, when a ticket and a fee both want the screen at a lane.
+
+    `ticket_up` is a ticket pending at this lane -- minted, drawn, not yet
+    confirmed or voided. `fee_up` is the lane publishing an `exit_fee` for the
+    car at its barrier. The answer, for every pair that can occur:
+
+      ticket  fee     shown
+      ------  ------  ------------------------------------------------------
+      up      up      TICKET. A press at this door confirms the code on this
+                      screen, and a code that is not on the screen when the
+                      press confirms it is a vend the driver never saw. The
+                      fee is not lost: it is drawn the moment the ticket ends.
+      up      none    TICKET.
+      none    up      FEE.
+      none    none    BLANK -- idle is a black frame.
+
+    AND THE TRANSITIONS, because a frame is only ever replaced by the answer
+    for the new pair, never by a blank on the way:
+
+      * **A frame already up is never replaced by a blank one.** A ticket that
+        ends -- confirmed, voided, pulsed -- while a fee is published gives the
+        screen to the FEE, not to black; a fee that is replaced by the next
+        car's goes straight to the new fee. The screen goes black only when
+        the new pair is `none, none`.
+      * **A fee that comes down while a ticket is up changes nothing on the
+        screen**: the ticket was already the one showing.
+      * **A lane that cannot be read has said nothing**, so whatever is up
+        stays up -- the ticket's own rule, that voiding on silence takes a
+        code off a screen somebody is walking towards, holds for a fee too.
+      * **A fee frame that cannot be drawn at all** -- a screen with room for
+        no line of it -- is `display_unavailable`, and the screen is blanked
+        rather than left showing an earlier car's fee.
+
+    A crash is the one exit from this table: a framebuffer holds what was
+    written to it, so a killed process leaves its last frame up (see the
+    module docstring). That is why a ticket left up that way can never be
+    vended, and it is why nothing here relies on a frame being taken down.
+    """
+    if ticket_up:
+        return Frame.TICKET
+    if fee_up:
+        return Frame.FEE
+    return Frame.BLANK
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,8 +424,10 @@ __all__ = [
     "SYMBOL_SHARE",
     "Display",
     "DisplayUnavailable",
+    "Frame",
     "Geometry",
     "frame_for",
+    "frame_wanted",
     "open_display",
     "read_geometry",
     "sysfs_for",

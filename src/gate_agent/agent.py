@@ -80,7 +80,8 @@ from .contract import (
     LaneCapability,
     UserAgentDescription,
 )
-from .display import DisplayUnavailable, frame_for
+from .display import DisplayUnavailable, Frame, frame_for, frame_wanted
+from .fee import FeeScreen, fee_frame_for, screen_for
 from .lines import DISPLAY_TEXT, UNKNOWN_REFUSAL, audio_name
 from .relay import RelayRefusedUs, RelayUnreachable
 from .relay import build as relay_build
@@ -351,6 +352,15 @@ class Agent:
             self._displays_at[where] += (config.displays[intercom.display],)
         #: One pending ticket per lane, IN MEMORY ONLY -- see `Pending`.
         self._pending: dict[str, Pending] = {}
+        #: The fee each lane with a display publishes for the car at its
+        #: barrier (`exit_fee`), as the screen it becomes, or `None` when it
+        #: publishes none. Read on every poll; `display.frame_wanted` decides
+        #: whether it or a ticket has the screen.
+        self._fees: dict[str, FeeScreen | None] = {}
+        #: Whether a fee frame is what this lane's screens were last given, so
+        #: a fee that comes down blanks them once and an idle screen is left
+        #: alone.
+        self._fee_drawn: dict[str, bool] = {}
         #: Where this agent follows each lane's events from, and when it is next
         #: due to. `None` is "not established yet": the first read adopts the
         #: lane's current cursor and mints nothing for what is already in the
@@ -773,24 +783,99 @@ class Agent:
         adopts the lane's position without acting on what is already in the
         window -- those cars have gone.
 
-        Only lanes that could produce a ticket are followed. A lane with no
-        display and no act token is one nothing here would do anything about,
-        and polling it would be a request per two seconds for nobody.
+        Only lanes that could produce a ticket or show a fee are followed. A
+        lane with no display and no act token is one nothing here would do
+        anything about, and polling it would be a request per two seconds for
+        nobody.
+
+        **THE FEE IS READ FIRST**, before the events: a new decision voids the
+        ticket that was up, and the screen that ticket leaves has to go to the
+        fee the lane is publishing NOW, not to the one it published a poll ago.
         """
         for lane in self.config.lanes:
-            if not (self._offers_a_ticket_at(lane.name) or lane.can_act):
+            shows = bool(self._displays_at.get(lane.name))
+            if not (self._offers_a_ticket_at(lane.name) or lane.can_act or shows):
                 continue
             now = self._clock()
             if now < self._lane_due[lane.name]:
                 continue
             self._lane_due[lane.name] = now + lane.poll_seconds
+            if shows:
+                self._read_fee(lane)
             self._poll_lane(lane)
             # THE SAME CADENCE, and after whatever that read did: a ticket the
             # poll has just voided is not redrawn, and a lane that could not be
             # read does not stop the screen in front of the driver being
             # checked.
             self._reassert(lane.name)
+            if shows:
+                self._paint_fee(lane.name)
         self._expire_tickets()
+
+    # -- the fee -------------------------------------------------------------
+
+    def _read_fee(self, lane) -> None:
+        """The lane's `exit_fee`, as the screen it becomes. GET only.
+
+        A lane that cannot be read has said NOTHING, so what this agent last
+        read stands: the fee stays up until the lane says it came down. A lane
+        on a version this build does not read has its fee dropped -- a payload
+        this cannot interpret is not drawn from.
+        """
+        try:
+            state = self._clients[lane.name].get("/v1/lane/state")
+        except (TargetUnreachable, TargetRefusedUs) as exc:
+            log.warning("lane %s: the fee could not be read: %s", lane.name, exc)
+            return
+        if state.get("contract_version") not in KNOWN_LANE_VERSIONS:
+            self._fees[lane.name] = None
+            return
+        fee = state.get("exit_fee")
+        self._fees[lane.name] = screen_for(fee) if isinstance(fee, dict) else None
+
+    def _paint_fee(self, lane: str) -> None:
+        """This lane's screens, by `frame_wanted`, where a ticket is not up."""
+        wanted = frame_wanted(lane in self._pending, self._fees.get(lane) is not None)
+        if wanted is Frame.FEE:
+            self._show_fee(lane)
+        elif wanted is Frame.BLANK and self._fee_drawn.get(lane):
+            self._blank_screens(lane, self._displays_at.get(lane, ()))
+
+    def _show_fee(self, lane: str) -> None:
+        """The fee frame on every screen at this lane, geometry re-read first --
+        the ticket's rule, for the ticket's reason: a screen that changed mode or
+        died between polls is noticed rather than written at the old stride."""
+        fee = self._fees.get(lane)
+        if fee is None:
+            return
+        for screen in self._displays_at.get(lane, ()):
+            before = screen.geometry
+            try:
+                current = screen.reread_geometry()
+            except DisplayUnavailable as exc:
+                log.error("display %s could not be asked what it is: %s", screen.name, exc)
+                self._code(AgentCode.DISPLAY_UNAVAILABLE, screen.name, HealthState.ACTIVE)
+                continue
+            if current != before:
+                self._record(
+                    AgentEventKind.DISPLAY_GEOMETRY_CHANGED,
+                    display=screen.name,
+                    geometry=f"{current.width}x{current.height}@{current.bits_per_pixel}",
+                )
+            try:
+                screen.show(fee_frame_for(fee, self.config.driver_languages, current))
+            except DisplayUnavailable as exc:
+                # NOT left showing whatever was there: that may be an earlier
+                # car's fee. Blanked, and the health surface says why.
+                log.error("display %s could not show the fee: %s", screen.name, exc)
+                self._code(AgentCode.DISPLAY_UNAVAILABLE, screen.name, HealthState.ACTIVE)
+                try:
+                    screen.blank()
+                except DisplayUnavailable:
+                    pass
+                continue
+            self._code(AgentCode.DISPLAY_UNAVAILABLE, screen.name, HealthState.OK)
+        self._fee_drawn[lane] = True
 
     def _poll_lane(self, lane) -> None:
         """One read of a lane's events, and one of its state where a ticket is up."""
@@ -1073,7 +1158,17 @@ class Agent:
         return True
 
     def _blank(self, pending: Pending) -> None:
-        for screen in pending.displays:
+        """The ticket has ended: its screens go to what `frame_wanted` says the
+        lane wants now -- the fee it is publishing, or black. Never black on the
+        way to a fee."""
+        if frame_wanted(False, self._fees.get(pending.lane) is not None) is Frame.FEE:
+            self._show_fee(pending.lane)
+            return
+        self._blank_screens(pending.lane, pending.displays)
+
+    def _blank_screens(self, lane: str, screens: tuple) -> None:
+        self._fee_drawn[lane] = False
+        for screen in screens:
             try:
                 screen.blank()
             except DisplayUnavailable as exc:

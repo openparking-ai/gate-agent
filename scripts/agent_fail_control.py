@@ -1255,16 +1255,17 @@ BREAKS = [
         "name": "an_unknown_currency_is_written_with_two_decimals",
         "why": "a zero-decimal fee is drawn a hundred times too small",
         "file": "src/gate_agent/fee.py",
-        "from": "    exponent = MINOR_UNITS.get(currency)\n",
-        "to": "    exponent = MINOR_UNITS.get(currency, 2)\n",
+        "from": "    listed = MINOR_UNITS.get(currency)\n",
+        "to": "    listed = MINOR_UNITS.get(currency, 2)\n",
     },
     {
         "name": "the_figure_is_added_up_from_the_lines",
         "why": "the display shows a second answer to the question the engine answered",
         "file": "src/gate_agent/fee.py",
-        "from": "    figure = figure_for(fee, currency)\n",
+        "from": "    figure = figure_for(fee, currency, record.get(\"minor_unit_digits\"))\n",
         "to": "    figure = figure_for(sum(line[\"delta_minor\"] "
-              "for line in record[\"breakdown\"]), currency)\n",
+              "for line in record[\"breakdown\"]), currency, "
+              "record.get(\"minor_unit_digits\"))\n",
     },
     {
         "name": "a_zero_fee_is_drawn_as_a_figure",
@@ -1308,6 +1309,109 @@ BREAKS = [
         "file": "src/gate_agent/lines.py",
         "from": "        \"en\": \"THE FEE CANNOT BE SHOWN HERE\",\n",
         "to": "        \"en\": \"PLEASE PAY AT THE CARD READER\",\n",
+    },
+    {
+        # F-FEED. The lane's `exit_fee` on the display, and which frame wins
+        # (`display.frame_wanted`). Every anchor below is UNIQUE in its file.
+        "name": "the_lanes_digits_are_ignored",
+        "why": "a currency the engine priced in is refused on the display while the "
+               "reader shows its cart",
+        "file": "src/gate_agent/fee.py",
+        "from": "    if published is None:\n        return listed\n",
+        "to": "    if True:\n        return listed\n",
+    },
+    {
+        "name": "digits_that_disagree_with_the_list_are_trusted",
+        "why": "a fee is drawn a hundred times too big or too small",
+        "file": "src/gate_agent/fee.py",
+        "from": "    if listed is not None and listed != published:\n",
+        "to": "    if False:\n",
+    },
+    {
+        "name": "a_count_no_currency_has_is_trusted",
+        "why": "a figure is drawn with seven decimals",
+        "file": "src/gate_agent/fee.py",
+        "from": "    if not 0 <= published <= MAX_DIGITS:\n",
+        "to": "    if False:\n",
+    },
+    {
+        "name": "a_boolean_is_read_as_a_count_of_digits",
+        "why": "true is drawn as one decimal place",
+        "file": "src/gate_agent/fee.py",
+        "from": "    if isinstance(published, bool) or not isinstance(published, int):\n",
+        "to": "    if not isinstance(published, int):\n",
+    },
+    {
+        "name": "the_published_fee_is_never_read",
+        "why": "the display at an exit never shows the fee the reader shows",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._fees[lane.name] = screen_for(fee) "
+                "if isinstance(fee, dict) else None\n",
+        "to": "        self._fees[lane.name] = None\n",
+    },
+    {
+        "name": "a_lane_without_tickets_is_not_followed_for_its_fee",
+        "why": "an exit with a display and no ticket key never shows a fee",
+        "file": "src/gate_agent/agent.py",
+        "from": "            if not (self._offers_a_ticket_at(lane.name) "
+                "or lane.can_act or shows):\n",
+        "to": "            if not (self._offers_a_ticket_at(lane.name) or lane.can_act):\n",
+    },
+    {
+        "name": "the_fee_is_read_after_the_events",
+        "why": "a ticket voided by the poll leaves its screen black instead of to the fee",
+        "file": "src/gate_agent/agent.py",
+        "from": "            if shows:\n                self._read_fee(lane)\n"
+                "            self._poll_lane(lane)\n",
+        "to": "            self._poll_lane(lane)\n            if shows:\n"
+              "                self._read_fee(lane)\n",
+    },
+    {
+        "name": "a_lane_that_cannot_be_read_takes_the_fee_down",
+        "why": "silence is read as the car having gone",
+        "file": "src/gate_agent/agent.py",
+        "from": "            log.warning(\"lane %s: the fee could not be read: %s\", "
+                "lane.name, exc)\n            return\n",
+        "to": "            log.warning(\"lane %s: the fee could not be read: %s\", "
+              "lane.name, exc)\n            self._fees[lane.name] = None\n            return\n",
+    },
+    {
+        "name": "a_fee_takes_the_screen_from_a_ticket",
+        "why": "the code a press would confirm is not on the screen",
+        "file": "src/gate_agent/agent.py",
+        "from": "        wanted = frame_wanted(lane in self._pending, "
+                "self._fees.get(lane) is not None)\n",
+        "to": "        wanted = frame_wanted(False, self._fees.get(lane) is not None)\n",
+    },
+    {
+        "name": "the_rule_puts_the_fee_over_the_ticket",
+        "why": "the rule itself says a fee wins over a pending ticket",
+        "file": "src/gate_agent/display.py",
+        "from": "    if ticket_up:\n        return Frame.TICKET\n",
+        "to": "    if ticket_up and not fee_up:\n        return Frame.TICKET\n",
+    },
+    {
+        "name": "a_ticket_that_ends_goes_black_over_a_fee",
+        "why": "a frame already up is replaced by a blank one",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if frame_wanted(False, self._fees.get(pending.lane) is not None) "
+                "is Frame.FEE:\n",
+        "to": "        if False:\n",
+    },
+    {
+        "name": "a_fee_the_lane_took_down_is_left_up",
+        "why": "the next driver reads the last one's fee",
+        "file": "src/gate_agent/agent.py",
+        "from": "        elif wanted is Frame.BLANK and self._fee_drawn.get(lane):\n",
+        "to": "        elif False:\n",
+    },
+    {
+        "name": "a_fee_frame_that_cannot_be_drawn_leaves_the_last_one_up",
+        "why": "a screen too small for the new fee keeps showing the old one",
+        "file": "src/gate_agent/agent.py",
+        "from": "                try:\n                    screen.blank()\n"
+                "                except DisplayUnavailable:\n                    pass\n",
+        "to": "                pass\n",
     },
 ]
 
