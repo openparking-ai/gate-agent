@@ -150,6 +150,11 @@ class ForeignLane:
             "completed": False,
         }
         self.transit: dict = {"state": "none", "since": None}
+        #: What this lane publishes as `exit_fee` on its state payload: the fee
+        #: in front of the driver at an exit, or `None`. Added within version 2
+        #: -- the document's `exit_fee` block -- so a test can put a fee, a
+        #: state with no payment, or nothing in front of the agent's display.
+        self.exit_fee: dict | None = None
         self.sources: dict[str, str] = {}
         self.never_alarm_override: dict[str, bool] = {}
         #: Whether this lane omits `never_alarm` entirely -- what a serialiser
@@ -243,6 +248,7 @@ class ForeignLane:
             "contract_version": CONTRACT_VERSION,
             "decision": self.decision,
             "transit": self.transit,
+            "exit_fee": self.exit_fee,
         }
         if _break("future_version"):
             payload["contract_version"] = 99

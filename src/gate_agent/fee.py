@@ -9,16 +9,23 @@ frame -- `display.to_bytes` writes it -- because the paragraph in `display.py`
 about white being every bit set stays true only while nothing here draws a
 colour.
 
-**IT READS A FIGURE; IT NEVER COMPUTES ONE.** The input is the exit decision
-the lane made before the barrier moved -- its record, `ExitPricing.to_detail()`
-in `lane-controller`, the same record the lane puts on the close as
-`local_decision` and the platform writes onto the row (0017). `screen_for`
-reads its `status`, its `fee_minor` and its `currency` by name, and the only
-thing done to the fee is to write it out in the currency's own minor units:
-`1000` in `USD` is `10.00 USD`, by integer division, and a currency this module
-does not know the minor units of is not guessed at -- the figure is NOT SHOWN,
-and the frame says so. A figure drawn with the decimal point in the wrong place
-is a wrong fee on a screen.
+**IT READS A FIGURE; IT NEVER COMPUTES ONE.** The input is the fee the lane
+publishes for the car at its barrier -- `exit_fee` on `GET /v1/lane/state`,
+which is what the lane handed its card reader: the exit decision's own fee, or
+the fee after a validation the reader was given. `screen_for` reads its
+`status`, its `fee_minor`, its `currency` and its `minor_unit_digits` by name
+(the lane's full record, `ExitPricing.to_detail()`, reads the same way), and
+the only thing done to the fee is to write it out in the currency's own minor
+units: `1000` in `USD` is `10.00 USD`, by integer division.
+
+**THE DIGITS ARE THE ENGINE'S.** `minor_unit_digits` is the rate engine's
+count for the currency it priced in, published by the lane, so any currency the
+engine can price is drawn here with the decimal point where the engine puts it
+-- and the reader's cart, which is in minor units, shows the same money. Where
+a lane publishes no count, `MINOR_UNITS` answers for the currencies it lists; a
+currency neither knows is not guessed at -- the figure is NOT SHOWN, and the
+frame says so. A figure drawn with the decimal point in the wrong place is a
+wrong fee on a screen.
 
 **THE DISPLAY CARRIES WHAT THE READER CANNOT: every state with no payment.**
 Covered by a pass or an agreement; priced at zero; refused by the engine; a
@@ -33,7 +40,8 @@ driver guessing -- so each is a SENTENCE, in every declared driver language:
   covered          a module's register covered the car
   not_shown        everything else: the engine refused, the lane had no entry
                    to price from, its facts were stale, the record was not one
-                   this can read, or the currency's minor units are unknown
+                   this can read, the lane published no figure, or the
+                   currency's minor units are unknown
 
 **A LINE THAT DOES NOT FIT IS LEFT OUT, never shrunk below one pixel per module
 and never clipped** -- the ticket frame's rule. Two things are never left out:
@@ -41,10 +49,9 @@ the FIGURE (a fee frame with no figure on it says `not_shown` instead) and
 EVERYTHING (a frame with no line on it at all is refused as
 `DisplayUnavailable`, because an empty screen is not a state).
 
-**NOT WIRED IN THIS VERSION.** Nothing in the agent yet reads a lane's exit
-decision or draws this frame on a screen: the lane does not publish the record
-on its read contract, and the agent owns its displays for tickets. This module
-is the layout, proven by rendering and reading back; the feed is its own change.
+**WIRED.** The agent follows every lane that has a display, reads its
+`exit_fee` on each poll and draws this frame -- unless a ticket holds the
+screen, which is `display.frame_wanted`'s rule and is written there.
 """
 
 from __future__ import annotations
@@ -78,10 +85,11 @@ STATE_LINE: dict[FeeState, str] = {
 if set(STATE_LINE) != set(FeeState):  # pragma: no cover - an import-time guard
     raise RuntimeError("every fee state needs a display line")
 
-#: ISO 4217 minor units, for the currencies this module will write a figure in.
-#: A LIST, and short on purpose: a currency not here is NOT SHOWN rather than
-#: written with two decimals by default, because the default is exactly the
-#: guess that puts a zero-decimal fee on a screen a hundred times too small.
+#: ISO 4217 minor units, for a lane that publishes no `minor_unit_digits` --
+#: and a check on one that does (`digits_for`). A LIST, and short on purpose: a
+#: currency not here and not published is NOT SHOWN rather than written with two
+#: decimals by default, because the default is exactly the guess that puts a
+#: zero-decimal fee on a screen a hundred times too small.
 MINOR_UNITS: dict[str, int] = {
     "USD": 2,
     "CAD": 2,
@@ -122,9 +130,36 @@ class FeeScreen:
     status: str | None
 
 
-def figure_for(fee_minor: int, currency: str) -> str | None:
+#: The most minor-unit digits any ISO 4217 currency has. A published count above
+#: it is not a currency's and is not drawn from.
+MAX_DIGITS = 4
+
+
+def digits_for(currency: str, published: object = None) -> int | None:
+    """How many minor units make a major one, or None when that is not known.
+
+    `published` is the lane's `exit_fee.minor_unit_digits` -- the rate engine's
+    count, for the currency the engine priced in -- and it is what the figure
+    is written with. Where the lane published none, `MINOR_UNITS` answers for
+    the currencies it lists and nothing else does. Where BOTH answer and they
+    DISAGREE, the figure is not shown: one of the two is wrong, and a figure
+    drawn from the wrong one is a fee a hundred times too big or too small.
+    """
+    listed = MINOR_UNITS.get(currency)
+    if published is None:
+        return listed
+    if isinstance(published, bool) or not isinstance(published, int):
+        return None
+    if not 0 <= published <= MAX_DIGITS:
+        return None
+    if listed is not None and listed != published:
+        return None
+    return published
+
+
+def figure_for(fee_minor: int, currency: str, digits: object = None) -> str | None:
     """The fee in the currency's minor units, or None when they are not known here."""
-    exponent = MINOR_UNITS.get(currency)
+    exponent = digits_for(currency, digits)
     if exponent is None:
         return None
     if exponent == 0:
@@ -150,7 +185,7 @@ def screen_for(record: object) -> FeeScreen:
         return FeeScreen(FeeState.NOT_SHOWN, None, status)
     if fee == 0:
         return FeeScreen(FeeState.NOTHING_TO_PAY, None, status)
-    figure = figure_for(fee, currency)
+    figure = figure_for(fee, currency, record.get("minor_unit_digits"))
     if figure is None:
         return FeeScreen(FeeState.NOT_SHOWN, None, status)
     return FeeScreen(FeeState.FEE_DUE, figure, status)
@@ -236,11 +271,13 @@ def fee_frame_for(
 
 __all__ = [
     "FIGURE_SHARE",
+    "MAX_DIGITS",
     "MINOR_UNITS",
     "SENTENCE_SHARE",
     "STATE_LINE",
     "FeeScreen",
     "FeeState",
+    "digits_for",
     "fee_frame_for",
     "figure_for",
     "lines_for",
