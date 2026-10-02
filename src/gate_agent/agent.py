@@ -436,7 +436,7 @@ class Agent:
             # BEFORE the user agent, because it is the cheaper thing to find out
             # about: a store that cannot be opened is a configuration this
             # process must not run on, and finding out costs a `mkdir`.
-            self._store.open()
+            self._store.open(datetime.fromisoformat(self._now()))
             self._reconcile()
         self.ua.start()
         self._release_leftover_calls()
