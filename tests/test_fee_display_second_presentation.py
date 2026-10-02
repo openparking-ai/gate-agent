@@ -20,6 +20,10 @@ PRICED = {
     "status": "priced",
     "session_id": SESSION,
     "fee_minor": 1000,
+    #: Since platform 0023 the record carries its pre-tax subtotal, and a held
+    #: validation is claimed on THAT, not on the taxed fee. No tax here: the
+    #: subtotal is the fee.
+    "subtotal_minor": 1000,
     "currency": "USD",
     "breakdown": [{"delta_minor": 1000, "text": "Parking, 3 h 30 min"}],
 }
@@ -50,9 +54,15 @@ def held(record, phone):
     return {
         "outcome": "held",
         "currency": record["currency"],
-        "fee_before_minor": record["fee_minor"],
+        # The platform's answer as 0023 gives it: claimed on the record's
+        # pre-tax subtotal, the subtotal after the discount, the tax taken on
+        # that (none here), and the taxed figure -- which must add up, or the
+        # lane does not put it up.
+        "fee_before_minor": record["subtotal_minor"],
         "discount_minor": 200,
-        "fee_minor": record["fee_minor"] - 200,
+        "subtotal_minor": record["subtotal_minor"] - 200,
+        "tax_lines": [],
+        "fee_minor": record["subtotal_minor"] - 200,
         "line": {"delta_minor": -200, "text": "Validation"},
     }
 
