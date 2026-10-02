@@ -464,10 +464,14 @@ class TicketStore:
         self.directory = Path(directory)
         self.retention_days = retention_days
 
-    def open(self) -> None:
+    def open(self, now: datetime | None = None) -> None:
+        """`now` is the clock the purge measures age against: the real one
+        unless the caller says otherwise. The agent passes its own, the clock
+        it stamps `issued_at` with, so the age of a record is measured on the
+        clock that wrote it."""
         self.directory.mkdir(parents=True, exist_ok=True)
         self._sweep_temporary()
-        self.purge()
+        self.purge(now)
 
     def _sweep_temporary(self) -> None:
         """Whatever a crash left half-written. Removed, and counted in the log.
