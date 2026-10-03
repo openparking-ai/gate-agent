@@ -83,9 +83,8 @@ bump even when its type and its name do not move.**
 
 This is the same policy the [lane
 contract](https://github.com/openparking-ai/lane-controller/blob/main/docs/CONTRACT.md)
-and the [Vehicle ID
-contract](https://github.com/openparking-ai/vehicle-id/blob/main/docs/CONTRACT.md)
-state, in the same words, so one consumer can hold one policy for all three.
+and the Vehicle ID contract state, in the same words, so one consumer can hold
+one policy for all three. The Vehicle ID repository is not public.
 
 **The monitor applies that rule to what it reads, too.** A target answering with
 a version it does not know is refused at startup, by name, with both versions in
