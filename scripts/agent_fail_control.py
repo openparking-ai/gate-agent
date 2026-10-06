@@ -46,8 +46,10 @@ ROOT = Path(__file__).resolve().parent.parent
 #: seconds on GitHub's runners (`b37c39b`, `ed9f859`), and
 #: 145 breaks at `ed9f859` is at most 37 per shard, 38 suite runs with control
 #: A, about 70 minutes at the slow end against a six-hour ceiling. Raise it when
-#: a shard's wall time nears two hours.
-SHARDS = 4
+#: a shard's wall time nears two hours. RAISED TO 6 at U4c (2026-10-06): at 176
+#: breaks and 4 shards, PR #17's agent shards took up to 1h54m against the
+#: fail-control job's 120-minute limit; 6 is about 30 breaks a shard.
+SHARDS = 6
 
 BREAKS = [
     {
