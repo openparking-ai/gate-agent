@@ -106,16 +106,37 @@ class Frame(StrEnum):
     #: The exit's fee, or the sentence that says why there is none to pay
     #: (`fee.fee_frame_for`), from the lane's published `exit_fee`.
     FEE = "fee"
+    #: The lane is CLOSED: the owner's message for it, alone, upper case,
+    #: wrapped by words (`board.message_frame_for`). No price and no other item
+    #: shares the screen with it.
+    CLOSED = "closed"
+    #: The lane's board: the owner's messages in force and, where the owner
+    #: switched it on, the price the lane would charge -- one item at a time
+    #: (`board.item_now`).
+    BOARD = "board"
     #: Nothing. Idle, and what a screen goes to only when NOTHING wants it.
     BLANK = "blank"
 
 
-def frame_wanted(ticket_up: bool, fee_up: bool) -> Frame:
-    """WHICH FRAME WINS, when a ticket and a fee both want the screen at a lane.
+def frame_wanted(
+    ticket_up: bool, fee_up: bool, closed_up: bool = False, board_up: bool = False
+) -> Frame:
+    """WHICH FRAME WINS, when more than one thing wants the screen at a lane.
 
     `ticket_up` is a ticket pending at this lane -- minted, drawn, not yet
     confirmed or voided. `fee_up` is the lane publishing an `exit_fee` for the
-    car at its barrier. The answer, for every pair that can occur:
+    car at its barrier. `closed_up` is the lane publishing that it is CLOSED,
+    with the owner's message; `board_up` is the lane publishing at least one
+    board item. THE ORDER IS ONE LINE, and it is Gokhan's (U4c, B4):
+
+        TICKET, then FEE, then the CLOSED message, then the BOARD, then BLANK.
+
+    A closed lane's message is shown ALONE: while it wants the screen, no board
+    item -- no price, no other message -- is drawn. The ticket and the fee win
+    over it for the reason they win over each other: they are about the car in
+    front of the screen NOW, and the screen goes back to the message, never to
+    black, when they end. The table for a ticket and a fee alone, which the
+    closed message and the board sit beneath:
 
       ticket  fee     shown
       ------  ------  ------------------------------------------------------
@@ -153,6 +174,10 @@ def frame_wanted(ticket_up: bool, fee_up: bool) -> Frame:
         return Frame.TICKET
     if fee_up:
         return Frame.FEE
+    if closed_up:
+        return Frame.CLOSED
+    if board_up:
+        return Frame.BOARD
     return Frame.BLANK
 
 

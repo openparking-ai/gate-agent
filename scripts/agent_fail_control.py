@@ -197,8 +197,9 @@ BREAKS = [
         "name": "the_reason_subset_is_invented",
         "why": "this package branches on a reason no lane emits",
         "file": "src/gate_agent/cases.py",
-        "from": '    "engine_unreachable",\n)',
-        "to": '    "engine_unreachable",\n    "invented_reason",\n)',
+        # RE-ANCHORED 2026-10-06 (U4c): `lane_closed` now closes the tuple.
+        "from": '    "lane_closed",\n)',
+        "to": '    "lane_closed",\n    "invented_reason",\n)',
     },
     {
         "name": "a_missing_audio_file_is_silence",
@@ -1379,9 +1380,9 @@ BREAKS = [
         "name": "a_fee_takes_the_screen_from_a_ticket",
         "why": "the code a press would confirm is not on the screen",
         "file": "src/gate_agent/agent.py",
-        "from": "        wanted = frame_wanted(lane in self._pending, "
-                "self._fees.get(lane) is not None)\n",
-        "to": "        wanted = frame_wanted(False, self._fees.get(lane) is not None)\n",
+        # RE-ANCHORED 2026-10-06 (U4c): the lane's frames are one call now.
+        "from": "        wanted = self._wanted(lane, lane in self._pending)\n",
+        "to": "        wanted = self._wanted(lane, False)\n",
     },
     {
         "name": "the_rule_puts_the_fee_over_the_ticket",
@@ -1394,15 +1395,16 @@ BREAKS = [
         "name": "a_ticket_that_ends_goes_black_over_a_fee",
         "why": "a frame already up is replaced by a blank one",
         "file": "src/gate_agent/agent.py",
-        "from": "        if frame_wanted(False, self._fees.get(pending.lane) is not None) "
-                "is Frame.FEE:\n",
+        # RE-ANCHORED 2026-10-06 (U4c): any lane frame, not only a fee.
+        "from": "        if self._wanted(pending.lane, False) is not Frame.BLANK:\n",
         "to": "        if False:\n",
     },
     {
         "name": "a_fee_the_lane_took_down_is_left_up",
         "why": "the next driver reads the last one's fee",
         "file": "src/gate_agent/agent.py",
-        "from": "        elif wanted is Frame.BLANK and self._fee_drawn.get(lane):\n",
+        # RE-ANCHORED 2026-10-06 (U4c): `_lane_drawn`, a fee or any lane frame.
+        "from": "        elif wanted is Frame.BLANK and self._lane_drawn.get(lane):\n",
         "to": "        elif False:\n",
     },
     {
@@ -1412,6 +1414,142 @@ BREAKS = [
         "from": "                try:\n                    screen.blank()\n"
                 "                except DisplayUnavailable:\n                    pass\n",
         "to": "                pass\n",
+    },
+    {
+        # U4c. A CLOSED LANE'S MESSAGE AND THE BOARD (`board.py`), the order
+        # that decides between them (`display.frame_wanted`), and the call at a
+        # closed lane (`cases.py`). Every anchor below is UNIQUE in its file.
+        "name": "the_closed_message_is_cut",
+        "why": "a closed lane's message loses its last characters on the screen",
+        "file": "src/gate_agent/board.py",
+        "from": "            lines.append(word[:per_line])\n            word = word[per_line:]\n",
+        "to": "            lines.append(word[:per_line])\n            word = \"\"\n",
+    },
+    {
+        "name": "a_word_is_split_where_it_need_not_be",
+        "why": "a message is broken mid-word on a screen that has room for every word",
+        "file": "src/gate_agent/board.py",
+        "from": "            if whole_words and longest > per_line:\n",
+        "to": "            if False:\n",
+    },
+    {
+        "name": "the_message_is_drawn_too_small_to_read",
+        "why": "160 characters are drawn at one pixel a module, which nobody reads from a car",
+        "file": "src/gate_agent/board.py",
+        "from": "MESSAGE_SCALE_MIN = 2\n",
+        "to": "MESSAGE_SCALE_MIN = 1\n",
+    },
+    {
+        "name": "an_undrawable_message_is_drawn_with_a_hole",
+        "why": "a character the font lacks is a letter missing from the owner's message",
+        "file": "src/gate_agent/board.py",
+        "from": "    if not upper.strip() or font.missing(upper):\n        return None\n",
+        "to": "    upper = \"\".join(one for one in upper if one in font.DRAWABLE)\n"
+              "    if not upper.strip():\n        return None\n",
+    },
+    {
+        "name": "the_board_wins_over_a_closed_message",
+        "why": "a price is shown at a lane its owner closed",
+        "file": "src/gate_agent/display.py",
+        "from": "    if closed_up:\n        return Frame.CLOSED\n    if board_up:\n"
+                "        return Frame.BOARD\n",
+        "to": "    if board_up:\n        return Frame.BOARD\n    if closed_up:\n"
+              "        return Frame.CLOSED\n",
+    },
+    {
+        "name": "a_closed_message_wins_over_a_fee",
+        "why": "the driver at a closed exit is not shown the fee the reader shows",
+        "file": "src/gate_agent/display.py",
+        "from": "    if fee_up:\n        return Frame.FEE\n    if closed_up:\n",
+        "to": "    if closed_up:\n        return Frame.CLOSED\n    if fee_up:\n",
+    },
+    {
+        "name": "the_closing_is_never_read",
+        "why": "a closed lane's screen stays black and its board keeps showing prices",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._closed[lane.name] = closing_of(state)\n",
+        "to": "        self._closed[lane.name] = None\n",
+    },
+    {
+        "name": "reopening_leaves_the_message_up",
+        "why": "a lane that opened again still tells drivers it is closed",
+        "file": "src/gate_agent/board.py",
+        "from": "    if not isinstance(lane, dict) or lane.get(\"state\") != CLOSED:\n",
+        "to": "    if not isinstance(lane, dict):\n",
+    },
+    {
+        "name": "a_ticket_that_ends_goes_black_over_a_message",
+        "why": "a closed lane's screen goes black after a ticket instead of back to the message",
+        "file": "src/gate_agent/agent.py",
+        "from": "            self._closed.get(lane) is not None,\n",
+        "to": "            False,\n",
+    },
+    {
+        "name": "the_last_board_item_is_starved",
+        "why": "one of the owner's messages never gets its turn",
+        "file": "src/gate_agent/board.py",
+        "from": "    return items[int(now // BOARD_ITEM_SECONDS) % len(items)]\n",
+        "to": "    return items[int(now // BOARD_ITEM_SECONDS) % max(1, len(items) - 1)]\n",
+    },
+    {
+        "name": "the_price_ignores_the_lanes_digits",
+        "why": "a price the engine wrote with three decimals is drawn with two, or not at all",
+        "file": "src/gate_agent/board.py",
+        "from": "    figure = figure_for(fee, currency, line.get(\"minor_unit_digits\"))\n",
+        "to": "    figure = figure_for(fee, currency)\n",
+    },
+    {
+        "name": "the_price_shown_is_not_the_one_published",
+        "why": "the screen shows a price the lane would not charge",
+        "file": "src/gate_agent/board.py",
+        "from": "    return f\"{length_label(minutes)} {figure}\"\n",
+        "to": "    return f\"{length_label(minutes)} {figure_for(fee + 1, currency, "
+              "line.get('minor_unit_digits'))}\"\n",
+    },
+    {
+        "name": "an_unwritable_price_is_guessed",
+        "why": "a currency whose digits are not known is drawn with two decimals",
+        "file": "src/gate_agent/board.py",
+        "from": "    if figure is None:\n        return None\n    return f\"{length_label",
+        "to": "    if figure is None:\n        figure = f\"{fee / 100:.2f} {currency}\"\n"
+              "    return f\"{length_label",
+    },
+    {
+        "name": "a_closed_lane_offers_a_ticket",
+        "why": "a code goes on the screen of a closed lane, which the lane refuses",
+        "file": "src/gate_agent/cases.py",
+        "from": "    if reading.closed:\n        return False\n",
+        "to": "    if False:\n        return False\n",
+    },
+    {
+        "name": "a_closed_lane_is_not_said",
+        "why": "a driver at a closed lane is told something else about why they wait",
+        "file": "src/gate_agent/cases.py",
+        "from": "    if reading.closed:\n        return AgentCase.LANE_CLOSED\n",
+        "to": "    if False:\n        return AgentCase.LANE_CLOSED\n",
+    },
+    {
+        "name": "a_closed_lane_hides_a_malfunction",
+        "why": "a fault at a closed lane is described as the lane being closed",
+        "file": "src/gate_agent/cases.py",
+        "from": "    if reading.malfunctions:\n        return AgentCase.MALFUNCTION_ACTIVE\n"
+                "    if reading.closed:\n        return AgentCase.LANE_CLOSED\n",
+        "to": "    if reading.closed:\n        return AgentCase.LANE_CLOSED\n"
+              "    if reading.malfunctions:\n        return AgentCase.MALFUNCTION_ACTIVE\n",
+    },
+    {
+        "name": "the_closed_case_is_heard_without_rebuilding_its_audio",
+        "why": "a sentence edited without its audio rebuilt plays the old words",
+        "file": "src/gate_agent/lines.py",
+        "from": "        \"en\": \"This lane is closed. I am connecting you to a person.\",\n",
+        "to": "        \"en\": \"This lane is shut. I am connecting you to a person.\",\n",
+    },
+    {
+        "name": "the_platforms_list_is_not_compared",
+        "why": "a character the platform accepts and this font cannot draw goes unnoticed",
+        "file": "scripts/check_screen_characters.py",
+        "from": "    for character in sorted(theirs - ours):\n",
+        "to": "    for character in sorted(set()):\n",
     },
 ]
 

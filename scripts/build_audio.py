@@ -87,7 +87,11 @@ TEXT_PROVENANCE: dict[str, dict] = {
         "`operator.vend_refused.vehicle_too_close`), added 2026-09-20 by a later session "
         "when the lane's refusal set gained that code. The driver's English sentence was "
         "approved by Gokhan in its final wording; the operator's was reported to him "
-        "and not objected to.",
+        "and not objected to. AND EXCEPT the two `lane_closed` lines (`case.lane_closed` "
+        "and `operator_case.lane_closed`), added 2026-10-06 by the U4c session: the "
+        "driver's first sentence is the brief's own (\"This lane is closed.\"), followed by "
+        "the clause every case that goes to a person ends with; the operator's was written "
+        "by that session and has had no review.",
         "from": "Nothing. English is the SOURCE: every line was written here first and "
         "every other language is a translation of it.",
         "reviewed_by": "No professional editor and no native-speaker review. The words are "
@@ -105,7 +109,9 @@ TEXT_PROVENANCE: dict[str, dict] = {
         "THAT REVIEW DID NOT SEE the two `vehicle_too_close` lines: they were added "
         "2026-09-20, are machine translations of their approved English in the same sense "
         "as the rest, and have had no review of any kind -- no native speaker, no "
-        "professional translator, and no independent read against the English.",
+        "professional translator, and no independent read against the English. Nor did it "
+        "see the two `lane_closed` lines, added 2026-10-06 the same way and unreviewed "
+        "in the same way.",
         "register": "Castilian. `matrícula`, `aparcamiento`, `almohadilla`, `Pulse`. This "
         "is why the key is `es-ES` and not `es`: at a garage in Texas or Bogotá several of "
         "those words are wrong, and a generic tag would have chosen a register for that "

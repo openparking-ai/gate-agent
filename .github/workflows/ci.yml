@@ -25,6 +25,13 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: ruff check .
 
+      - name: The characters an owner may type are the ones the screen draws
+        # The platform refuses, at the moment an owner writes it, any character
+        # of a lane's message this font cannot draw (U4c). Its list is a copy;
+        # this compares it, at a pinned platform commit, to `font.DRAWABLE`.
+        # Before the pin check below, so it is measured whatever that one says.
+        run: python scripts/check_screen_characters.py
+
       - name: The lane-controller pin names a commit on lane-controller main
         # A pin to a feature-branch commit resolves until that branch is
         # deleted and then breaks `pip install` for everyone. It is a TEST

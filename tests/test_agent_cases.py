@@ -37,6 +37,7 @@ from gate_agent.cases import (
     TRANSIT_STATES,
     LaneReading,
     derive,
+    offers_ticket,
 )
 from gate_agent.contract import AgentCase
 from serving import serving
@@ -447,3 +448,67 @@ def test_the_vend_refusal_codes_are_the_lanes_own_in_both_directions():
     for line in expected | {UNKNOWN_REFUSAL}:
         assert TEXT[line]["en"].strip(), line
         assert TEXT[line]["es-ES"].strip(), line
+
+
+# ---------------------------------------------------------------------------
+# U4c: a lane its owner has CLOSED
+# ---------------------------------------------------------------------------
+
+CLOSED_ROWS = [
+    ("fallback", "lane_closed", "none"),
+    ("fallback", "low_confidence", "none"),
+    ("allow", "allow", "confirmed"),
+    ("deny", "deny", "none"),
+    ("no_vehicle", "no_vehicle", "none"),
+]
+
+
+@pytest.mark.parametrize("reason", ["full", "everyone"])
+@pytest.mark.parametrize("outcome,why,transit", CLOSED_ROWS, ids=[row[1] for row in CLOSED_ROWS])
+def test_a_closed_lane_is_lane_closed_whatever_it_decided(
+    tmp_path, lane, reason, outcome, why, transit
+):
+    """After a malfunction and before the decision: the driver hears that the lane
+    is closed and goes to a person."""
+    served, url = lane
+    served.decision, served.transit = decision(outcome, why, transit)
+    served.closing = {"state": "closed", "reason": reason, "message": "Closed tonight"}
+    case, _agent, _ua = case_of(tmp_path, served, url)
+    assert case is AgentCase.LANE_CLOSED
+    # The control: the same decision at the same lane, open again, is not --
+    # except the lane's own `lane_closed` reason, which is its case anyway.
+    served.closing = {"state": "open", "reason": None, "message": None}
+    case, _agent, _ua = case_of(tmp_path, served, url)
+    assert (case is AgentCase.LANE_CLOSED) is (why == "lane_closed")
+
+
+def test_a_malfunction_at_a_closed_lane_is_still_said(tmp_path, lane):
+    """A closed lane HIDES no malfunction: the fault comes first."""
+    served, url = lane
+    served.decision, served.transit = decision("fallback", "lane_closed")
+    served.closing = {"state": "closed", "reason": "everyone", "message": "Closed"}
+    served.states["boom_did_not_rise"] = "active"
+    served.sources["boom_did_not_rise"] = "measured"
+    case, _agent, _ua = case_of(tmp_path, served, url)
+    assert case is AgentCase.MALFUNCTION_ACTIVE
+
+
+def test_lane_closed_is_a_fallback_reason_with_its_own_case():
+    assert FALLBACK_CASES["lane_closed"] is AgentCase.LANE_CLOSED
+    reading = LaneReading(lane="entry", readable=True, outcome="fallback",
+                          reason="lane_closed", decision_at=FRESH, presence=True)
+    assert derive(reading, NOW) is AgentCase.LANE_CLOSED
+
+
+def test_a_closed_lane_offers_no_ticket():
+    """The four ticket cases at a CLOSED lane: no ticket, whatever the decision.
+    The lane refuses a display code there; a code on the screen would be one it
+    refuses in front of the driver who photographed it."""
+    for why in ("engine_unreachable", "no_plate_read", "low_confidence", "unknown_vehicle"):
+        open_reading = LaneReading(lane="entry", readable=True, outcome="fallback", reason=why,
+                                   decision_at=FRESH, presence=True)
+        assert offers_ticket(open_reading, NOW), why
+        closed_reading = LaneReading(lane="entry", readable=True, outcome="fallback",
+                                     reason=why, decision_at=FRESH, presence=True, closed=True)
+        assert not offers_ticket(closed_reading, NOW), why
+        assert derive(closed_reading, NOW) is AgentCase.LANE_CLOSED

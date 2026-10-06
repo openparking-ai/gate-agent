@@ -1323,6 +1323,12 @@ class AgentCase(StrEnum):
     #: `never_alarm`. It comes FIRST: a lane that is broken cannot have its last
     #: decision read as a fact about this vehicle.
     MALFUNCTION_ACTIVE = "malfunction_active"
+    #: The lane's OWNER has closed it -- to everyone, or to all but pass and
+    #: monthly holders because the garage is full -- and the lane publishes
+    #: that on `lane` (U4c). After a malfunction and before the decision: the
+    #: driver is at a lane that is not taking cars by itself, whatever it
+    #: decided about this one, and only a person's word opens it.
+    LANE_CLOSED = "lane_closed"
     #: The lane fell back because it obtained no read AT ALL. **Never "wipe your
     #: plate"** -- the identification service is off, and telling a driver to
     #: clean a plate that was never looked at is the standing acceptance of this

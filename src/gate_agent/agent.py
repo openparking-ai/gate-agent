@@ -57,6 +57,13 @@ from pathlib import Path
 from time import monotonic
 
 from .act import LaneActClient, LaneActRefusedUs, LaneUnreachable
+from .board import (
+    board_frame_for,
+    closed_frame_for,
+    closing_of,
+    item_now,
+    items_of,
+)
 from .cases import LaneReading, decision_case, derive, offers_ticket
 from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable
 from .config import AgentConfig, Intercom
@@ -357,10 +364,17 @@ class Agent:
         #: publishes none. Read on every poll; `display.frame_wanted` decides
         #: whether it or a ticket has the screen.
         self._fees: dict[str, FeeScreen | None] = {}
-        #: Whether a fee frame is what this lane's screens were last given, so
-        #: a fee that comes down blanks them once and an idle screen is left
-        #: alone.
-        self._fee_drawn: dict[str, bool] = {}
+        #: The owner's message for each lane the lane publishes as CLOSED
+        #: (`lane`, U4c), or `None` for an open one -- `""` is closed with no
+        #: message this can use. Read on the same poll as the fee.
+        self._closed: dict[str, str | None] = {}
+        #: The board items each lane publishes (`board`, U4c): the owner's
+        #: messages in force and the lane's own price lines, in its order.
+        self._board: dict[str, tuple] = {}
+        #: Whether a LANE frame -- a fee, a closed lane's message or a board
+        #: item -- is what this lane's screens were last given, so one that
+        #: comes down blanks them once and an idle screen is left alone.
+        self._lane_drawn: dict[str, bool] = {}
         #: Where this agent follows each lane's events from, and when it is next
         #: due to. `None` is "not established yet": the first read adopts the
         #: lane's current cursor and mints nothing for what is already in the
@@ -829,17 +843,55 @@ class Agent:
             return
         if state.get("contract_version") not in KNOWN_LANE_VERSIONS:
             self._fees[lane.name] = None
+            self._closed[lane.name] = None
+            self._board[lane.name] = ()
             return
         fee = state.get("exit_fee")
         self._fees[lane.name] = screen_for(fee) if isinstance(fee, dict) else None
+        # THE SAME READ, so the fee, the closing and the board on a screen are
+        # never from two different moments of the lane.
+        self._closed[lane.name] = closing_of(state)
+        self._board[lane.name] = items_of(state)
+
+    def _wanted(self, lane: str, ticket_up: bool) -> Frame:
+        """`display.frame_wanted` for this lane, from what it last published."""
+        return frame_wanted(
+            ticket_up,
+            self._fees.get(lane) is not None,
+            self._closed.get(lane) is not None,
+            bool(self._board.get(lane)),
+        )
 
     def _paint_fee(self, lane: str) -> None:
         """This lane's screens, by `frame_wanted`, where a ticket is not up."""
-        wanted = frame_wanted(lane in self._pending, self._fees.get(lane) is not None)
+        wanted = self._wanted(lane, lane in self._pending)
         if wanted is Frame.FEE:
             self._show_fee(lane)
-        elif wanted is Frame.BLANK and self._fee_drawn.get(lane):
+        elif wanted is Frame.CLOSED:
+            self._show_closed(lane)
+        elif wanted is Frame.BOARD:
+            self._show_board(lane)
+        elif wanted is Frame.BLANK and self._lane_drawn.get(lane):
             self._blank_screens(lane, self._displays_at.get(lane, ()))
+
+    def _show_closed(self, lane: str) -> None:
+        """The owner's message for a CLOSED lane, alone, on every screen at it."""
+        message = self._closed.get(lane)
+        if message is None:
+            return
+        languages = self.config.driver_languages
+        self._show_lane_frame(
+            lane, lambda geometry: closed_frame_for(message, languages, geometry)
+        )
+
+    def _show_board(self, lane: str) -> None:
+        """The board item whose turn it is, on every screen at this lane. An item
+        this screen cannot draw whole and legible leaves its turn black."""
+        item = item_now(self._board.get(lane, ()), self._clock())
+        if item is None:
+            return
+        languages = self.config.driver_languages
+        self._show_lane_frame(lane, lambda geometry: board_frame_for(item, languages, geometry))
 
     def _show_fee(self, lane: str) -> None:
         """The fee frame on every screen at this lane, geometry re-read first --
@@ -848,6 +900,12 @@ class Agent:
         fee = self._fees.get(lane)
         if fee is None:
             return
+        languages = self.config.driver_languages
+        self._show_lane_frame(lane, lambda geometry: fee_frame_for(fee, languages, geometry))
+
+    def _show_lane_frame(self, lane: str, draw) -> None:
+        """`draw(geometry)` on every screen at this lane, geometry re-read first.
+        A `None` frame is one this screen cannot show: it is blanked."""
         for screen in self._displays_at.get(lane, ()):
             before = screen.geometry
             try:
@@ -863,11 +921,15 @@ class Agent:
                     geometry=f"{current.width}x{current.height}@{current.bits_per_pixel}",
                 )
             try:
-                screen.show(fee_frame_for(fee, self.config.driver_languages, current))
+                frame = draw(current)
+                if frame is None:
+                    screen.blank()
+                else:
+                    screen.show(frame)
             except DisplayUnavailable as exc:
                 # NOT left showing whatever was there: that may be an earlier
                 # car's fee. Blanked, and the health surface says why.
-                log.error("display %s could not show the fee: %s", screen.name, exc)
+                log.error("display %s could not show the lane's frame: %s", screen.name, exc)
                 self._code(AgentCode.DISPLAY_UNAVAILABLE, screen.name, HealthState.ACTIVE)
                 try:
                     screen.blank()
@@ -875,7 +937,7 @@ class Agent:
                     pass
                 continue
             self._code(AgentCode.DISPLAY_UNAVAILABLE, screen.name, HealthState.OK)
-        self._fee_drawn[lane] = True
+        self._lane_drawn[lane] = True
 
     def _poll_lane(self, lane) -> None:
         """One read of a lane's events, and one of its state where a ticket is up."""
@@ -1159,15 +1221,15 @@ class Agent:
 
     def _blank(self, pending: Pending) -> None:
         """The ticket has ended: its screens go to what `frame_wanted` says the
-        lane wants now -- the fee it is publishing, or black. Never black on the
-        way to a fee."""
-        if frame_wanted(False, self._fees.get(pending.lane) is not None) is Frame.FEE:
-            self._show_fee(pending.lane)
+        lane wants now -- the fee it is publishing, a closed lane's message, the
+        board, or black. Never black on the way to any of them."""
+        if self._wanted(pending.lane, False) is not Frame.BLANK:
+            self._paint_fee(pending.lane)
             return
         self._blank_screens(pending.lane, pending.displays)
 
     def _blank_screens(self, lane: str, screens: tuple) -> None:
-        self._fee_drawn[lane] = False
+        self._lane_drawn[lane] = False
         for screen in screens:
             try:
                 screen.blank()
@@ -1764,6 +1826,9 @@ class Agent:
             # presence must not become a code on a screen.
             presence=_boolean(decision, "presence"),
             malfunctions=tuple(malfunctions),
+            # Closed by its owner (U4c), read by the screen's own reader, so the
+            # call and the screen cannot disagree about whether it is.
+            closed=closing_of(state) is not None,
         )
 
     # -- the human ---------------------------------------------------------

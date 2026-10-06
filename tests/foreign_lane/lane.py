@@ -155,6 +155,13 @@ class ForeignLane:
         #: -- the document's `exit_fee` block -- so a test can put a fee, a
         #: state with no payment, or nothing in front of the agent's display.
         self.exit_fee: dict | None = None
+        #: What this lane publishes as `lane` and `board` (U4c, added within
+        #: version 2): whether its owner closed it, with the message, and the
+        #: items its screen rotates through. `None` publishes neither key -- a
+        #: lane written before them, which a consumer must read as open with an
+        #: empty board.
+        self.closing: dict | None = None
+        self.board: dict | None = None
         self.sources: dict[str, str] = {}
         self.never_alarm_override: dict[str, bool] = {}
         #: Whether this lane omits `never_alarm` entirely -- what a serialiser
@@ -250,6 +257,10 @@ class ForeignLane:
             "transit": self.transit,
             "exit_fee": self.exit_fee,
         }
+        if self.closing is not None:
+            payload["lane"] = self.closing
+        if self.board is not None:
+            payload["board"] = self.board
         if _break("future_version"):
             payload["contract_version"] = 99
         return payload

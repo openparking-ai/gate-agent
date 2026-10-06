@@ -1863,3 +1863,21 @@ def test_a_lane_that_will_not_consider_the_act_is_act_refused_on_the_record(tmp_
             if entry["code"] == "lane_act_refused" and entry["subject"] == "entry"
         ] == ["active"]
         assert events_of(agent, AgentEventKind.VEND_COMMANDED) == []
+
+
+@pytest.mark.parametrize("closed_reason", ["full", "everyone"])
+def test_a_closed_lane_offers_no_ticket(tmp_path, closed_reason):
+    """U4c: the lane refuses a display code at a closed lane, whichever reason
+    closed it, so no ticket goes on the screen there -- for a reason that would
+    get one at an open lane. The control is the same lane open."""
+    from foreign_lane import make_server as foreign_server
+
+    for closing, offered in (({"state": "closed", "reason": closed_reason,
+                               "message": "Closed"}, False),
+                             ({"state": "open", "reason": None, "message": None}, True)):
+        lane = a_foreign_lane("no_plate_read")
+        lane.closing = closing
+        with serving(foreign_server(lane)) as url:
+            agent, _ua, _screen = agent_on(tmp_path / str(offered), url, act_token=None)
+            foreign_decides(agent, lane, "no_plate_read")
+            assert bool(events_of(agent, AgentEventKind.TICKET_ISSUED)) is offered, closing

@@ -139,6 +139,11 @@ DISPLAY_LINES: tuple[str, ...] = (
     "display.fee.nothing_to_pay",
     "display.fee.covered",
     "display.fee.not_shown",
+    #: THE LANE'S OWN WORDS (`board.py`): what a closed lane says when the
+    #: owner's message cannot be drawn whole here, and the heading over the
+    #: price lines on the board.
+    "display.lane_closed",
+    "display.board.prices",
 )
 
 #: **UPPER CASE, and it is a decision.** The font this package ships draws upper
@@ -171,6 +176,14 @@ DISPLAY_TEXT: dict[str, dict[str, str]] = {
         "en": "THE FEE CANNOT BE SHOWN HERE",
         "es-ES": "EL IMPORTE NO SE PUEDE MOSTRAR AQUÍ",
     },
+    "display.lane_closed": {
+        "en": "THIS LANE IS CLOSED",
+        "es-ES": "ESTE CARRIL ESTÁ CERRADO",
+    },
+    "display.board.prices": {
+        "en": "PRICES",
+        "es-ES": "TARIFAS",
+    },
 }
 
 #: The languages this repository ships text and audio for. A site may declare
@@ -198,6 +211,13 @@ TEXT: dict[str, dict[str, str]] = {
     "case.malfunction_active": {
         "en": "There is a fault at this entrance. I am connecting you to a person.",
         "es-ES": "Hay una avería en esta entrada. Le paso con una persona.",
+    },
+    # The owner closed this lane. The driver is not told why: the owner's
+    # message is on the screen in front of them, and a sentence spoken here is
+    # a file built from this text, never the owner's words.
+    "case.lane_closed": {
+        "en": "This lane is closed. I am connecting you to a person.",
+        "es-ES": "Este carril está cerrado. Le paso con una persona.",
     },
     # NEVER an instruction about the plate. The identification service is off,
     # and telling somebody to clean a plate nothing looked at is the failure
@@ -341,6 +361,10 @@ TEXT: dict[str, dict[str, str]] = {
     # first -- see `[intercoms.<uri>] name_audio`.
     "operator_case.malfunction_active": {
         "en": "A fault is active at this lane.", "es-ES": "Hay una avería activa en este carril.",
+    },
+    "operator_case.lane_closed": {
+        "en": "This lane is closed by its owner.",
+        "es-ES": "El propietario ha cerrado este carril.",
     },
     "operator_case.identification_unavailable": {
         "en": "Vehicle identification is unavailable.",
