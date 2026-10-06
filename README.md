@@ -262,9 +262,9 @@ the tests is synthetic and built in the process that uses it.
 
 ## Licence and contributing
 
-AGPL-3.0-or-later. Contributions welcome; see
-[CONTRIBUTING.md](CONTRIBUTING.md) and [CLA.md](CLA.md). The CLA is required and
-it is not negotiable.
+AGPL-3.0-or-later.
+
+Open Parking AI does not accept outside contributions. Pull requests, issues and comments are limited to the maintainers.
 
 ---
 
