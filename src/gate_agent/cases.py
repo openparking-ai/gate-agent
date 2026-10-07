@@ -63,6 +63,9 @@ REQUIRED_FALLBACK_REASONS: tuple[str, ...] = (
     "unknown_vehicle",
     "stale_rules",
     "engine_unreachable",
+    #: U4c: the lane is closed by its owner and did not open for this car by
+    #: itself. A person's word through this intercom still opens it.
+    "lane_closed",
 )
 
 #: The outcomes, closed by the lane contract and published in it. A lane that
@@ -89,6 +92,7 @@ FALLBACK_CASES: dict[str, AgentCase] = {
     "low_confidence": AgentCase.PLATE_UNCLEAR,
     "unknown_vehicle": AgentCase.VEHICLE_NOT_RECOGNISED,
     "stale_rules": AgentCase.RULES_UNAVAILABLE,
+    "lane_closed": AgentCase.LANE_CLOSED,
 }
 
 #: The published default for `[cases] decision_max_age_seconds`, and it is a
@@ -181,6 +185,11 @@ class LaneReading:
     #: `never_alarm` travels on the wire with the code and this package holds no
     #: list of its own.
     malfunctions: tuple[str, ...] = ()
+    #: Whether the lane publishes that its owner has CLOSED it (`lane.state`,
+    #: U4c), read where the payload is read. `False` for a lane that publishes
+    #: no `lane` at all -- a lane older than the field has said nothing about
+    #: closing.
+    closed: bool = False
 
 
 #: The one copy of what the comparison in `derive()` spans, published from here
@@ -239,6 +248,9 @@ def derive(
         cannot have a decision interpreted out of it;
       * **then a malfunction** -- a broken lane's last decision is not a fact
         about the vehicle standing at it, whatever that decision was;
+      * **then a CLOSED lane** (U4c) -- the owner has closed it, so the lane
+        opens for no car by itself and only a person's word does: the driver
+        hears `lane_closed` and goes to a person, whatever the decision was;
       * **then the AGE of the decision** -- a decision the lane made for
         somebody else is not a fact about this driver either, and this is the
         only guard in front of `nothing_to_do`, the one case that reaches
@@ -253,6 +265,8 @@ def derive(
         return AgentCase.LANE_UNAVAILABLE
     if reading.malfunctions:
         return AgentCase.MALFUNCTION_ACTIVE
+    if reading.closed:
+        return AgentCase.LANE_CLOSED
     return decision_case(reading, now, max_age_seconds)
 
 
@@ -343,6 +357,12 @@ def offers_ticket(
     instead of through a loop.
     """
     if reading.lane is None or not reading.readable:
+        return False
+    # A CLOSED LANE OFFERS NO TICKET (U4c). The lane refuses a display code at
+    # a closed lane whichever reason closed it -- only a person's word opens it
+    # -- so a code put on the screen here is one the lane would refuse a moment
+    # later, in front of a driver who photographed it.
+    if reading.closed:
         return False
     return (
         decision_case(reading, now, max_age_seconds) in TICKET_CASES

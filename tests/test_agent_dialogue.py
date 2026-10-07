@@ -800,3 +800,37 @@ def _active(agent, code: str) -> list[str]:
         for entry in agent.health().to_dict()["codes"]
         if entry["code"] == code and entry["state"] == "active"
     )
+
+
+# ---------------------------------------------------------------------------
+# U4c: a call at a lane its owner has CLOSED
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("language", ["en", "es-ES"])
+def test_a_call_at_a_closed_lane_hears_lane_closed_and_the_person_is_told(
+    tmp_path, lane, language
+):
+    """Rule 8: the driver hears `lane_closed` in the declared language, then the
+    existing route to a person, and the person is briefed that the lane is closed.
+
+    WHAT THE PERSON IS NOT TOLD is the owner's message itself: every sentence this
+    agent plays is a file built from `lines.TEXT`, never a runtime composition,
+    so free text an owner typed cannot be spoken. Planted: the message is on the
+    wire, and no file played carries it.
+    """
+    served, url = lane
+    served.closing = {"state": "closed", "reason": "everyone",
+                      "message": "PLANTEDMESSAGE construction"}
+    agent, ua, _clock, _operator = brief_and_bridge(
+        tmp_path, url, driver_languages=(language,), operator_language=language
+    )
+    assert f"{language}/case.lane_closed.wav" in files(ua, "driver")
+    assert f"{language}/operator_case.lane_closed.wav" in files(ua, "operator")
+    assert "PLANTEDMESSAGE" not in str(ua.played)
+    # The control: the same call at the same lane, open, is not `lane_closed`.
+    served.closing = {"state": "open", "reason": None, "message": None}
+    _agent, ua, _clock, _operator = brief_and_bridge(
+        tmp_path / "open", url, driver_languages=(language,), operator_language=language
+    )
+    assert f"{language}/case.lane_closed.wav" not in files(ua, "driver")

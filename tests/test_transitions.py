@@ -249,3 +249,25 @@ def test_a_poll_that_is_not_due_yet_does_not_happen(lane_and_monitor):
     monitor.poll()
     assert len(lane.requests) > before
     assert sink.codes == [(ORDINARY_CODE, "raised")]
+
+
+@pytest.mark.parametrize("reason", ["full", "everyone"])
+def test_a_closed_lane_raises_nothing_by_being_closed_and_hides_nothing(
+    lane_and_monitor, reason
+):
+    """U4c: a lane its owner closed is not a fault. Closing it sends nothing; a
+    real fault at a closed lane is raised exactly as at an open one."""
+    lane, monitor, sink, clock = lane_and_monitor
+    clock.advance(60)
+    monitor.poll()
+    before = list(sink.codes)
+    lane.closing = {"state": "closed", "reason": reason, "message": "Closed tonight"}
+    lane.decision = {**lane.decision, "outcome": "fallback", "reason": "lane_closed",
+                     "fallback": "lane_closed"}
+    clock.advance(60)
+    monitor.poll()
+    assert sink.codes == before, "closing the lane was reported as a change in its health"
+    _set(lane, ORDINARY_CODE, "active")
+    clock.advance(60)
+    monitor.poll()
+    assert sink.codes == [*before, (ORDINARY_CODE, "raised")], "a fault was hidden by closing"

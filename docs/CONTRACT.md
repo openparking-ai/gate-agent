@@ -433,6 +433,7 @@ without adding it here.
   ],
   "agent_cases": [
     "malfunction_active",
+    "lane_closed",
     "identification_unavailable",
     "plate_not_read",
     "plate_unclear",
@@ -1589,6 +1590,53 @@ name — so that stay has two records, one voided and one vended, and the vended
 one is the stay. The driver holds the other. That is stated here rather than
 left for an exit round to discover.
 
+### A closed lane, and the board (U4c)
+
+The lane publishes two more things on `GET /v1/lane/state`, both added within
+its version 2: `lane` — open, or **closed by its owner** with a reason and the
+owner's message — and `board`, the items its screen shows while nothing else
+wants it: the owner's messages in force now (which lanes and which times is the
+LANE's decision, offline too) and, where the owner switched it on, the price the
+lane worked out with the same engine and tax it charges with. A lane that
+publishes neither is open with an empty board.
+
+**Which frame wins is one line**, `display.frame_wanted`:
+
+    ticket, then fee, then the CLOSED message, then the BOARD, then black.
+
+- **A closed lane's message is shown ALONE**: upper case, whole, wrapped between
+  words — a word is carried across lines only when it is wider than the screen,
+  and then every character of it is still on the screen. It is drawn at the
+  largest scale it fits, and **never below two pixels a module**
+  (`board.MESSAGE_SCALE_MIN`): legible means that, here. The platform bounds a
+  message at 160 characters, and `tests/test_board.py` measures 160 characters
+  of the widest-wrapping words fitting at that size on 320x240 and 800x480. A
+  message that cannot be drawn whole and legible on a screen — a character the
+  font lacks, or a screen too small — is never drawn with a letter missing: the
+  frame says `THIS LANE IS CLOSED` in every declared driver language instead.
+- **A ticket or a fee wins over it and gives the screen BACK to it** when it
+  ends — never to black on the way. Reopening the lane gives black (or the
+  board).
+- **The board shows one item at a time for `board.BOARD_ITEM_SECONDS` (8 s)**,
+  in the lane's order, round and round, **on its own clock**
+  (`board.Rotation`, turned on every pass of the agent's loop) — not on the
+  state poll. Each item holds the screen for its whole turn at any
+  `poll_seconds` a site sets; the poll only changes WHAT is on the board (an
+  item the lane still publishes keeps the rest of its turn; one it stopped
+  publishing comes down at once). A ticket, a fee or a closed lane's message
+  still takes the screen at once, and the board comes back to a whole turn of
+  the item it was on. A loop too slow to keep the turns is refused at start
+  by name (`board.check_pass`). A price line is written exactly as the
+  fee frame writes a figure, with the digits the lane published; a line that
+  cannot be written is left out, and an item left with no line is not shown.
+- **A closed lane offers no ticket**, and a call there hears `lane_closed`
+  (below): the lane refuses a display code at a closed lane, whichever reason
+  closed it, and only a person's word opens it.
+- **What the person is NOT told is the owner's message.** Every sentence this
+  agent plays is a file built from `lines.TEXT` — nothing is composed at
+  runtime — so the person hears that the lane is closed by its owner, and the
+  message itself is on the screen at the lane, not in the call.
+
 ### The QR encoder is ours, and something else proves it
 
 No runtime dependency: `dependencies = []` is a property of this package, and
@@ -2146,13 +2194,17 @@ menu offering them the choice would be a guess with a keypad.
 The order matters and is part of the contract. Standalone first, because there is
 no lane to ask. Then whether the lane could be read at all. Then a malfunction,
 because a broken lane's last decision is not a fact about the vehicle standing at
-it. Then the outcome — and the transit decides something only under `allow`,
+it. Then a lane its owner has CLOSED (`lane`, U4c): it opens for no car by
+itself, only a person's word opens it, and a ticket is not offered there — the
+lane refuses a display code at a closed lane. Then the outcome — and the transit decides something only under `allow`,
 because under `deny` and `no_vehicle` there was no vend for closing loops to have
 confirmed.
 
 | the lane says | case | ends with |
 |---|---|---|
 | any malfunction `active` whose `never_alarm` is `false` on the wire | `malfunction_active` | a person |
+| `lane.state: closed` — the lane's owner closed it, to everyone or because the garage is full — whatever the decision was | `lane_closed` | a person, and **no ticket is offered** |
+| `outcome: fallback`, `reason: lane_closed` | `lane_closed` | a person |
 | `outcome: fallback`, `reason: engine_unreachable` | `identification_unavailable` | a person |
 | `outcome: fallback`, `reason: no_plate_read` | `plate_not_read` | the instruction, then a person |
 | `outcome: fallback`, `reason: low_confidence` | `plate_unclear` | the instruction, then a person |
