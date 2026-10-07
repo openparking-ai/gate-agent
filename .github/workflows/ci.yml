@@ -51,10 +51,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The fail-control matrix is READ FROM THE SCRIPTS, not written here. Each
-    # script holds its shard count as `SHARDS` and prints it with `--plan`, so
-    # there is no second copy of that number to drift -- a matrix that listed
-    # shards 1..3 of 4 would leave a quarter of the breaks unmeasured and every
-    # job green.
+    # script's `--plan` prints the shard count `_shard.cut` arrives at from the
+    # measured seconds in `scripts/fail_control_times.json`, and the name of
+    # every break, so there is no second copy of either to drift -- a matrix
+    # that listed shards 1..3 of 4 would leave a quarter of the breaks
+    # unmeasured and every job green.
     outputs:
       parts: ${{ steps.plan.outputs.parts }}
       plan: ${{ steps.plan.outputs.plan }}
@@ -181,7 +182,7 @@ jobs:
             --shard "${{ matrix.part.index }}/${{ matrix.part.count }}" 2>&1 | tee run.log
           status=${PIPESTATUS[0]}
           mkdir -p coverage
-          { grep -E '^ran [0-9]+ of [0-9]+ breaks' run.log; echo "exit=$status"; } \
+          { grep -E '^(ran [0-9]+ of [0-9]+ breaks|control_a |break )' run.log; echo "exit=$status"; } \
             > "coverage/${{ matrix.part.script }}-${{ matrix.part.index }}.txt"
           exit "$status"
 
