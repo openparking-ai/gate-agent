@@ -112,7 +112,7 @@ class Frame(StrEnum):
     CLOSED = "closed"
     #: The lane's board: the owner's messages in force and, where the owner
     #: switched it on, the price the lane would charge -- one item at a time
-    #: (`board.item_now`).
+    #: (`board.Rotation`).
     BOARD = "board"
     #: Nothing. Idle, and what a screen goes to only when NOTHING wants it.
     BLANK = "blank"

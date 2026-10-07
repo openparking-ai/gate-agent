@@ -13,7 +13,8 @@ nothing here decides what they say:
   * **THE BOARD.** While the lane is open and nothing else wants the screen, the
     items the lane publishes -- the owner's messages in force now, and, where
     the owner switched it on, the price the LANE worked out for a few lengths of
-    stay -- one after another, each for `BOARD_ITEM_SECONDS`.
+    stay -- one after another, each for a whole `BOARD_ITEM_SECONDS`, turned on
+    the board's own clock (`Rotation`), whatever the lane's poll interval.
 
 **THE PRICE IS READ, NEVER WORKED OUT HERE.** The lane prices each line with
 the engine and the tax it charges with, and this module writes each figure out
@@ -140,12 +141,81 @@ def items_of(state: object) -> tuple[BoardItem, ...]:
     return tuple(items)
 
 
-def item_now(items: tuple[BoardItem, ...], now: float) -> BoardItem | None:
-    """The item whose turn it is at `now`. Every item has a turn of
-    `BOARD_ITEM_SECONDS`, in the lane's order, round and round."""
-    if not items:
-        return None
-    return items[int(now // BOARD_ITEM_SECONDS) % len(items)]
+class BoardTooSlow(ValueError):
+    """An interval the board cannot keep its turns at, refused at start by name."""
+
+
+def check_pass(pass_seconds: float, name: str = "the agent's loop pass") -> None:
+    """The board turns on the agent's loop, so the loop must pass more than once
+    a turn -- or an item would hold the screen for two turns and the order would
+    lag. The lane's `poll_seconds` is not checked: it only changes what is on
+    the board, so any interval a site sets is one the board keeps its turns at.
+    """
+    if not pass_seconds < BOARD_ITEM_SECONDS / 2:
+        raise BoardTooSlow(
+            f"{name} is {pass_seconds:g} s: the board turns an item every "
+            f"{BOARD_ITEM_SECONDS:g} s on that loop, so it must pass in under "
+            f"{BOARD_ITEM_SECONDS / 2:g} s"
+        )
+
+
+class Rotation:
+    """The board at one lane, turning on ITS OWN CLOCK, not on the state poll.
+
+    Each item holds the screen for a whole `BOARD_ITEM_SECONDS`, then the next
+    in the lane's order, round and round. The turn is measured from when the
+    item went up, so however often the lane is read -- every 2 seconds or every
+    32 -- no item is skipped and none is cut short: a turn that ends late moves
+    on by ONE item, from then.
+
+    **THE POLL ONLY CHANGES WHAT IS ON THE BOARD** (`update`). The item showing
+    keeps the rest of its turn if the lane still publishes it, wherever it now
+    sits in the order. One the lane stopped publishing comes down at once, and
+    the item now in its place starts a whole turn.
+
+    **A BOARD THAT LOST THE SCREEN** -- to a ticket, a fee or a closed lane's
+    message, which take it at once -- is `pause`d; when it has the screen
+    again, the item it was on starts a whole turn.
+    """
+
+    __slots__ = ("items", "index", "since")
+
+    def __init__(self) -> None:
+        self.items: tuple[BoardItem, ...] = ()
+        self.index = 0
+        #: When the item showing went up; `None` when it is not up (no items,
+        #: paused, or a new one in its place that has not been drawn yet).
+        self.since: float | None = None
+
+    def update(self, items: tuple[BoardItem, ...]) -> None:
+        """What the lane publishes now. The turn under way is kept if its item is."""
+        if items == self.items:
+            return
+        showing = self.items[self.index] if self.items else None
+        self.items = items
+        if not items:
+            self.index, self.since = 0, None
+        elif showing in items:
+            self.index = items.index(showing)
+        else:
+            self.index, self.since = min(self.index, len(items) - 1), None
+
+    def pause(self) -> None:
+        self.since = None
+
+    def turn(self, now: float) -> tuple[BoardItem | None, bool]:
+        """The item that has the screen at `now`, and whether it is a NEW one to
+        draw: the board just took the screen, or a turn just ended."""
+        if not self.items:
+            return None, False
+        if self.since is None:
+            self.since = now
+            return self.items[self.index], True
+        if now - self.since >= BOARD_ITEM_SECONDS:
+            self.index = (self.index + 1) % len(self.items)
+            self.since = now
+            return self.items[self.index], True
+        return self.items[self.index], False
 
 
 def wrap(text: str, per_line: int) -> list[str]:
@@ -293,10 +363,12 @@ __all__ = [
     "BOARD_ITEM_SECONDS",
     "MESSAGE_SCALE_MIN",
     "BoardItem",
+    "BoardTooSlow",
+    "Rotation",
     "board_frame_for",
+    "check_pass",
     "closed_frame_for",
     "closing_of",
-    "item_now",
     "items_of",
     "length_label",
     "message_frame_for",

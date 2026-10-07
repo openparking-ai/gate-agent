@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import itertools
 import random
+from dataclasses import replace
 
 import pytest
 
+from conftest import FakeClock, agent_config_for, agent_for
+from fake_ua import FakeUa
 from foreign_lane import ForeignLane, decided_at
 from foreign_lane.lane import make_server
 from gate_agent import board, display, font
@@ -26,13 +29,17 @@ from gate_agent.board import (
     BOARD_ITEM_SECONDS,
     MESSAGE_SCALE_MIN,
     BoardItem,
+    BoardTooSlow,
+    Rotation,
+    board_frame_for,
+    check_pass,
     closed_frame_for,
-    item_now,
     items_of,
     message_layout,
     wrap,
 )
-from gate_agent.contract import AgentEventKind
+from gate_agent.config import Target
+from gate_agent.contract import AgentEventKind, TargetKind
 from gate_agent.display import Frame, Geometry, frame_wanted
 from gate_agent.fee import figure_for
 from gate_agent.lines import DISPLAY_TEXT
@@ -41,6 +48,7 @@ from test_ticket_flow import FakeScreen, events_of
 
 np = pytest.importorskip("numpy")
 
+from gate_agent.fee import fee_frame_for, screen_for  # noqa: E402
 from test_display import a_screen, picture_from  # noqa: E402
 from test_fee_display import a_fee, an_agent, ticket_up  # noqa: E402
 from test_fee_frame import read_lines  # noqa: E402
@@ -412,10 +420,157 @@ def test_every_item_gets_its_turn_in_order(tmp_path):
 
 def test_the_rotation_gives_every_item_the_same_share():
     items = tuple(BoardItem("message", text=str(n)) for n in range(5))
+    rotation = Rotation()
+    rotation.update(items)
     counts = {item: 0 for item in items}
     for tick in range(1000):
-        counts[item_now(items, tick * BOARD_ITEM_SECONDS / 4)] += 1
+        counts[rotation.turn(tick * BOARD_ITEM_SECONDS / 4)[0]] += 1
     assert set(counts.values()) == {200}
+
+
+# ---------------------------------------------------------------------------
+# F2 (fix round): the board turns on its own clock, not on the state poll
+# ---------------------------------------------------------------------------
+
+#: One pass of the agent's loop in these tests. It does not divide a turn, as
+#: a real loop's passes (0.2 s, `cli`, plus whatever each read takes) do not
+#: land on one: a poll is due at a moment and happens at the first pass after.
+PASS = 0.3
+
+#: Where the agent's clock starts: just before a turn's boundary, so a poll
+#: that lands a little late is in the NEXT slot of a clock cut into turns.
+START = 1000.0 + BOARD_ITEM_SECONDS - 0.05
+
+NOTICES = [{"kind": "message", "text": one} for one in ("first notice", "second notice",
+                                                        "third notice")] + [PRICES]
+
+
+def a_board_agent(tmp_path, url, screen, poll_seconds, start=START):
+    """An agent at one lane with one recording screen, reading the lane every
+    `poll_seconds` -- any interval a site may set."""
+    base = agent_config_for(tmp_path, lane_url=url)
+    config = replace(
+        base,
+        lanes=(Target(name="exit", kind=TargetKind.LANE, url=url, poll_seconds=poll_seconds,
+                      timeout_seconds=5.0),),
+        intercoms=(replace(base.intercoms[0], lane="exit", display=screen.name),),
+        displays={screen.name: screen},
+        tickets=None,
+        driver_languages=LANGUAGES,
+    )
+    return agent_for(config, FakeUa(), clock=FakeClock(start))
+
+
+def on_screen(screen, items) -> int | None:
+    """Which item's frame the screen holds now, by its index, or `None`."""
+    if not screen.frames:
+        return None
+    frames = [board_frame_for(item, LANGUAGES, screen.geometry) for item in items]
+    return frames.index(screen.frames[-1]) if screen.frames[-1] in frames else None
+
+
+def runs(timeline):
+    """The timeline as (what was on the screen, for how many passes), in order."""
+    return [(what, len(list(group))) for what, group in itertools.groupby(timeline)]
+
+
+@pytest.mark.parametrize("poll_seconds", [2.0, 8.0, 16.0, BOARD_ITEM_SECONDS * len(NOTICES)])
+def test_every_item_gets_its_whole_turn_in_order_at_any_poll(tmp_path, poll_seconds):
+    """Check 4: at a poll of 2, 8 and 16 seconds, and at 8 s x the item count
+    (where a board turned by the poll shows one item forever), every item is
+    shown, in the lane's order, each for its whole turn, round and round."""
+    lane = a_lane()
+    lane.board = {"items": NOTICES}
+    items = items_of({"board": lane.board})
+    timeline = []
+    with serving(make_server(lane)) as url:
+        screen = FakeScreen()
+        agent = a_board_agent(tmp_path, url, screen, poll_seconds)
+        for _ in range(int(3 * len(items) * (BOARD_ITEM_SECONDS + PASS) / PASS)):
+            agent.poll()
+            timeline.append(on_screen(screen, items))
+            agent._clock.advance(PASS)
+    shown = runs(timeline)
+    assert len(shown) >= 3 * len(items) - 1, shown
+    assert [what for what, _ in shown] == ([*range(len(items))] * 4)[: len(shown)], (
+        f"an item was skipped or shown out of order: {shown}")
+    for what, passes in shown[:-1]:
+        assert BOARD_ITEM_SECONDS <= passes * PASS < BOARD_ITEM_SECONDS + PASS + 1e-9, (
+            f"item {what} held the screen {passes * PASS:.1f} s, not one whole turn: {shown}")
+
+
+def test_the_poll_changes_what_is_on_the_board_and_not_the_turn(tmp_path):
+    """An item the lane still publishes keeps the rest of its turn when the list
+    changes around it; one it stopped publishing comes down at once, and the
+    item in its place gets a whole turn."""
+    first, second, third = (BoardItem("message", text=t) for t in ("FIRST", "SECOND", "THIRD"))
+    rotation = Rotation()
+    rotation.update((first, second))
+    assert rotation.turn(0.0) == (first, True)
+    rotation.update((third, first, second))  # a new one ahead of it, mid-turn
+    assert rotation.turn(3.0) == (first, False)
+    assert rotation.turn(BOARD_ITEM_SECONDS) == (second, True)
+    rotation.update((third, first))  # the one showing is no longer published
+    assert rotation.turn(BOARD_ITEM_SECONDS + 1) == (first, True)
+    assert rotation.turn(2 * BOARD_ITEM_SECONDS) == (first, False), "a whole turn from going up"
+    assert rotation.turn(2 * BOARD_ITEM_SECONDS + 1) == (third, True)
+    # A late pass moves on by ONE item, never past one.
+    assert rotation.turn(10 * BOARD_ITEM_SECONDS) == (first, True)
+
+
+@pytest.mark.parametrize("what", ["fee", "closed"])
+def test_a_fee_or_a_closed_lane_takes_the_screen_within_one_poll_mid_turn(tmp_path, what):
+    """Check 5: the board's own clock does not hold the screen. A fee or a
+    closed lane's message published while an item is in the middle of its turn
+    is up at the next poll, not when the turn ends."""
+    lane = a_lane()
+    lane.board = {"items": NOTICES}
+    items = items_of({"board": lane.board})
+    with serving(make_server(lane)) as url:
+        screen = FakeScreen()
+        agent = a_board_agent(tmp_path, url, screen, 2.0)
+        agent.poll()
+        first = agent._clock.value
+        assert on_screen(screen, items) == 0
+        agent._clock.advance(1.0)
+        if what == "fee":
+            lane.exit_fee = a_fee(1000)
+            want = fee_frame_for(screen_for(a_fee(1000)), LANGUAGES, screen.geometry)
+        else:
+            lane.closing = closed()
+            want = closed_frame_for(FULL, LANGUAGES, screen.geometry)
+        while agent._clock.value < first + 2.0:  # to the next poll, 2 s after the first
+            agent._clock.advance(PASS)
+            agent.poll()
+        assert agent._clock.value < first + BOARD_ITEM_SECONDS, "still inside the item's turn"
+        assert screen.frames[-1] == want, f"the {what} waited for the board's turn"
+        # And the board comes back to a whole turn of the item it was on.
+        lane.exit_fee, lane.closing = None, OPEN
+        agent._clock.advance(2.0)
+        agent.poll()
+        assert on_screen(screen, items) == 0
+
+
+def test_a_ticket_takes_the_screen_from_the_board_mid_turn(tmp_path):
+    """Check 5, a ticket: a lane deciding while an item is mid-turn puts the
+    ticket up on that poll."""
+    lane = a_lane()
+    lane.board = {"items": NOTICES}
+    items = items_of({"board": lane.board})
+    screen = FakeScreen()
+    with serving(make_server(lane)) as url:
+        agent = ticket_up(tmp_path, lane, url, screen)
+        assert any(frame in [board_frame_for(i, LANGUAGES, screen.geometry) for i in items]
+                   for frame in screen.frames), "the board was up first"
+        ticket, since = screen.frames[-1], len(screen.frames)
+        assert on_screen(screen, items) is None, "a ticket is up and a board item holds the screen"
+        # The board's own clock runs on under the ticket and never takes the screen from it.
+        for _ in range(int(2 * BOARD_ITEM_SECONDS / PASS)):
+            agent._clock.advance(PASS)
+            agent.poll()
+        assert agent._pending, "the ticket is still up"
+        assert all(frame == ticket for frame in screen.frames[since:]), (
+            "a board turn ended and took the ticket's screen")
 
 
 def test_an_item_this_font_cannot_draw_is_not_on_the_board():
@@ -468,3 +623,16 @@ def test_a_message_that_fits_only_below_legible_size_is_not_drawn_small(tmp_path
     assert message_layout(message, screen.geometry) is None
     screen.show(closed_frame_for(message, ("en",), screen.geometry))
     assert read_off(device, screen) == [DISPLAY_TEXT["display.lane_closed"]["en"]]
+
+
+def test_a_loop_too_slow_for_the_board_is_refused_at_start_by_name():
+    """F2: no interval the board cannot keep its turns at is left. The lane's
+    poll is not one (the tests above, at any poll); the agent's loop is, and the
+    service's own is checked at start."""
+    from gate_agent import cli
+
+    check_pass(cli.AGENT_PASS_SECONDS)
+    check_pass(PASS)
+    for slow in (BOARD_ITEM_SECONDS / 2, BOARD_ITEM_SECONDS, 30.0):
+        with pytest.raises(BoardTooSlow, match=r"the agent's loop pass is .* s: the board turns"):
+            check_pass(slow)

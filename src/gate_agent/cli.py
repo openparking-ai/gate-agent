@@ -41,6 +41,7 @@ from pathlib import Path
 from .agent import Agent, AudioMissing
 from .agent_service import AgentService
 from .agent_service import make_server as make_agent_server
+from .board import BoardTooSlow, check_pass
 from .capture import CaptureProcess, UnsupportedLaneContract
 from .capture_service import CaptureService
 from .capture_service import make_server as make_capture_server
@@ -178,6 +179,11 @@ def cmd_agent(args) -> int:
     print(opening_line(config))
 
     try:
+        check_pass(AGENT_PASS_SECONDS)
+    except BoardTooSlow as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+    try:
         agent.start()
     except AudioMissing as exc:
         print(f"\n{exc}\n", file=sys.stderr)
@@ -256,7 +262,13 @@ def _blank_displays(config: AgentConfig) -> None:
             )
 
 
-def _agent_forever(agent: Agent, stop: threading.Event, tick: float = 0.2) -> None:
+#: How often the agent's loop passes. It turns the lane screens' boards
+#: (`board.Rotation`) as well as the dialogue, and is checked at start against
+#: a board item's turn (`board.check_pass`).
+AGENT_PASS_SECONDS = 0.2
+
+
+def _agent_forever(agent: Agent, stop: threading.Event, tick: float = AGENT_PASS_SECONDS) -> None:
     """Advance the dialogue five times a second.
 
     Faster than the other two processes' loops, and it is the one number here

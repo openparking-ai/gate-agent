@@ -58,10 +58,10 @@ from time import monotonic
 
 from .act import LaneActClient, LaneActRefusedUs, LaneUnreachable
 from .board import (
+    Rotation,
     board_frame_for,
     closed_frame_for,
     closing_of,
-    item_now,
     items_of,
 )
 from .cases import LaneReading, decision_case, derive, offers_ticket
@@ -371,6 +371,9 @@ class Agent:
         #: The board items each lane publishes (`board`, U4c): the owner's
         #: messages in force and the lane's own price lines, in its order.
         self._board: dict[str, tuple] = {}
+        #: Each lane's board, turning on its own clock (`board.Rotation`): the
+        #: poll changes what is on it, `_turn_boards` turns it.
+        self._rotations: dict[str, Rotation] = {}
         #: Whether a LANE frame -- a fee, a closed lane's message or a board
         #: item -- is what this lane's screens were last given, so one that
         #: comes down blanks them once and an idle screen is left alone.
@@ -724,6 +727,7 @@ class Agent:
         # a record to write and a sentence somebody is waiting for.
         self._collect_pulses()
         self._follow_lanes()
+        self._turn_boards()
         self._advance()
 
     def _reconnect(self) -> None:
@@ -845,6 +849,7 @@ class Agent:
             self._fees[lane.name] = None
             self._closed[lane.name] = None
             self._board[lane.name] = ()
+            self._rotation(lane.name).update(())
             return
         fee = state.get("exit_fee")
         self._fees[lane.name] = screen_for(fee) if isinstance(fee, dict) else None
@@ -852,6 +857,7 @@ class Agent:
         # never from two different moments of the lane.
         self._closed[lane.name] = closing_of(state)
         self._board[lane.name] = items_of(state)
+        self._rotation(lane.name).update(self._board[lane.name])
 
     def _wanted(self, lane: str, ticket_up: bool) -> Frame:
         """`display.frame_wanted` for this lane, from what it last published."""
@@ -884,14 +890,36 @@ class Agent:
             lane, lambda geometry: closed_frame_for(message, languages, geometry)
         )
 
+    def _rotation(self, lane: str) -> Rotation:
+        return self._rotations.setdefault(lane, Rotation())
+
     def _show_board(self, lane: str) -> None:
         """The board item whose turn it is, on every screen at this lane. An item
         this screen cannot draw whole and legible leaves its turn black."""
-        item = item_now(self._board.get(lane, ()), self._clock())
+        item, _ = self._rotation(lane).turn(self._clock())
         if item is None:
             return
         languages = self.config.driver_languages
         self._show_lane_frame(lane, lambda geometry: board_frame_for(item, languages, geometry))
+
+    def _turn_boards(self) -> None:
+        """Every board that has its screen, turned on ITS OWN CLOCK, on every
+        pass of the loop -- not on the lane's poll, which only changes what is on
+        it. An item goes up when its turn starts and stays for the whole turn.
+        A board that lost its screen to a ticket, a fee or a closed lane's
+        message is paused, and its item gets a whole turn when it is back."""
+        now = self._clock()
+        languages = self.config.driver_languages
+        for lane in self._displays_at:
+            rotation = self._rotation(lane)
+            if self._wanted(lane, lane in self._pending) is not Frame.BOARD:
+                rotation.pause()
+                continue
+            item, new = rotation.turn(now)
+            if new and item is not None:
+                self._show_lane_frame(
+                    lane, lambda geometry, item=item: board_frame_for(item, languages, geometry)
+                )
 
     def _show_fee(self, lane: str) -> None:
         """The fee frame on every screen at this lane, geometry re-read first --

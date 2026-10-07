@@ -1490,8 +1490,75 @@ BREAKS = [
         "name": "the_last_board_item_is_starved",
         "why": "one of the owner's messages never gets its turn",
         "file": "src/gate_agent/board.py",
-        "from": "    return items[int(now // BOARD_ITEM_SECONDS) % len(items)]\n",
-        "to": "    return items[int(now // BOARD_ITEM_SECONDS) % max(1, len(items) - 1)]\n",
+        "from": "            self.index = (self.index + 1) % len(self.items)\n",
+        "to": "            self.index = (self.index + 1) % max(1, len(self.items) - 1)\n",
+    },
+    {
+        # U4c FIX ROUND, F2: the board turns on its own clock, not on the poll.
+        "name": "the_board_turns_on_the_poll",
+        "why": "at a poll of 8 s or more a board item is skipped, or one is shown forever",
+        "file": "src/gate_agent/agent.py",
+        # The gated code's way, both halves: the item picked by a clock cut into
+        # turns when the poll repaints, and no turn of the board's own.
+        "from": (
+            "        item, _ = self._rotation(lane).turn(self._clock())\n"
+            "        if item is None:\n"
+            "            return\n"
+            "        languages = self.config.driver_languages\n"
+            "        self._show_lane_frame(lane, lambda geometry:"
+            " board_frame_for(item, languages, geometry))\n"
+            "\n"
+            "    def _turn_boards(self) -> None:\n"
+            '        """Every board that has its screen, turned on ITS OWN CLOCK, on every\n'
+            "        pass of the loop -- not on the lane's poll, which only changes what is on\n"
+            "        it. An item goes up when its turn starts and stays for the whole turn.\n"
+            "        A board that lost its screen to a ticket, a fee or a closed lane's\n"
+            '        message is paused, and its item gets a whole turn when it is back."""\n'
+            "        now = self._clock()\n"
+        ),
+        "to": (
+            "        items = self._board.get(lane, ())\n"
+            "        item = items[int(self._clock() // 8.0) % len(items)] if items else None\n"
+            "        if item is None:\n"
+            "            return\n"
+            "        languages = self.config.driver_languages\n"
+            "        self._show_lane_frame(lane, lambda geometry:"
+            " board_frame_for(item, languages, geometry))\n"
+            "\n"
+            "    def _turn_boards(self) -> None:\n"
+            '        """Every board that has its screen, turned on ITS OWN CLOCK, on every\n'
+            "        pass of the loop -- not on the lane's poll, which only changes what is on\n"
+            "        it. An item goes up when its turn starts and stays for the whole turn.\n"
+            "        A board that lost its screen to a ticket, a fee or a closed lane's\n"
+            '        message is paused, and its item gets a whole turn when it is back."""\n'
+            "        return\n"
+        ),
+    },
+    {
+        "name": "a_fee_waits_for_the_board_turn",
+        "why": "a fee or a closed lane's message waits for a board item's turn to end",
+        "file": "src/gate_agent/agent.py",
+        "from": "        wanted = self._wanted(lane, lane in self._pending)\n"
+                "        if wanted is Frame.FEE:\n",
+        "to": "        wanted = self._wanted(lane, lane in self._pending)\n"
+              "        since = self._rotation(lane).since\n"
+              "        if wanted in (Frame.FEE, Frame.CLOSED) and since is not None"
+              " and self._clock() - since < 8.0:\n            return\n"
+              "        if wanted is Frame.FEE:\n",
+    },
+    {
+        "name": "a_board_turn_takes_a_tickets_screen",
+        "why": "a board item goes up over a ticket when its turn ends",
+        "file": "src/gate_agent/agent.py",
+        "from": "            if self._wanted(lane, lane in self._pending) is not Frame.BOARD:\n",
+        "to": "            if self._wanted(lane, False) is not Frame.BOARD:\n",
+    },
+    {
+        "name": "a_loop_too_slow_for_the_board_is_taken",
+        "why": "an agent whose loop passes slower than half a board turn starts anyway",
+        "file": "src/gate_agent/board.py",
+        "from": "    if not pass_seconds < BOARD_ITEM_SECONDS / 2:\n",
+        "to": "    if False:\n",
     },
     {
         "name": "the_price_ignores_the_lanes_digits",
