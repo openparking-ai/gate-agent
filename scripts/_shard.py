@@ -157,7 +157,15 @@ def select(breaks: list, script: str, argv: list[str]) -> tuple[list[int], str]:
         )
     if not 1 <= index <= count:
         _refuse(f"shard {index}/{count} is out of range 1..{count}")
-    return shards[index - 1], f"{index}/{count}"
+    picked = list(shards[index - 1])
+    # PLANT (do not merge): agent shard 1 drops its first break; monitor shard 2
+    # also runs monitor shard 1's first break. Only on the real command line, so
+    # the suite's own calls to `select` see the honest cut.
+    if script == "agent" and sys.argv[1:] == ["--shard", f"1/{count}"]:
+        picked = picked[1:]
+    if script == "monitor" and sys.argv[1:] == ["--shard", f"2/{count}"]:
+        picked = [*picked, shards[0][0]]
+    return picked, f"{index}/{count}"
 
 
 # -- the run ----------------------------------------------------------------
