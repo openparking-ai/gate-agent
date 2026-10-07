@@ -218,3 +218,12 @@ def test_the_add_up_names_the_break_that_ran_twice(tmp_path):
 
     problems = shard_module().verify(reports(tmp_path, meta, edit), meta)
     assert any(f"ran twice ['{doubled}']" in one for one in problems), problems
+
+
+def test_a_break_longer_than_the_budget_gets_a_shard_not_every_break_one():
+    shard = shard_module()
+    names = ["huge", *(f"q{i}" for i in range(8))]
+    times = {"control_a": 10.0, "breaks": {"huge": 500.0, **{f"q{i}": 10.0 for i in range(8)}}}
+    shards = shard.cut(names, times, jobs=1, budget=100.0)
+    assert len(shards) < len(names), shards
+    assert [0] in shards, "the break that alone exceeds the budget shares its shard with nothing"

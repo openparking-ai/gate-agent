@@ -17,8 +17,8 @@ measured break, so adding one leaves every shard as it was except the one it
 lands in. When that would cross the budget the count goes up by itself.
 
 **It runs `JOBS` breaks at once on one runner** (`--shard` only). The suite is
-mostly waiting -- 89 s of wall time for 52 s of CPU, measured -- so a runner can
-carry several. Two suites at once on one machine are NOT independent: three
+partly waiting -- 89 s of wall time for 52 s of CPU, measured on a laptop -- so a
+runner can carry more than one. Two suites at once on one machine are NOT independent: three
 tests bind the services' default ports (8092-8094), and six intact suites run
 side by side gave five red with `Address already in use`. So each suite runs in
 its OWN network namespace with only its own loopback, and its own `TMPDIR`. Where
@@ -55,14 +55,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-#: Breaks one runner runs at once under `--shard`. GitHub's hosted Linux runner
-#: for a public repository has 4 CPUs.
-JOBS = 4
+#: Breaks one runner runs at once under `--shard`. MEASURED, not chosen for the
+#: runner's 4 CPUs: at 4 at once (PR #18's first run) an INTACT suite went red
+#: in 4 of 72 control A runs -- `test_a_confirmed_record_is_settled_by_replaying_
+#: the_vend`, under load -- and a test that fails under load can make a break
+#: the suite does not catch read as caught. Control A runs in the pool with the
+#: breaks so that a load this suite cannot take shows up red, as it did.
+JOBS = 2
 #: The estimated time, in seconds, one shard's pool may take -- control A and
 #: its breaks -- before another shard is cut. Sized so the slowest job, with its
 #: minute or two of setup and a slow runner's spread on top, stays under 15
 #: minutes.
-BUDGET_S = 480
+BUDGET_S = 600
 #: Seconds assumed for a break, and for control A, before anything is measured.
 UNMEASURED_S = 240
 
@@ -116,6 +120,10 @@ def cut(
     new = [i for i, n in enumerate(names) if n not in breaks]
     cost = {i: breaks.get(n, default) for i, n in enumerate(names)}
 
+    # A break that alone takes longer than the budget cannot be cut smaller: the
+    # floor is that break beside control A. Without it the count would rise to
+    # one shard per break chasing a budget no cut can meet.
+    floor = max(budget, _pool(control_a, [max(cost.values(), default=0.0)], jobs))
     for count in range(1, len(names) + 1):
         shards: list[list[int]] = [[] for _ in range(count)]
         load = [0.0] * count
@@ -124,7 +132,7 @@ def cut(
             shards[lightest].append(index)
             load[lightest] += cost[index]
         worst = max(_pool(control_a, [cost[i] for i in one], jobs) for one in shards)
-        if worst <= budget or count == len(names):
+        if worst <= floor or count == len(names):
             return [sorted(one) for one in shards]
     raise AssertionError("unreachable")
 
@@ -183,6 +191,9 @@ def suite(directory: Path, command: list[str], isolated: bool) -> subprocess.Com
             "TMPDIR": scratch,
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.environ.get("HOME", ""),
+            # `sudo` sets these to root; pytest names its temporary root after them.
+            "USER": os.environ.get("USER", ""),
+            "LOGNAME": os.environ.get("LOGNAME", ""),
         }
         pinned = ["env", *(f"{key}={value}" for key, value in env.items()), *command]
         if isolated:
