@@ -49,7 +49,9 @@ ROOT = Path(__file__).resolve().parent.parent
 #: a shard's wall time nears two hours. RAISED TO 6 at U4c (2026-10-06): at 176
 #: breaks and 4 shards, PR #17's agent shards took up to 1h54m against the
 #: fail-control job's 120-minute limit; 6 is about 30 breaks a shard.
-SHARDS = 6
+#: RAISED TO 7 at the U4c fix round (2026-10-07): at 180 breaks, shard 6/6 on
+#: `25f723c` ran 1h56m against that same limit; 7 is at most 26 breaks a shard.
+SHARDS = 7
 
 BREAKS = [
     {
