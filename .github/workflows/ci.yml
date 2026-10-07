@@ -94,7 +94,11 @@ jobs:
     # The largest shard is 38 runs, about 70 minutes at the slow end. Two hours
     # is the budget a shard is sized against; past it, this reports a hang or a
     # shard that has outgrown its count rather than GitHub's six-hour kill.
-    timeout-minutes: 120
+    # RAISED TO 180 at the U4c fix round (2026-10-07): shards are cut by count,
+    # and the newest, costliest controls all land in the last agent shard, which
+    # ran 1h52m30s at 7 shards (`0e017da`, 3.12). Three hours is headroom until
+    # shards are cut by measured time; it still reports a hang well before six.
+    timeout-minutes: 180
     strategy:
       # A RED SHARD MAY NOT CANCEL ITS SIBLINGS, for the reason `test` gives:
       # a cancelled shard is a slice of breaks nobody measured.
