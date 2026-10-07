@@ -195,7 +195,16 @@ def suite(directory: Path, command: list[str], isolated: bool) -> subprocess.Com
             "USER": os.environ.get("USER", ""),
             "LOGNAME": os.environ.get("LOGNAME", ""),
         }
-        pinned = ["env", *(f"{key}={value}" for key, value in env.items()), *command]
+        # `CI` and `BUILD_NUMBER` OUT: pytest reads either as "on a CI system" and
+        # stops truncating assertion explanations, and a failing assertion on a
+        # frame then diffs the whole of it. Measured on `test_board.py` under
+        # `a_fee_waits_for_the_board_turn`: 210 s with `CI=true`, 10 s without,
+        # the same 2 failed and 56 passed. The judgement reads the summary line
+        # only, and nothing in this suite reads either variable.
+        pinned = [
+            "env", "-u", "CI", "-u", "BUILD_NUMBER",
+            *(f"{key}={value}" for key, value in env.items()), *command,
+        ]
         if isolated:
             argv = [
                 "sudo", "-n", "--preserve-env", "unshare", "--net", "--",

@@ -91,15 +91,13 @@ jobs:
     name: fail-control (${{ matrix.python-version }}, ${{ matrix.part.script }} ${{ matrix.part.index }}/${{ matrix.part.count }})
     needs: plan
     runs-on: ubuntu-latest
-    # Measured per staged suite run: 62 to 108 seconds (`b37c39b`, `ed9f859`).
-    # The largest shard is 38 runs, about 70 minutes at the slow end. Two hours
-    # is the budget a shard is sized against; past it, this reports a hang or a
-    # shard that has outgrown its count rather than GitHub's six-hour kill.
-    # RAISED TO 180 at the U4c fix round (2026-10-07): shards are cut by count,
-    # and the newest, costliest controls all land in the last agent shard, which
-    # ran 1h52m30s at 7 shards (`0e017da`, 3.12). Three hours is headroom until
-    # shards are cut by measured time; it still reports a hang well before six.
-    timeout-minutes: 180
+    # Each shard is cut to an estimated pool time of `_shard.BUDGET_S` (600 s),
+    # from measured per-break seconds; with setup, PR #18's runs put the slowest
+    # job at about 14 minutes. Thirty is twice the 15-minute target: past it,
+    # this reports a hang or a cut that no longer matches the measured times,
+    # long before GitHub's six-hour kill. (It was raised to 180 at U4c as a
+    # stopgap while shards were cut by count.)
+    timeout-minutes: 30
     strategy:
       # A RED SHARD MAY NOT CANCEL ITS SIBLINGS, for the reason `test` gives:
       # a cancelled shard is a slice of breaks nobody measured.
