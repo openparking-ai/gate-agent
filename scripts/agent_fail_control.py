@@ -27,7 +27,6 @@ break below would add half an hour to a check whose subject is elsewhere.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -35,23 +34,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _control import intact, judge  # noqa: E402
-from _shard import report, select  # noqa: E402
+from _shard import control, select  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: How many CI jobs this script is cut into, and THE ONE COPY of that number:
-#: the workflow builds its matrix from `--plan`, which prints it, and
-#: `_shard.select` refuses any other count it is handed. Chosen from
-#: measurement -- one break is one staged suite run, measured at 62 to 108
-#: seconds on GitHub's runners (`b37c39b`, `ed9f859`), and
-#: 145 breaks at `ed9f859` is at most 37 per shard, 38 suite runs with control
-#: A, about 70 minutes at the slow end against a six-hour ceiling. Raise it when
-#: a shard's wall time nears two hours. RAISED TO 6 at U4c (2026-10-06): at 176
-#: breaks and 4 shards, PR #17's agent shards took up to 1h54m against the
-#: fail-control job's 120-minute limit; 6 is about 30 breaks a shard.
-#: RAISED TO 7 at the U4c fix round (2026-10-07): at 180 breaks, shard 6/6 on
-#: `25f723c` ran 1h56m against that same limit; 7 is at most 26 breaks a shard.
-SHARDS = 7
+#: There is no shard count here. `_shard.cut` deals these breaks into CI jobs by
+#: the seconds each took, from `scripts/fail_control_times.json`, and the
+#: workflow reads the count it arrives at from `--plan`. A new break needs no
+#: entry there to run: it is costed as the slowest measured break until the
+#: file is refreshed from a CI run (`python scripts/_shard.py refresh <dirs>`).
+#: A break deleted from this list must leave that file too, or `--plan`
+#: refuses, naming it.
 
 BREAKS = [
     {
@@ -1647,56 +1640,22 @@ def stage() -> Path:
     return directory
 
 
-def run(directory: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-m", "not sip"],
-        cwd=directory,
-        capture_output=True,
-        text=True,
-    )
+#: The suite each break is measured with, run by `_shard.suite` in a staged copy.
+COMMAND = (
+    [sys.executable, "-m", "pytest", "-q", "-m", "not sip"]
+)
 
 
-INDICES, LABEL = select(BREAKS, SHARDS, sys.argv[1:])
-failures = 0
+INDICES, LABEL = select(BREAKS, "agent", sys.argv[1:])
 
-# CONTROL A RUNS IN EVERY SHARD, before any break is applied: each shard is its
+# CONTROL A RUNS IN EVERY SHARD, before any break is judged: each shard is its
 # own runner, and a break is only evidence against an intact suite measured on
-# the same machine.
-print("== control A: the suite must PASS intact ==")
-intact_dir = stage()
-try:
-    COLLECTED = intact(run(intact_dir))
-    if COLLECTED < 0:
-        failures += 1
-finally:
-    shutil.rmtree(intact_dir, ignore_errors=True)
-
-print(f"\n== control B: each break must make it FAIL — shard {LABEL} ==")
-ran = 0
-for number in INDICES:
-    brk = BREAKS[number]
-    ran += 1
-    directory = stage()
-    try:
-        path = directory / brk["file"]
-        source = path.read_text(encoding="utf-8")
-        if brk["from"] not in source:
-            # A break whose anchor has moved applies nothing, and the run then
-            # reports a passing suite as a failed control -- for the wrong
-            # reason. Named here so the two cannot be confused. The judgement
-            # below catches the OTHER shape of the same mistake: an anchor that
-            # is still there but whose replacement makes the suite ERROR.
-            print(f"  {brk['name']:38} *** ANCHOR NOT FOUND in {brk['file']} ***",
-                  file=sys.stderr)
-            failures += 1
-            continue
-        path.write_text(source.replace(brk["from"], brk["to"], 1), encoding="utf-8")
-        if not judge(brk["name"], brk["why"], COLLECTED, run(directory), width=38):
-            failures += 1
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
-
-report(ran, len(BREAKS), LABEL, INDICES)
+# the same machine. Under `--shard` it runs in the same pool as the breaks, at
+# the same load; with no argument everything runs one at a time, as before.
+failures = control(
+    "agent", BREAKS, INDICES, LABEL, stage, COMMAND, 38, intact, judge,
+    parallel=bool(sys.argv[1:]),
+)
 
 if failures:
     print(

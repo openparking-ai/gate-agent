@@ -107,7 +107,7 @@ def our_server(
 ):
     """`LaneService` on a socket, with every request recorded.
 
-    The recorder wraps `handle_one_request` rather than each `do_*`, so a method
+    The recorder wraps `parse_request` rather than each `do_*`, so a method
     the lane refuses is recorded exactly like one it serves -- an attempt that
     was refused is still an attempt, and it is the one worth catching.
     """
@@ -127,19 +127,29 @@ def our_server(
     )
     requests = Requests()
 
-    original = server.RequestHandlerClass.handle_one_request
+    original = server.RequestHandlerClass.parse_request
 
+    # RECORDED WHEN THE REQUEST IS READ, before the lane answers it. Recording
+    # after `handle_one_request` returned put the append AFTER the response had
+    # reached the client, so a test counting `seen` the moment its call came
+    # back could count before the server thread had written: measured as
+    # `test_a_confirmed_record_is_settled_by_replaying_the_vend` going red on an
+    # intact tree under CPU load (gate-agent PR #18), and every time with a
+    # 0.3 s sleep put between the two. `parse_request` is where `command` and
+    # `path` are set, so what is recorded is unchanged -- including a method
+    # the lane then refuses.
     def recording(self):
-        original(self)
+        parsed = original(self)
         command = getattr(self, "command", None)
         path = getattr(self, "path", None)
         if command and path:
             requests.seen.append((command, path.split("?")[0]))
+        return parsed
 
     server.RequestHandlerClass = type(
         "_RecordingHandler",
         (server.RequestHandlerClass,),
-        {"handle_one_request": recording},
+        {"parse_request": recording},
     )
     server.requests = requests
     return server
