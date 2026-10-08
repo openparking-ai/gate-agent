@@ -160,7 +160,15 @@ def select(breaks: list, script: str, argv: list[str]) -> tuple[list[int], str]:
         )
     if not 1 <= index <= count:
         _refuse(f"shard {index}/{count} is out of range 1..{count}")
-    return shards[index - 1], f"{index}/{count}"
+    picked = list(shards[index - 1])
+    # G2 PLANT (do not merge). Check 1: agent shard 3 drops its LAST break.
+    # Check 3: agent shard 4 also runs agent shard 5's last break. Only on the
+    # real command line, so the suite's own calls to `select` see the true cut.
+    if script == "agent" and sys.argv[1:] == ["--shard", f"3/{count}"]:
+        picked = picked[:-1]
+    if script == "agent" and sys.argv[1:] == ["--shard", f"4/{count}"]:
+        picked = sorted([*picked, shards[4][-1]])
+    return picked, f"{index}/{count}"
 
 
 # -- the run ----------------------------------------------------------------

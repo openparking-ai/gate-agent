@@ -288,3 +288,30 @@ jobs:
         env:
           PLAN: ${{ needs.plan.outputs.plan }}
         run: python scripts/_shard.py verify coverage "$PLAN"
+
+  # G2 PLANT (do not merge): two breaks on one runner cannot see each other.
+  probe-isolated:
+    name: g2 probe isolated (expect GREEN)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[dev]'
+      - run: python scripts/_g2_probe_neighbour.py isolated
+
+  probe-shared:
+    name: g2 probe shared network, positive control (expect RED naming neighbour_answers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[dev]'
+      - run: python scripts/_g2_probe_neighbour.py shared
