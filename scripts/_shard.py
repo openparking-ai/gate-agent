@@ -56,11 +56,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 #: Breaks one runner runs at once under `--shard`. MEASURED, not chosen for the
-#: runner's 4 CPUs: at 4 at once (PR #18's first run) an INTACT suite went red
-#: in 4 of 72 control A runs -- `test_a_confirmed_record_is_settled_by_replaying_
-#: the_vend`, under load -- and a test that fails under load can make a break
-#: the suite does not catch read as caught. Control A runs in the pool with the
-#: breaks so that a load this suite cannot take shows up red, as it did.
+#: runner's 4 CPUs. Under load an INTACT suite went red: 4 of 72 control A runs
+#: at 4 at once, 2 of 80 at 2 at once, always
+#: `test_a_confirmed_record_is_settled_by_replaying_the_vend`. That was a race in
+#: the fixture (`tests/ours.py` recorded a request after answering it) and it is
+#: fixed; 2 is what was measured clean apart from it, and a test that fails
+#: under load can make a break the suite does not catch read as caught. Control
+#: A runs in the pool with the breaks so that a load this suite cannot take
+#: shows up red, as it did.
 JOBS = 2
 #: The estimated time, in seconds, one shard's pool may take -- control A and
 #: its breaks -- before another shard is cut. Sized so the slowest job, with its
