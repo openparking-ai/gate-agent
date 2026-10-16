@@ -496,7 +496,9 @@ without adding it here.
     "lane_unreachable",
     "act_refused",
     "relay_failed",
-    "outcome_unknown"
+    "outcome_unknown",
+    "no_act_route",
+    "do_not_open"
   ],
   "shipped_languages": [
     "en",
@@ -1718,12 +1720,14 @@ ordinary path for those five and not a caveat about a rare one.
 | `presence_lost` | the lane says the car has gone, with no new decision behind it |
 | `lane_decided_again` | a new decision, or a reset cursor. **That and nothing else.** The ticket named the previous decision's moment and the lane refuses a completion naming anything else |
 | `restarted` | **no pending ticket survives a restart, by design** — and the record is now settled to say so at the next start, which is where this reason is written |
-| `display_unavailable` | the screen refused the frame or its geometry could not be read — at the mint, or on any later poll while the code was up |
+| `display_unavailable` | the screen refused the frame or its geometry could not be read — at the mint of a ticket OFFERED to the driver, or on any later poll while the code was up. **Not a ticket minted for a person's `OPEN_NOW` / `OPEN_AND_FLAG`**: see below |
 | `lane_refused` | the lane considered the completion and said no. Its own code is in `lane_answer`, verbatim |
 | `lane_unreachable` | the lane did not answer the vend, or answered a 5xx. There is no `lane_answer`, because there was no answer |
 | `act_refused` | a 401, a 403 or a 404 on the vend route: the lane would not consider it at all |
 | `relay_failed` | STANDALONE — the intercom's own relay did not pulse. `relay_pulse_failed` carries the cause |
 | `outcome_unknown` | a `confirmed` record found at startup whose vend could not be settled. **Not "it did not open"** — "this build cannot say either way", and `lane_answer` carries whatever the lane did say |
+| `no_act_route` | a press confirmed it at a lane this agent holds **no act token** for, so no vend was sent and none ever will be — the lane never learns of this ticket. Written at the press. It used to be left `confirmed`, and the next start wrote `outcome_unknown` over an outcome that was known |
+| `do_not_open` | the person on the call keyed `do_not_open`. A ticket left pending at that lane was one the driver's next press would have vended against what the person decided |
 
 **Six of these are round 7's, and five of them replace one wrong answer.**
 `lane_decided_again` used to be written for every outcome that was not a vend —
@@ -1773,6 +1777,12 @@ phone, because the screen is where a driver looks, and set when
 `ticket.on_screen` has FINISHED where somebody is. **A press confirms only a
 ticket with `told_at` set** — otherwise it is that sentence again, and the next
 press confirms.
+
+**Somebody is on the phone for as long as ANY call is up at that door**, not only
+before a person is rung. A ticket minted while a person is ringing, briefing or
+waiting for a digit is said to nobody — the person is in the case — and it is
+minted with `told_at` unset, so the driver's next press is told about it before
+it can confirm it. It used to be minted told, and that next press vended it.
 
 **What a press proves, exactly: that somebody at that barrier pressed.** Not
 that a CAR is there — that is the lane's question, read off its loop at vend
@@ -1868,6 +1878,35 @@ being uncertain.
 for that lane, or a standalone intercom with no relay — and it is not optional
 where it is true.
 
+**The person hears the lane's answer ON THEIR OWN CALL, and nobody is rung
+again.** `202`: `operator.vend_commanded`, and the case ends when that sentence
+has finished. `409`: `operator.ticket_refused` and the code's own sentence (or
+`operator.vend_refused.unknown`), as at a press. A `401`/`403`/`404` on the vend
+route: the same two, with the unknown sentence. A lane that did not answer:
+`operator_case.lane_unavailable`. After any of those the menu is read again on
+the same call and a digit is awaited — it still offers `OPEN_NOW`, which meets
+the same refusal unless the cause has changed. This used to go through the
+press's path to a person, which DIALLED the person again while their first call
+was still up: the answer was queued for a briefing they never heard, the first
+call was no longer the case's and was left live when the case ended, and this
+user agent's bridge is site-wide.
+
+**A screen that refuses the frame does not stop a person's open.** The record is
+written and the vend commanded as if the screen had shown it, and
+`display_unavailable` goes active. Only a ticket OFFERED to a driver is voided on
+a screen failure, because that one is a stay nobody can prove; a person has
+authorised this one, and the screen is only the driver's photograph. It used to
+void, and the person heard *"this entrance is not set up for this system to open
+it"* at a lane that could act.
+
+**The code comes off the screen.** A ticket used for a person's open is not
+pending, so nothing that clears pending tickets ever saw it: an idle lane showed
+it to the next car. It now stays up while the driver is told the outcome and
+comes down when the case ends; a ticket the lane refused comes down at once.
+
+**`do_not_open` voids any ticket pending at that lane**, reason `do_not_open`, so
+the driver's next press cannot vend it against what the person said.
+
 ## Standalone: the intercom's own relay
 
 Only where `lane = "none"`. **Where there is a lane the LANE moves its own
@@ -1924,7 +1963,10 @@ because there is no lane here and nothing answered but the relay.
 
 **The operator ALWAYS hears one of two sentences** — `operator.vend_commanded`
 or `operator.cannot_open` — and every exception the relay can raise is mapped to
-one of them. `urllib`'s own auth machinery raises for a challenge it cannot
+one of them. **The calls end only when that sentence has finished on the
+person's leg.** They used to end when the DRIVER's leg went quiet, and here the
+driver's sentence is over before the relay answers, so the person's was started
+and cut off in the same poll. `urllib`'s own auth machinery raises for a challenge it cannot
 parse, and a `Digest` challenge with no `realm` used to raise straight out of
 `poll()`: the barrier did not move, the person who had just authorised it was
 told nothing, the call was torn down in silence, neither relay code fired, and
