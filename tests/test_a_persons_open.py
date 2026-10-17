@@ -12,6 +12,8 @@ Against OUR REAL LANE, over a socket, as `test_ticket_flow.py` is. The questions
     pending, and nothing that clears pending tickets ever saw it.
   * **Does "do not open" hold?** A ticket at that lane cannot be vended by the
     driver's next press against what the person said.
+  * **Is a call that is closing somebody on the phone?** No: the next car's
+    code minted under its closing sentences is told, and one press vends it.
 """
 
 from __future__ import annotations
@@ -518,6 +520,68 @@ def test_do_not_open_voids_the_ticket_pending_at_that_lane(tmp_path):
         run(agent, 10)
         assert events_of(agent, AgentEventKind.VEND_COMMANDED) == []
         assert [one for one in server.requests.seen if one[0] == "POST"] == []
+
+
+def the_next_car_is_told_at_the_issue_and_one_press_vends(tmp_path, agent, ua, lane):
+    """Car one's call is CLOSING; the lane decides for car two NOW.
+
+    Car two's driver is on no call, so their code is told at the issue, as it
+    always was, and ONE press vends it: no `ticket.on_screen`, no second press.
+    """
+    assert agent.session is not None and agent.session.state.name == "CLOSING"
+    lane.run_once()
+    for _ in range(3):
+        agent.poll()
+    # STILL CLOSING when the code was minted: that is the case under test.
+    assert agent.session is not None and agent.session.state.name == "CLOSING"
+    issued = events_of(agent, AgentEventKind.TICKET_ISSUED)
+    assert issued, agent.events(0).to_dict()["events"]
+    next_car = issued[-1]["ticket_id"]
+    assert agent._pending["entry"].ticket.ticket_id == next_car
+    assert agent._pending["entry"].told_at is not None
+    assert TicketStore(tmp_path / "tickets").read(next_car).told_at is not None
+
+    # Car one's call ends; car two presses ONCE.
+    run(agent, 20)
+    assert agent.session is None
+    vends_before = len(events_of(agent, AgentEventKind.VEND_COMMANDED))
+    press(agent, ua, "driver-2")
+    assert events_of(agent, AgentEventKind.TICKET_ON_SCREEN) == []
+    commanded = events_of(agent, AgentEventKind.VEND_COMMANDED)
+    assert len(commanded) == vends_before + 1, agent.events(0).to_dict()["events"]
+    assert commanded[-1]["ticket_id"] == next_car
+    assert commanded[-1]["authorised_by"] == "display_code_confirmed"
+
+
+def test_a_ticket_minted_while_a_self_service_call_is_closing_is_told(tmp_path):
+    """Car one confirms its code and the vend is commanded; its call stays
+    CLOSING while `ticket.confirmed` and `ticket.vend_commanded` play. A
+    closing call is not somebody on the phone: the next car's code is told."""
+    server = our_server(lane := a_lane(), act_token=ACT_TOKEN, arrive=False)
+    with serving(server) as url:
+        agent, ua, _screen = an_agent(tmp_path, url)
+        arrive(agent, lane)
+        ua.incoming(INTERCOM, call_id="driver-1", account_user=INTERCOM_ACCOUNT)
+        agent.poll()
+        assert len(events_of(agent, AgentEventKind.VEND_COMMANDED)) == 1
+        the_next_car_is_told_at_the_issue_and_one_press_vends(tmp_path, agent, ua, lane)
+
+
+def test_a_ticket_minted_while_a_persons_open_is_closing_is_told(tmp_path):
+    """The same, after a person's `OPEN_NOW`: the vend is commanded and the
+    call is CLOSING while both of them hear so."""
+    server = our_server(lane := a_lane_that_denies_then_reads_nothing(),
+                        act_token=ACT_TOKEN, arrive=False)
+    with serving(server) as url:
+        agent, ua, _screen = an_agent(tmp_path, url)
+        arrive(agent, lane)
+        press(agent, ua)
+        operator = to_the_person(agent, ua)
+        ua.dtmf(operator, "1")
+        agent.poll()
+        assert [one["authorised_by"] for one in events_of(
+            agent, AgentEventKind.VEND_COMMANDED)] == ["human_open_now"]
+        the_next_car_is_told_at_the_issue_and_one_press_vends(tmp_path, agent, ua, lane)
 
 
 # ---------------------------------------------------------------------------

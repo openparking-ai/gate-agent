@@ -1778,11 +1778,16 @@ phone, because the screen is where a driver looks, and set when
 ticket with `told_at` set** — otherwise it is that sentence again, and the next
 press confirms.
 
-**Somebody is on the phone for as long as ANY call is up at that door**, not only
-before a person is rung. A ticket minted while a person is ringing, briefing or
-waiting for a digit is said to nobody — the person is in the case — and it is
-minted with `told_at` unset, so the driver's next press is told about it before
-it can confirm it. It used to be minted told, and that next press vended it.
+**Somebody is on the phone for as long as a call at that door is still in its
+case**, not only before a person is rung. A ticket minted while a person is
+ringing, briefing, waiting for a digit, holding or collecting a number is said to
+nobody — the person is in the case — and it is minted with `told_at` unset, so
+the driver's next press is told about it before it can confirm it. It used to be
+minted told, and that next press vended it. **A call that is closing does not
+count**: its case is decided and only its closing sentences are left
+(`ticket.confirmed`, `ticket.vend_commanded`, `ticket.on_screen`, an
+authorisation's sentence). A ticket minted then — usually the next car's — has
+`told_at` set at the issue, as before, and that driver's one press vends it.
 
 **What a press proves, exactly: that somebody at that barrier pressed.** Not
 that a CAR is there — that is the lane's question, read off its loop at vend

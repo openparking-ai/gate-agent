@@ -1088,15 +1088,23 @@ class Agent:
         # rather than to discover.
         door = self._screen_door_at(lane)
         speaking = self._call_being_spoken_at(door)
-        # **NOT TOLD WHILE ANY CALL IS UP AT THAT DOOR**, whatever state it is
-        # in. `speaking` is only a call that has not reached a person yet; one
-        # past that -- a person ringing, briefing, waiting for a digit -- is
-        # still somebody on the phone who never saw this code, and marking it
-        # told let their next press vend it against whatever the person said.
+        # **NOT TOLD WHILE A CALL AT THAT DOOR IS STILL IN ITS CASE.** `speaking`
+        # is only a call that has not reached a person yet; one past that -- a
+        # person ringing, briefing, waiting for a digit, holding, collecting a
+        # number -- is still somebody on the phone who never saw this code, and
+        # marking it told let their next press vend it against whatever the
+        # person said.
+        #
+        # **A CALL THAT IS CLOSING IS NOT.** Its case is decided and only its
+        # closing sentences are left (`ticket.confirmed`, `ticket.vend_commanded`,
+        # `ticket.on_screen`, an authorisation's sentence), and the code minted
+        # now is usually the NEXT car's, whose driver is on no call: it is told
+        # at the issue, as it always was, so their one press vends it.
         on_the_phone = (
             self.session is not None
             and door is not None
             and self.session.intercom.sip_uri == door
+            and self.session.state is not State.CLOSING
         )
         self._issue(lane, case, reading.decision_at, told=not on_the_phone)
         pending = self._pending.get(lane)

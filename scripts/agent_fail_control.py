@@ -1726,6 +1726,14 @@ BREAKS = [
         "to": "        self._issue(lane, case, reading.decision_at, told=speaking is None)",
     },
     {
+        "name": "a_ticket_minted_while_a_call_closes_is_untold",
+        "why": "the next car's code minted while the last call closes needs two presses",
+        "file": "src/gate_agent/agent.py",
+        "from": "            and self.session.intercom.sip_uri == door\n"
+                "            and self.session.state is not State.CLOSING\n",
+        "to": "            and self.session.intercom.sip_uri == door\n",
+    },
+    {
         "name": "do_not_open_leaves_the_ticket_pending",
         "why": "the person's 'do not open' leaves a ticket the next press vends",
         "file": "src/gate_agent/agent.py",
