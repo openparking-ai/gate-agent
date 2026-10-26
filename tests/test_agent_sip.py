@@ -774,3 +774,222 @@ def test_a_restarted_agent_releases_the_calls_the_previous_one_left(world, tmp_p
             first_ua.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+# ---------------------------------------------------------------------------
+# The control socket, against a real baresip 4.11.0 (OP-PYTHON-058, 061, 062, 063)
+# ---------------------------------------------------------------------------
+
+
+def an_agent_on(instance, person, tmp_path):
+    """The real `Agent` on a baresip of a test's OWN, which it may restart or
+    misconfigure without touching the world the other tests share."""
+    ua = BaresipUa(
+        host="127.0.0.1", port=instance.ctrl_port, operator_aor="sip:agent-op@127.0.0.1"
+    )
+    base = agent_config_for(tmp_path, standalone=True)
+    config = AgentConfig(
+        agent_id=base.agent_id,
+        site_id=base.site_id,
+        intercoms=(
+            Intercom(
+                sip_uri="sip:door1@127.0.0.1",
+                lane=None,
+                name_audio=wav(tmp_path / "site" / "door1.wav", seconds=0.4),
+                account_user=INTERCOM_ACCOUNT,
+            ),
+        ),
+        lanes=(),
+        user_agent=UserAgentSettings(
+            kind="baresip",
+            host="127.0.0.1",
+            port=instance.ctrl_port,
+            operator_aor="sip:agent-op@127.0.0.1",
+        ),
+        driver_languages=("en",),
+        operator_language="en",
+        authorisations=base.authorisations,
+        human_sip_uri=f"sip:duty@127.0.0.1:{person.sip_port}",
+        audio_directory=base.audio_directory,
+        no_answer_seconds=20.0,
+        nothing_usable_seconds=30.0,
+    )
+    agent = Agent(config, ua)
+    agent.start()
+    return agent, ua
+
+
+OWN_ACCOUNTS = [
+    f"<sip:{INTERCOM_ACCOUNT}@127.0.0.1>;regint=0;audio_codecs=pcmu;answermode=manual",
+    "<sip:agent-op@127.0.0.1>;regint=0;audio_codecs=pcmu;answermode=manual",
+]
+
+
+def test_the_agent_refuses_a_baresip_whose_control_socket_is_on_every_interface(
+    world, tmp_path
+):
+    """OP-PYTHON-058. baresip's own default for `ctrl_tcp_listen` is every
+    interface, and that socket lists every door's dial secret, places calls and
+    takes the agent's connection away. The agent reaching it on loopback said
+    nothing about where else it answered, and it started."""
+    from gate_agent.ua import UaMisconfigured
+    from gate_agent.ua_baresip import listening_off_loopback
+
+    _root, _registrar, ours, _intercom, _person, _stranger, _forger = world
+    exposed = Instance(tmp_path / "exposed-world", "exposed", accounts=OWN_ACCOUNTS)
+    config = exposed.root / "config"
+    loopback = "ctrl_tcp_listen         127.0.0.1:"
+    assert loopback in config.read_text()
+    config.write_text(config.read_text().replace(loopback, "ctrl_tcp_listen         0.0.0.0:"))
+    exposed.start()
+    try:
+        assert listening_off_loopback(exposed.ctrl_port), "baresip is not listening off loopback"
+        ua = BaresipUa(
+            host="127.0.0.1", port=exposed.ctrl_port, operator_aor="sip:agent-op@127.0.0.1"
+        )
+        try:
+            with pytest.raises(UaMisconfigured) as raised:
+                ua.start()
+            assert f"ctrl_tcp_listen 127.0.0.1:{exposed.ctrl_port}" in str(raised.value)
+        finally:
+            ua.close()
+    finally:
+        exposed.stop()
+    # THE CONTROL: the world's own baresip, on loopback, answers nowhere else --
+    # and every other test in this file starts an agent on it.
+    assert listening_off_loopback(ours.ctrl_port) == ()
+
+
+def test_a_baresip_restarted_mid_case_ends_the_case_and_the_next_driver_is_answered(
+    world, tmp_path
+):
+    """OP-PYTHON-061, the report's reproduction. A restarted baresip holds no
+    calls, so its reopened socket used to read as nothing to do: the case stayed
+    open on dead calls, the next driver was refused `busy`, and its timers rang
+    the person for a driver who had gone."""
+    _root, _registrar, _ours, intercom, person, _stranger, _forger = world
+    mine = Instance(tmp_path / "restart-world", "restarts", accounts=OWN_ACCOUNTS).start()
+    agent, ua = an_agent_on(mine, person, tmp_path)
+    caller = Ctrl(intercom.ctrl_port)
+
+    def code(name: str) -> str:
+        return [one for one in agent.health().to_dict()["codes"] if one["code"] == name][0][
+            "state"
+        ]
+
+    def kinds() -> list[str]:
+        return [event["kind"] for event in agent.events(0).to_dict()["events"]]
+
+    try:
+        caller.command("dial", f"sip:{INTERCOM_ACCOUNT}@127.0.0.1:{mine.sip_port}")
+        pump(agent, lambda: agent.session is not None, seconds=30)
+        first = agent.session.driver_call
+
+        # THE USER AGENT RESTARTS, under the case.
+        mine.stop()
+        mine.start()
+        pump(agent, lambda: code("ua_unreachable") == HealthState.ACTIVE.value, seconds=30)
+        pump(agent, lambda: code("ua_unreachable") == HealthState.OK.value, seconds=30)
+        assert agent.session is None, "the socket came back and the dead case is still open"
+        assert AgentEventKind.CASE_NOT_SPOKEN.value in kinds()
+        assert AgentEventKind.HUMAN_UNREACHABLE.value not in kinds()
+
+        # THE NEXT DRIVER IS ANSWERED.
+        caller.command("dial", f"sip:{INTERCOM_ACCOUNT}@127.0.0.1:{mine.sip_port}")
+        pump(agent, lambda: agent.session is not None, seconds=30)
+        assert agent.session.driver_call != first
+        assert AgentEventKind.CALL_REFUSED_BUSY.value not in kinds()
+    finally:
+        try:
+            caller.command("hangupall")
+        finally:
+            caller.close()
+            try:
+                ua.hangup_all()
+            except Exception:  # noqa: BLE001
+                pass
+            ua.close()
+            mine.stop()
+
+
+def test_hanging_up_a_call_baresip_no_longer_holds_ends_nothing_else(world, tmp_path):
+    """OP-PYTHON-063. Selecting a call baresip 4.11.0 no longer holds is refused
+    -- `command not found (callfind)` with no call up, `call not found` with one
+    -- and that refusal used to escape and throw away the rest of the batch. It
+    is a call already gone; and nothing is hung up instead, because `hangup`
+    with nothing selected ends whichever call is current."""
+    _root, _registrar, _ours, _intercom, person, _stranger, _forger = world
+    mine = Instance(tmp_path / "hangup-world", "hangs-up", accounts=OWN_ACCOUNTS).start()
+    agent, ua = an_agent_on(mine, person, tmp_path)
+    try:
+        ua.hangup("0123456789abcdef")                 # no call is up at all
+        live = ua.dial(f"sip:duty@127.0.0.1:{person.sip_port}")
+        pump(agent, lambda: live in {one.call_id for one in ua.calls()}, seconds=10)
+        ua.hangup("0123456789abcdef")                 # another call IS up
+        time.sleep(0.5)
+        agent.poll()
+        assert live in {one.call_id for one in ua.calls()}, (
+            "hanging up a call that is gone ended the live one"
+        )
+        ua.hangup(live)                               # the control: a held call goes
+        pump(agent, lambda: live not in {one.call_id for one in ua.calls()}, seconds=10)
+    finally:
+        try:
+            ua.hangup_all()
+        except Exception:  # noqa: BLE001
+            pass
+        ua.close()
+        mine.stop()
+
+
+def test_one_doors_lost_registration_is_not_cleared_by_anothers_refresh(world, tmp_path):
+    """OP-PYTHON-062, with the registrar this suite has: two accounts registered
+    at it, one of them then refused. The other one's next refresh used to put
+    `registered` back to true while the refused door's calls could not arrive."""
+    _root, registrar, _ours, _intercom, _person, _stranger, _forger = world
+    accounts = [
+        f"<sip:agent-door-a@127.0.0.1:{registrar.port}>;regint=60;audio_codecs=pcmu"
+        ";answermode=manual",
+        f"<sip:agent-door-b@127.0.0.1:{registrar.port}>;regint=60;audio_codecs=pcmu"
+        ";answermode=manual",
+    ]
+    two = Instance(tmp_path / "two-doors", "two-doors", accounts=accounts).start()
+    ua = BaresipUa(host="127.0.0.1", port=two.ctrl_port, operator_aor="sip:x@127.0.0.1")
+    try:
+        ua.start()
+
+        def settle_on(expected, seconds: float = 20.0) -> None:
+            deadline = time.time() + seconds
+            while time.time() < deadline:
+                ua.poll()
+                if ua.registered() is expected:
+                    return
+                time.sleep(0.2)
+            raise AssertionError(f"registered() never became {expected}: {ua.registered()}")
+
+        settle_on(True)
+        registrar.refuse_users = {"agent-door-a"}
+        ua._command("uareg", "1 0")                   # door a refreshes, and is refused
+        settle_on(False)
+        before = len(registrar.answered)
+        # Door b refreshes -- every second, at this interval -- and is accepted.
+        # Measured on 4.11.0: one `REGISTER_OK` naming door b's account each
+        # time, while `reginfo` says door a is `ERR`.
+        ua._command("uareg", "1 1")
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            ua.poll()
+            assert ua.registered() is False, "door b's refresh cleared door a's failure"
+            time.sleep(0.2)
+        accepted = [
+            to for to, status in registrar.answered[before:]
+            if "agent-door-b" in to and status == "200 OK"
+        ]
+        assert len(accepted) >= 2, "door b never refreshed, so this measured nothing"
+        registrar.refuse_users = set()                # and door a coming back clears it
+        ua._command("uareg", "1 0")
+        settle_on(True)
+    finally:
+        registrar.refuse_users = set()
+        ua.close()
+        two.stop()

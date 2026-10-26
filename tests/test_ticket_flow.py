@@ -685,6 +685,47 @@ def test_a_second_press_inside_the_help_window_is_a_person_and_never_a_second_ve
         assert [one for one in server.requests.seen if one[0] == "POST"] == posts
 
 
+def test_a_decision_already_completed_offers_no_second_ticket(tmp_path):
+    """OP-PYTHON-060, against OUR lane's own `decision.completed`.
+
+    The ticket was confirmed and vended, and the car is still there -- the boom
+    did not rise, say. A press after the help window used to mint a SECOND
+    ticket for the same decision and tell the driver to photograph it; the next
+    press was then refused `already_completed`, and they went to a person
+    holding a code that could never work. The lane says the decision is
+    completed, and now no second ticket is offered: the press is a case, and a
+    person.
+    """
+    server = our_server(lane := a_lane(), act_token=ACT_TOKEN, arrive=False)
+    with serving(server) as url:
+        agent, ua, _screen = agent_on(tmp_path, url)
+        arrive(agent, lane)
+        press(agent, ua, "driver-1")
+        assert len(events_of(agent, AgentEventKind.VEND_COMMANDED)) == 1
+        ua.closed("driver-1")
+        agent.poll()
+        assert agent.session is None
+        # THE LANE'S OWN WORD, read the way the agent reads it.
+        import urllib.request
+
+        with urllib.request.urlopen(f"{url}/v1/lane/state", timeout=5) as answer:
+            assert json.loads(answer.read())["decision"]["completed"] is True
+
+        # PAST THE HELP WINDOW, so this press is not help.
+        agent._clock.advance(agent.config.tickets.help_window_s + 1.0)
+        press(agent, ua, "driver-2")
+        for _ in range(40):
+            run(agent, 1)
+            if any(verb == "dial" for verb, _ in ua.commands):
+                break
+        assert len(events_of(agent, AgentEventKind.TICKET_ISSUED)) == 1, (
+            "a second ticket was offered for a decision the lane had already completed"
+        )
+        assert events_of(agent, AgentEventKind.TICKET_ON_SCREEN) == []
+        assert any(verb == "dial" for verb, _ in ua.commands), "the press found nobody"
+        assert len([one for one in server.requests.seen if one[0] == "POST"]) == 1
+
+
 def test_a_press_with_no_pending_ticket_is_round_five_exactly(tmp_path):
     """Nothing about this round reaches a door with no ticket up."""
     server = our_server(lane := a_lane("deny", None), act_token=ACT_TOKEN, arrive=False)

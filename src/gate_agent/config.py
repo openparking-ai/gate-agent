@@ -57,6 +57,7 @@ from .relay import (
     RELAY_KINDS,
     Relay,
 )
+from .service import is_loopback
 from .tickets import (
     DEFAULT_CONFIRM_WINDOW_S,
     DEFAULT_HELP_WINDOW_S,
@@ -2093,9 +2094,22 @@ def _user_agent(raw: dict) -> UserAgentSettings:
     port = raw.get("port", DEFAULT_UA_PORT)
     if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
         raise ConfigError(f"[user_agent].port must be a port number, got {port!r}")
+    host = str(raw.get("host", DEFAULT_UA_HOST))
+    if not is_loopback(host):
+        # THE CONTROL SOCKET IS LOCAL, and this is the half of that this file
+        # can see. It lists every intercom's dial secret and places calls, so a
+        # user agent this process reaches over the network is one the network
+        # reaches too. The other half -- where else the socket answers -- is
+        # asked of the running box at startup (`ua_baresip`).
+        raise ConfigError(
+            f"[user_agent].host is {host!r}. The user agent's control socket is reached on "
+            "loopback only: it gives up every intercom's dial secret and places calls, so "
+            "it is never put on a network. Run the user agent on this box with "
+            "`ctrl_tcp_listen 127.0.0.1:<port>` and set host = \"127.0.0.1\"."
+        )
     return UserAgentSettings(
         kind=kind,
-        host=str(raw.get("host", DEFAULT_UA_HOST)),
+        host=host,
         port=port,
         operator_aor=operator.strip(),
         timeout_seconds=_positive(

@@ -190,6 +190,14 @@ class LaneReading:
     #: no `lane` at all -- a lane older than the field has said nothing about
     #: closing.
     closed: bool = False
+    #: `decision.completed`, exactly as the lane published it: `True` once a
+    #: vend has completed THIS decision, `False` while it is open, `None` from a
+    #: lane that does not publish the field. A completed decision is consumed --
+    #: the lane refuses any further completion naming it `already_completed`.
+    completed: bool | None = None
+    #: What the lane says it IS on `GET /v1/lane`: `"entry"`, `"exit"`, or
+    #: `None` while this build has not been able to read it.
+    direction: str | None = None
 
 
 #: The one copy of what the comparison in `derive()` spans, published from here
@@ -363,6 +371,19 @@ def offers_ticket(
     # -- so a code put on the screen here is one the lane would refuse a moment
     # later, in front of a driver who photographed it.
     if reading.closed:
+        return False
+    # AN EXIT OFFERS NO TICKET. A ticket is a claim on one ARRIVAL, and the
+    # vend route completes an ENTRY: an exit lane serves none and says so
+    # (`can_vend: false`), so a code put on its screen was refused at the press
+    # after the driver had been told the ticket was confirmed. `None` -- a lane
+    # whose `GET /v1/lane` has not been read -- is not an exit.
+    if reading.direction == "exit":
+        return False
+    # A DECISION ALREADY COMPLETED OFFERS NO SECOND TICKET. The lane refuses
+    # any further completion naming it `already_completed`, so a second code
+    # for it is one the next press is refused for. `None` is a lane that does
+    # not publish the field, which has said nothing about it.
+    if reading.completed is True:
         return False
     return (
         decision_case(reading, now, max_age_seconds) in TICKET_CASES

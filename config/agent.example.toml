@@ -32,16 +32,19 @@ site_id = "site-1"
 # version is checked at startup and a version this build was not tested against
 # is refused.
 #
-# The baresip side needs things that are easy to get wrong, and THREE OF THEM
+# The baresip side needs things that are easy to get wrong, and FOUR OF THEM
 # ARE NOW CHECKED: the agent reads baresip's loaded configuration back out of
 # the running process at startup, over the same control socket, and refuses to
 # start naming the setting. That needs baresip's `debug_cmd` module, which
 # answers `config` and `modules` -- so it is an install requirement too, and the
 # agent refuses by name if it is missing.
-#   ctrl_tcp_listen        127.0.0.1:4444    # loopback. That socket can place a
-#                                            # call and bridge two of them.
-#                                            # NOT checked: the agent reaches it,
-#                                            # so it is on a socket by definition
+#   ctrl_tcp_listen        127.0.0.1:4444    # CHECKED: loopback ONLY. That
+#                                            # socket lists every intercom's
+#                                            # dial secret and places calls.
+#                                            # baresip's default is every
+#                                            # interface, and the agent refuses
+#                                            # to start while the port answers
+#                                            # on any address but loopback
 #   call_hold_other_calls  no                # CHECKED. Otherwise calling the
 #                                            # person puts the driver on hold
 #                                            # behind our back
@@ -63,6 +66,8 @@ site_id = "site-1"
 #                                            # anybody can open
 [user_agent]
 kind = "baresip"
+# LOOPBACK ONLY: any other host is refused at startup. The user agent runs on
+# this box, because its control socket is not something to put on a network.
 host = "127.0.0.1"
 port = 4444
 # The ONE account this agent DIALS OUT from. There is no driver account here:

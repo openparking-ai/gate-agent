@@ -1214,8 +1214,10 @@ BREAKS = [
         "why": "a display that dies between frames leaves a code the driver cannot see, a "
                "health surface saying ok, and a press that vends it",
         "file": "src/gate_agent/agent.py",
-        "from": "            self._reassert(lane.name)",
-        "to": "            pass",
+        # RE-ANCHORED 2026-10-17 (OP-PYTHON-057): a lane's round is applied in
+        # `_apply_round` now, off whichever pass it came back on.
+        "from": "        self._reassert(lane.name)",
+        "to": "        pass",
     },
     {
         "name": "the_geometry_is_read_once",
@@ -1366,19 +1368,23 @@ BREAKS = [
         "name": "the_fee_is_read_after_the_events",
         "why": "a ticket voided by the poll leaves its screen black instead of to the fee",
         "file": "src/gate_agent/agent.py",
-        "from": "            if shows:\n                self._read_fee(lane)\n"
-                "            self._poll_lane(lane)\n",
-        "to": "            self._poll_lane(lane)\n            if shows:\n"
-              "                self._read_fee(lane)\n",
+        # RE-ANCHORED 2026-10-17 (OP-PYTHON-057): the round READS the fee
+        # first on its worker, and this break applies it after the events.
+        "from": "        if round_.fee:\n            self._take_fee(lane, round_.fee_state)\n"
+                "        self._take_page(lane, round_)\n",
+        "to": "        self._take_page(lane, round_)\n        if round_.fee:\n"
+              "            self._take_fee(lane, round_.fee_state)\n",
     },
     {
         "name": "a_lane_that_cannot_be_read_takes_the_fee_down",
         "why": "silence is read as the car having gone",
         "file": "src/gate_agent/agent.py",
+        # RE-ANCHORED 2026-10-17 (OP-PYTHON-057): the read's failure arrives
+        # from the round as the exception itself.
         "from": "            log.warning(\"lane %s: the fee could not be read: %s\", "
-                "lane.name, exc)\n            return\n",
+                "lane.name, state)\n            return\n",
         "to": "            log.warning(\"lane %s: the fee could not be read: %s\", "
-              "lane.name, exc)\n            self._fees[lane.name] = None\n            return\n",
+              "lane.name, state)\n            self._fees[lane.name] = None\n            return\n",
     },
     {
         "name": "a_fee_takes_the_screen_from_a_ticket",
@@ -1763,6 +1769,107 @@ BREAKS = [
         "from": "        if pending.lane not in self._pending:\n"
                 "            self._blank(pending)",
         "to": "        self._blank(pending)",
+    },
+    # OP-PYTHON-057: a lane that stops answering holds up nothing but itself.
+    {
+        "name": "a_lane_read_holds_up_the_loop",
+        "why": "a lane that never answers holds every door's dialogue for its timeouts",
+        "file": "src/gate_agent/agent.py",
+        "from": "        start_read=on_a_thread,\n    ) -> None:",
+        "to": "        start_read=inline,\n    ) -> None:",
+    },
+    {
+        "name": "a_round_older_than_the_calls_read_is_applied",
+        "why": "a lane read from before the press puts up the old decision's code",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if round_.seq != self._lane_seq[lane.name]:\n"
+                "            self._lane_due[lane.name] = 0.0\n"
+                "            return\n",
+        "to": "",
+    },
+    # OP-PYTHON-058: the user agent's control socket is reachable on loopback only.
+    {
+        "name": "the_control_socket_may_answer_off_loopback",
+        "why": "the agent starts while the network can read every dial secret",
+        "file": "src/gate_agent/ua_baresip.py",
+        "from": "        self._refuse_an_exposed_socket()\n        self._open()",
+        "to": "        self._open()",
+    },
+    {
+        "name": "a_listener_on_every_interface_reads_as_local",
+        "why": "baresip's own default, every interface, passes the check",
+        "file": "src/gate_agent/ua_baresip.py",
+        "from": "            if not _is_loopback(listening):\n",
+        "to": "            if not _is_loopback(listening)"
+              " and listening not in (\"0.0.0.0\", \"::\"):\n",
+    },
+    {
+        "name": "a_networked_user_agent_host_is_accepted",
+        "why": "the agent drives a control socket on the network",
+        "file": "src/gate_agent/config.py",
+        "from": "    if not is_loopback(host):\n",
+        "to": "    if False:\n",
+    },
+    # OP-PYTHON-059 and 060: no ticket where the press cannot work.
+    {
+        "name": "an_exit_offers_a_ticket",
+        "why": "an exit puts an arrival ticket over its fee and refuses it at the press",
+        "file": "src/gate_agent/cases.py",
+        "from": "    if reading.direction == \"exit\":\n        return False\n",
+        "to": "",
+    },
+    {
+        "name": "a_completed_decision_offers_a_second_ticket",
+        "why": "a second code is offered for a decision the lane already completed",
+        "file": "src/gate_agent/cases.py",
+        "from": "    if reading.completed is True:\n        return False\n",
+        "to": "",
+    },
+    # OP-PYTHON-061: a reopen that finds no calls is still a reopen.
+    {
+        "name": "a_reopen_with_no_calls_keeps_the_case",
+        "why": "a restarted user agent leaves a dead case refusing every caller busy",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if calls is None:\n            return\n"
+                "        log.warning(\"the control socket came back",
+        "to": "        if not calls:\n            return\n"
+              "        log.warning(\"the control socket came back",
+    },
+    {
+        "name": "a_reopen_with_no_calls_reads_as_nothing_done",
+        "why": "the adapter reports a restarted user agent as nothing reopened",
+        "file": "src/gate_agent/ua_baresip.py",
+        "from": "        self._read_registration()\n        return self.calls()",
+        "to": "        self._read_registration()\n        return self.calls() or None",
+    },
+    # OP-PYTHON-062: registration is tracked account by account.
+    {
+        "name": "one_accounts_success_clears_anothers_failure",
+        "why": "another door's refresh hides a door whose calls never arrive",
+        "file": "src/gate_agent/ua_baresip.py",
+        "from": "            self._registered = _registration_of(self._registrations)\n"
+                "        with self._lock:",
+        "to": "            self._registered = kind is UaEventKind.REGISTERED\n"
+              "        with self._lock:",
+    },
+    # OP-PYTHON-063: one call event that raises does not take the rest.
+    {
+        "name": "one_failing_event_drops_the_batch",
+        "why": "an event that raises throws away the person's keyed digit behind it",
+        "file": "src/gate_agent/agent.py",
+        "from": "                if isinstance(exc, UaUnreachable)"
+                " and not isinstance(exc, UaRefused):\n",
+        "to": "                if True:\n",
+    },
+    {
+        "name": "a_gone_calls_hangup_is_an_error",
+        "why": "hanging up a call that is already gone raises out of the batch",
+        "file": "src/gate_agent/ua_baresip.py",
+        "from": "        try:\n            self._command(\"callfind\", call_id)\n"
+                "        except UaRefused as exc:\n"
+                "            log.info(\"call %s is already gone: %s\", call_id, exc)\n"
+                "        else:\n            self._command(\"hangup\")\n",
+        "to": "        self._command(\"callfind\", call_id)\n        self._command(\"hangup\")\n",
     },
 ]
 

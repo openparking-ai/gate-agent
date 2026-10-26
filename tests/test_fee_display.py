@@ -268,10 +268,60 @@ def is_fee(frame, fee_minor=1000) -> bool:
 
 
 def ticket_up(tmp_path, lane, url, screen):
+    """A ticket pending at this lane, over whatever else it publishes.
+
+    **At a lane that says it is an ENTRY**, because an exit offers no ticket:
+    a ticket is a claim on an arrival and an exit serves no vend route, so the
+    code it used to put up was refused at the press (`cases.offers_ticket`;
+    `test_an_exit_offers_no_ticket_and_its_fee_stays_up` is that half). What
+    the tests that call this rule on is the SCREEN -- which frame wins, and
+    what it hands back to -- and `display.frame_wanted` does not read the
+    direction, so the pair is driven where a ticket can be up at all.
+    """
+    lane.direction = "entry"
     agent = an_agent(tmp_path, url, screen, tickets=True)
     foreign_decides(agent, lane, "no_plate_read")
     assert len(events_of(agent, AgentEventKind.TICKET_ISSUED)) == 1
     return agent
+
+
+def test_an_exit_offers_no_ticket_and_its_fee_stays_up(tmp_path):
+    """OP-PYTHON-059. An exit lane with a fee on its screen and a plate it could
+    not read used to put an ARRIVAL ticket over the fee, tell the driver to
+    photograph it, confirm it at the press -- "I have your ticket" -- and send a
+    vend the exit refuses, because a ticket is a claim on an arrival and an exit
+    serves no vend route. The driver ended up with a person anyway.
+
+    Now the lane says what it is, once, on `GET /v1/lane`; an exit offers no
+    ticket; the fee keeps the screen; and the press goes to a person with the
+    case the lane decided, as every case with no ticket does.
+    """
+    from conftest import INTERCOM_ACCOUNT
+    from gate_agent.contract import AgentCase
+
+    lane = an_exit_lane()
+    screen = FakeScreen()
+    with serving(make_server(lane)) as url:
+        agent = an_agent(tmp_path, url, screen, tickets=True)
+        lane.exit_fee = a_fee(1000)
+        foreign_decides(agent, lane, "no_plate_read")
+        assert events_of(agent, AgentEventKind.TICKET_ISSUED) == []
+        assert screen.frames and is_fee(screen.frames[-1]), "the fee lost the screen"
+
+        ua = agent.ua
+        ua.incoming("sip:door1@10.0.0.9", call_id="driver-1", account_user=INTERCOM_ACCOUNT)
+        for _ in range(40):
+            agent.poll()
+            agent._clock.advance(2.0)
+            if any(verb == "dial" for verb, _ in ua.commands):
+                break
+        assert events_of(agent, AgentEventKind.TICKET_ISSUED) == []
+        assert events_of(agent, AgentEventKind.TICKET_ON_SCREEN) == []
+        assert agent.session.case is AgentCase.PLATE_NOT_READ
+        assert any(verb == "dial" for verb, _ in ua.commands), "nobody was called"
+        assert is_fee(screen.frames[-1])
+        # What the lane is was asked ONCE, not on every pass.
+        assert [path for _, path in lane.requests].count("/v1/lane") == 1
 
 
 def test_a_ticket_minted_over_a_fee_takes_the_screen(tmp_path):

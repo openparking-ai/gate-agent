@@ -382,15 +382,21 @@ def _shipped_audio():
     return Path(gate_agent.__file__).resolve().parent / "audio"
 
 
-def agent_for(config, user_agent=None, clock=None, now=None):
+def agent_for(config, user_agent=None, clock=None, now=None, start_read=None):
     """An `Agent` on a fake user agent and a clock a test can move.
 
     The fake is told which accounts the configuration declares, so that
     `Agent.start()`'s check finds them -- a test that means to measure the
     refusal sets `held_accounts` on the fake instead.
+
+    **Its lane reads are made `inline`**, before each `poll()` returns, because
+    every test here drives `poll()` by hand on a clock it moves and asserts
+    after each pass. The process reads its lanes ON THREADS
+    (`agent.on_a_thread`, the default); `test_lane_reads_off_the_loop.py` is
+    where that is measured, and a test that needs it passes `start_read`.
     """
     from fake_ua import FakeUa
-    from gate_agent.agent import Agent
+    from gate_agent.agent import Agent, inline
 
     user_agent = user_agent or FakeUa()
     if getattr(user_agent, "declared_accounts", None) == ():
@@ -402,6 +408,7 @@ def agent_for(config, user_agent=None, clock=None, now=None):
         user_agent,
         clock=clock or FakeClock(),
         now=now or FakeUtc(),
+        start_read=start_read or inline,
     )
     agent.start()
     return agent

@@ -235,7 +235,9 @@ class Registrar:
     `intercom_registration_lost` and cannot itself see.
 
     `refuse` makes it answer `403` instead: the control, and the only way to
-    watch a registration actually be lost.
+    watch a registration actually be lost. `refuse_users` does the same for the
+    named accounts only (their user parts), which is how one door's account is
+    lost while another's keeps registering.
     """
 
     def __init__(self) -> None:
@@ -244,7 +246,11 @@ class Registrar:
         self.sock.settimeout(0.2)
         self.port = self.sock.getsockname()[1]
         self.refuse = False
+        self.refuse_users: set[str] = set()
         self.registrations: list[str] = []
+        #: `(To header, status line)` for every REGISTER answered, so a test can
+        #: see WHICH account refreshed and what it was told.
+        self.answered: list[tuple[str, str]] = []
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._serve, daemon=True)
 
@@ -276,7 +282,11 @@ class Registrar:
                 break
             name, _, value = line.partition(":")
             headers.setdefault(name.strip().lower(), value.strip())
-        status = "403 Forbidden" if self.refuse else "200 OK"
+        refused = self.refuse or any(
+            f"sip:{user}@" in headers.get("to", "") for user in self.refuse_users
+        )
+        status = "403 Forbidden" if refused else "200 OK"
+        self.answered.append((headers.get("to", ""), status))
         lines = [f"SIP/2.0 {status}"]
         for name in ("via", "from"):
             if name in headers:
@@ -286,7 +296,7 @@ class Registrar:
         for name in ("call-id", "cseq"):
             if name in headers:
                 lines.append(f"{name.upper() if name == 'call-id' else 'CSeq'}: {headers[name]}")
-        if "contact" in headers and not self.refuse:
+        if "contact" in headers and not refused:
             lines.append(f"Contact: {headers['contact']};expires=60")
         lines += ["Content-Length: 0", "", ""]
         return "\r\n".join(lines)

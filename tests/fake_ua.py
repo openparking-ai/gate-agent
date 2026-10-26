@@ -160,14 +160,18 @@ class FakeUa:
         """
         self.commands.append(("close", ""))
 
-    def reconnect(self) -> tuple[UaCall, ...]:
-        """The seam's answer to a socket that was lost. Empty when nothing was.
+    def reconnect(self) -> tuple[UaCall, ...] | None:
+        """The seam's answer to a socket that was lost. `None` when nothing was.
+
+        `None` and `()` are different answers: `()` is a socket that was
+        REOPENED and holds no calls -- a user agent that restarted -- and the
+        agent ends whatever case was open on it. This base fake never loses its
+        socket, so there is never anything to reopen.
 
         The real adapter refuses to work at all until this succeeds, because its
-        socket is gone; `LosableUa` in `test_agent_contract.py` models that, and
-        this base fake never loses one.
+        socket is gone; `LosableUa` in `test_agent_contract.py` models that.
         """
-        return ()
+        return None
 
     # -- what a test drives it with ---------------------------------------
 

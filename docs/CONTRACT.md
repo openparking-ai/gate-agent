@@ -1669,6 +1669,20 @@ deciding nothing is coming. Only lanes where a ticket could be offered or a vend
 commanded are followed; a first read adopts the lane's cursor and acts on
 nothing already in the window, because those cars have gone.
 
+**Every lane is read OFF the loop that answers the intercom.** Each lane's reads
+for a turn of its `poll_seconds` run on a thread of their own, and the loop
+applies them when they are back; the read a call is answered on is made the same
+way, after the call arrives, and the call says nothing until it is back — as
+before. A lane that accepts a connection and never answers used to hold every
+pass of the loop for its timeouts, so a driver at ANOTHER door heard two
+sentences in ten seconds and every other caller was refused `busy` for minutes.
+Now it holds up only itself: it is not read again until its last read is back.
+What a read leads to — a cursor, a ticket, a void, a frame, a health code — is
+still done by the loop, in the same order, and a lane read that started before
+the read a call was answered on is dropped and made again rather than applied
+over it. The first read of a lane also asks `GET /v1/lane` what it is, and asks
+again after a cursor reset.
+
 **A ticket is offered when all of this is true**, and each clause is
 load-bearing:
 
@@ -1678,6 +1692,8 @@ load-bearing:
 | **the DECISION's** case is one of four | `identification_unavailable`, `plate_not_read`, `plate_unclear`, `vehicle_not_recognised` — the cases where the lane made a decision and could not say who this vehicle is |
 | the decision is not stale | past `[cases] decision_max_age_seconds` it was made for somebody else, and a ticket against it is a code on a screen for a car that has gone |
 | `decision.presence` is **`true`** | **`null` is not `true`.** An unmeasured presence is every lane by default (SETTLED 3f), and one putting a code on a screen is this project's own fraud arriving through a display instead of a loop |
+| `decision.completed` is not **`true`** | a completed decision is consumed: the lane refuses any further completion naming it `already_completed`, so a second code for it is one the next press is refused for. A lane that does not publish the field has said nothing, and is offered as before |
+| the lane is not an **exit** | `direction` on `GET /v1/lane`. A ticket is a claim on an ARRIVAL and the vend route completes an entry — an exit serves none (`can_vend: false`) — so the code it used to put over the exit's fee was confirmed at the press and refused. A lane whose `GET /v1/lane` could not be read is not an exit. An entry lane is offered a ticket whether or not it can vend, as before: there the ticket is the stay's identity while a person opens by hand |
 | the intercom at that lane declares a display | a ticket nobody can see is a stay nobody can prove |
 | `[tickets]` is declared | there is a key to sign one with |
 
@@ -2091,17 +2107,18 @@ older releases that do not carry the two modules this needs, so it is built from
 source at that tag on the target and on the CI runner.
 
 Seven things on the baresip side are load-bearing, and every one of them is
-configuration rather than code. **Four of them are now CHECKED, at startup, by
-reading the running process back** — `ctrl_tcp` answers `config` with the loaded
-settings, `modules` with the loaded module list, both from baresip's `debug_cmd`
-module (which is why that module is in the required list), and `reginfo` with
-every account it holds. The agent refuses to start on any of them, naming the
-setting or the intercom. Reproduce: `pytest -k baresip_configuration` and
-`pytest -k account`.
+configuration rather than code. **Five of them are now CHECKED, at startup** —
+four by reading the running process back: `ctrl_tcp` answers `config` with the
+loaded settings, `modules` with the loaded module list, both from baresip's
+`debug_cmd` module (which is why that module is in the required list), and
+`reginfo` with every account it holds; and one by asking this box where the
+control socket answers. The agent refuses to start on any of them, naming the
+setting or the intercom. Reproduce: `pytest -k baresip_configuration`,
+`pytest -k account` and `pytest -k loopback`.
 
 | | checked at startup? | |
 |---|---|---|
-| `ctrl_tcp_listen 127.0.0.1:4444` | no — the agent reaches it, so it is on a socket by definition | Loopback. That socket can place a call, bridge two of them, and play audio at whoever is on the line. baresip's own default is every interface. |
+| `ctrl_tcp_listen 127.0.0.1:4444` | **yes**, before the agent opens its own connection: on Linux from the kernel's table of listening sockets (`/proc/net/tcp`, `tcp6`), elsewhere by connecting to the port at every address the box can name for itself. **Any address but loopback is a refusal**, naming it; and `[user_agent] host` is refused unless it is loopback | Loopback ONLY. That socket lists every door's account — whose user part IS its dial secret — places calls (one placed to a door's own account is that door's press), bridges and plays audio, and a second client takes the agent's connection away. baresip's own default is every interface. Asked before the agent connects because `ctrl_tcp` takes one client, so a probe made after would be the second. |
 | `call_hold_other_calls no` | **yes**, read from `config` | baresip's default holds every other call when a new one is established, which would put the driver on hold the moment the agent calls the operator. |
 | an audio device that is **not** `aubridge` | **yes**, `audio_source` and `audio_player` read from `config` | baresip's own module documentation says what it is, verbatim: it "can be used to connect two audio devices together, so that all output to AUPLAY device is bridged as the input to a AUSRC device". That is every call bridged to every other one whether the agent asked or not. **What it then does to this agent is NOT MEASURED and no number here depends on it** — an earlier sentence claimed the operator heard the driver before `conference` was sent, and an independent session could not reproduce it. The refusal does not rest on that claim; it rests on what the module is. |
 | modules `ctrl_tcp`, `mixausrc`, `mixminus` (and `aufile`, `account`, `menu`, `debug_cmd`) | **yes** for the first three, read from `modules` | `mixausrc` is what plays one file into ONE leg; `mixminus` is what the bridge is; `debug_cmd` is what answers the two commands this check is made of. Without them the agent can answer a call and do nothing else. |
@@ -2130,7 +2147,20 @@ said while nobody was listening — so the session is dropped with
 `case_not_spoken`, and every call the user agent is still holding is dealt with
 by the same rule any new call gets: one still **ringing** is answered, and
 anything else is released rather than left live to be conferenced into the next
-case.
+case. **That is on every reopen, including one that finds no calls at all** — a
+user agent that RESTARTED holds none. A reopen that found none used to read as
+nothing to do, so the dead case stayed open: every new caller was refused
+`busy` while its timers rang a person for a driver who had gone.
+
+**One call event that cannot be handled does not take the rest with it.** The
+agent takes the user agent's whole queue of events at once and handles each on
+its own: one whose handling raises is logged, and the events behind it are still
+handled — it used to throw them away, and the one measured was the person's
+keyed digit. Hanging up a call the user agent no longer holds is not an error at
+all: baresip 4.11.0 refuses to select it (`call not found`, or `command not
+found (callfind)` when no call is up), the call is already gone, and nothing is
+hung up in its place. A lost socket still ends the pass, and the next one
+reopens it.
 
 **One account per leg, and the legs are on different ones.** baresip identifies
 the audio stream to play into by the local account, so two calls on one account
@@ -2593,7 +2623,7 @@ has been taken at it.
 
 | code | subject | what it means |
 |---|---|---|
-| `sip_registration_lost` | this agent | **This is the lane contract's `intercom_registration_lost`, measured where it can be measured.** A lane cannot see whether the agent is registered; the agent can. Both documents say so, in the same words. The subject is the agent rather than an account: it holds one account per intercom now and their user parts are the dial secrets, so naming them here would publish every one of them. Any account the user agent reports in error makes this `active`. `unknown` until the UA has said something — including the whole of a standalone site, which has no registrar to register with — because a registration nobody has heard about is not one known to be lost, and publishing the second pages somebody to a working site |
+| `sip_registration_lost` | this agent | **This is the lane contract's `intercom_registration_lost`, measured where it can be measured.** A lane cannot see whether the agent is registered; the agent can. Both documents say so, in the same words. The subject is the agent rather than an account: it holds one account per intercom now and their user parts are the dial secrets, so naming them here would publish every one of them. Any account the user agent reports in error makes this `active`, and it stays `active` until THAT account registers again: what the user agent says is kept account by account, so another account's next refresh does not clear it. `unknown` until the UA has said something — including the whole of a standalone site, which has no registrar to register with — because a registration nobody has heard about is not one known to be lost, and publishing the second pages somebody to a working site |
 | `ua_unreachable` | this agent | the user agent's control socket did not answer. The agent is up and cannot answer a call |
 | `ua_unsupported_version` | this agent | the UA is a version this build was not tested against |
 | `call_from_undeclared_intercom` | this agent | a call arrived at an account no `[intercoms.*]` owns, or the user agent refused one outright because it named no account it holds. **The subject is the agent and not the caller**: the caller's identity is a string the caller wrote, so keying the code on it would let anybody who can dial this agent add a row per identity they invented. It clears when a call at a DECLARED account is answered — which is a measurement, not a timer — and is `unknown` until either happens |

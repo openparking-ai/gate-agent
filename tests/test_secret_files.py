@@ -260,6 +260,10 @@ NOT_A_CREDENTIAL = {
     ("display.py", "read_geometry"): "a framebuffer's geometry, out of the driver's sysfs",
     ("display.py", "read"): "a framebuffer's geometry, out of the driver's sysfs",
     ("display.py", "show"): "a frame, and it is a WRITE to the screen",
+    ("ua_baresip.py", "_listeners_off_loopback"): (
+        "the kernel's table of listening sockets (`/proc/net/tcp`), for where the user "
+        "agent's control socket answers"
+    ),
 }
 
 

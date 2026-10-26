@@ -68,12 +68,15 @@ webhook sink from being able to reach one.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import re
 import socket
+import sys
 import threading
 from collections import deque
+from pathlib import Path
 from time import monotonic
 
 from .ua import (
@@ -196,8 +199,12 @@ class BaresipUa:
         connect=socket.create_connection,
         reconnect_seconds: float = DEFAULT_RECONNECT_SECONDS,
         clock=None,
+        exposed=None,
     ) -> None:
         self._address = (host, port)
+        #: What answers the question "can the control socket be reached from
+        #: the network?" -- `listening_off_loopback`, asked at `start()`.
+        self._exposed = exposed or listening_off_loopback
         #: The ONE account this process dials OUT from. There is no driver
         #: account here any more: the driver's leg is always inbound, and the
         #: account it arrived at is whichever intercom's it was addressed to.
@@ -222,6 +229,10 @@ class BaresipUa:
         #: known to be lost, and publishing the second would page somebody to a
         #: site that is working.
         self._registered: bool | None = None
+        #: What the user agent last said about EACH account's registration, by
+        #: user part -- never logged, never published: the user parts are the
+        #: dial secrets. `_registered` is derived from all of them.
+        self._registrations: dict[str, bool] = {}
         #: Which account each call belongs to, learnt from the events.
         self._accounts: dict[str, str] = {}
         #: The RTP CNAME of each call's audio stream, READ OUT OF THE USER AGENT
@@ -241,7 +252,9 @@ class BaresipUa:
     # -- the connection ----------------------------------------------------
 
     def start(self) -> None:
-        """Connect, learn the version, CHECK THE CONFIGURATION, and refuse."""
+        """Refuse an EXPOSED control socket, connect, learn the version, CHECK
+        THE CONFIGURATION, and refuse."""
+        self._refuse_an_exposed_socket()
         self._open()
         self._read_registration()
         self._check_configuration()
@@ -253,6 +266,34 @@ class BaresipUa:
                 "versioned contract, so a command that has been renamed or has grown a "
                 "parameter would be a call answered and then handled wrongly, with a "
                 "driver at the barrier."
+            )
+
+    def _refuse_an_exposed_socket(self) -> None:
+        """Refuse to start while the control socket answers OFF LOOPBACK.
+
+        **That socket is the whole intercom.** `reginfo` lists every door's
+        account, and an account's user part IS its dial secret; `dial` places a
+        call on the site's line, and one placed to a door's own account is that
+        door's press -- which confirms the code on its lane's screen; and a
+        second client takes this agent's own connection away (`ctrl_tcp`
+        accepts one). baresip's own default listens on EVERY interface, so a
+        laptop on the garage network had all of it. Nothing here used to check:
+        the agent reaching the socket on loopback says nothing about where else
+        it answers.
+
+        Asked BEFORE this process opens its own connection, because a probe
+        that reached baresip afterwards would be the second client.
+        """
+        port = self._address[1]
+        exposed = self._exposed(port)
+        if exposed:
+            raise UaMisconfigured(
+                f"the user agent's control socket (port {port}) can be reached off loopback, "
+                f"at {', '.join(exposed)}. Anything on that network could read every "
+                "intercom's dial secret, place calls on this site's line, and take this "
+                "agent's control connection away -- and baresip's own default listens on "
+                f"every interface. Set `ctrl_tcp_listen 127.0.0.1:{port}` in the user agent's "
+                "configuration. Refusing to start."
             )
 
     def _check_configuration(self) -> None:
@@ -389,15 +430,18 @@ class BaresipUa:
         self._retry_gap = min(max(self._retry_gap * 2, RECONNECT_FLOOR),
                               max(self.reconnect_seconds, RECONNECT_FLOOR))
 
-    def reconnect(self) -> tuple[UaCall, ...]:
+    def reconnect(self) -> tuple[UaCall, ...] | None:
         """Reopen the control socket if it is time to, and say what is up.
 
         Returns the calls the user agent is holding when a socket was actually
-        reopened, and an empty tuple otherwise -- so a caller can tell "there
-        was nothing to do" from "it came back and here is what it found".
+        reopened -- an EMPTY tuple when it holds none -- and `None` when there
+        was nothing to reopen, so a caller can tell "there was nothing to do"
+        from "it came back and here is what it found". They used to be the same
+        empty tuple, and a user agent that RESTARTED holds no calls: its reopen
+        read as nothing to do, and the case it had torn down stayed open.
         """
         if self._sock is not None:
-            return ()
+            return None
         if self._clock() < self._retry_at:
             raise UaUnreachable(
                 f"the user agent's control socket is not open; the next attempt to reopen "
@@ -454,19 +498,20 @@ class BaresipUa:
         code it exists to measure would be that it does not know.
 
         **It reads EVERY account, not one.** There is no single driver account
-        to key on since each intercom has its own, and the event path already
-        worked this way: any `REGISTER_FAIL` set this false whichever account it
-        was for. So: any account the user agent says is in error makes this
-        `False`; otherwise at least one saying `OK` makes it `True`; and an
-        account that has not tried -- the whole of a standalone site, which has
-        no registrar -- leaves it `None`. **`None` is never `False`:** a
-        registration nobody has heard about is not one known to be lost.
+        to key on since each intercom has its own. So: any account the user
+        agent says is in error makes this `False`; otherwise at least one saying
+        `OK` makes it `True`; and an account that has not tried -- the whole of
+        a standalone site, which has no registrar -- leaves it `None`. **`None`
+        is never `False`:** a registration nobody has heard about is not one
+        known to be lost. Each account's answer is KEPT, and the events update
+        it account by account (`_registration_of`), so a later success at one
+        account does not clear a failure at another.
         """
         try:
             data = _ANSI.sub("", self._command("reginfo"))
         except UaUnreachable:
             return
-        state: bool | None = None
+        registrations: dict[str, bool] = {}
         for line in data.splitlines():
             found = _REGINFO_LINE.search(line)
             if found is None:
@@ -476,12 +521,10 @@ class BaresipUa:
             # that refuses, and no registrar at all. Read from the field, not
             # searched for in the line: see the note on the pattern.
             reported = found.group("state")
-            if reported == "ERR":
-                self._registered = False
-                return
-            if reported == "OK":
-                state = True
-        self._registered = state
+            if reported in ("OK", "ERR"):
+                registrations[found.group("user")] = reported == "OK"
+        self._registrations = registrations
+        self._registered = _registration_of(registrations)
 
     def answer(self, call_id: str) -> None:
         self._command("accept", call_id)
@@ -544,9 +587,23 @@ class BaresipUa:
         self._command("conference")
 
     def hangup(self, call_id: str) -> None:
-        """End ONE call. Selected first, because the command acts on `current`."""
-        self._command("callfind", call_id)
-        self._command("hangup")
+        """End ONE call. Selected first, because the command acts on `current`.
+
+        **A call the user agent no longer holds is ALREADY GONE**, and that is
+        not a failure. Selecting it is refused -- measured on 4.11.0: `call not
+        found (id=...)` while any other call is up, `command not found
+        (callfind)` when none is, because the command only exists while there
+        is a call -- and that refusal used to escape and throw away every event
+        behind it in the batch. `hangup` is NOT sent then: with nothing
+        selected it acts on whatever call is current, which would be somebody
+        else's.
+        """
+        try:
+            self._command("callfind", call_id)
+        except UaRefused as exc:
+            log.info("call %s is already gone: %s", call_id, exc)
+        else:
+            self._command("hangup")
         self._accounts.pop(call_id, None)
         self._cnames.pop(call_id, None)
 
@@ -679,10 +736,15 @@ class BaresipUa:
         account = message.get("accountaor")
         if isinstance(call_id, str) and isinstance(account, str):
             self._accounts[call_id] = account
-        if kind is UaEventKind.REGISTERED:
-            self._registered = True
-        elif kind is UaEventKind.REGISTRATION_LOST:
-            self._registered = False
+        if kind in (UaEventKind.REGISTERED, UaEventKind.REGISTRATION_LOST):
+            # PER ACCOUNT, and the one answer is derived from all of them. It
+            # used to be one flag that any account's event set, so at a site
+            # with a registrar -- the operator's account and one per intercom --
+            # one door's account failing and ANOTHER's next refresh succeeding
+            # put `sip_registration_lost` back to ok while that door's calls
+            # never arrived. The startup read already worked this way.
+            self._registrations[_user_part(account) or ""] = kind is UaEventKind.REGISTERED
+            self._registered = _registration_of(self._registrations)
         with self._lock:
             self._events.append(
                 UaEvent(
@@ -729,6 +791,128 @@ class BaresipUa:
             )
 
 
+#: Where Linux lists every TCP socket on this box WITH THE ADDRESS IT IS BOUND
+#: TO. Read where it exists, because it answers the question exactly: a listener
+#: on `0.0.0.0` or `::` is on every interface, including ones this process could
+#: not name.
+PROC_NET = Path("/proc/net")
+
+#: The state `/proc/net/tcp` writes for a listening socket.
+_LISTEN = "0A"
+
+#: How long one probe connection may take, where there is no `/proc/net` to
+#: read. The address is this box's own, so an answer is immediate; this only
+#: bounds a filter that drops rather than refuses.
+PROBE_TIMEOUT = 1.0
+
+
+def listening_off_loopback(port: int, proc: Path = PROC_NET) -> tuple[str, ...]:
+    """Every address OTHER THAN LOOPBACK at which this box takes a TCP
+    connection on `port`. Empty is the answer the agent starts on.
+
+    From the kernel's own table where there is one (Linux, which is what a gate
+    box runs). Elsewhere, by connecting to `port` at each address this box can
+    name for itself: the source of its default routes, and what its host name
+    resolves to.
+    """
+    tables = [proc / "tcp", proc / "tcp6"]
+    if any(table.exists() for table in tables):
+        return _listeners_off_loopback(port, tables)
+    return _answering_off_loopback(port)
+
+
+def _listeners_off_loopback(port: int, tables) -> tuple[str, ...]:
+    found: set[str] = set()
+    for table in tables:
+        try:
+            rows = table.read_text(encoding="ascii", errors="replace").splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 4 or fields[3] != _LISTEN:
+                continue
+            address, _, hex_port = fields[1].partition(":")
+            try:
+                if int(hex_port, 16) != port:
+                    continue
+                listening = _proc_address(address)
+            except ValueError:
+                continue
+            if not _is_loopback(listening):
+                found.add(listening)
+    return tuple(sorted(found))
+
+
+def _proc_address(text: str) -> str:
+    """One `/proc/net/tcp*` address: 32-bit words in this machine's byte order."""
+    raw = bytes.fromhex(text)
+    if len(raw) not in (4, 16):
+        raise ValueError(f"not an address: {text!r}")
+    if sys.byteorder == "little":
+        raw = b"".join(raw[at : at + 4][::-1] for at in range(0, len(raw), 4))
+    family = socket.AF_INET if len(raw) == 4 else socket.AF_INET6
+    return socket.inet_ntop(family, raw)
+
+
+def _is_loopback(address: str) -> bool:
+    try:
+        parsed = ipaddress.ip_address(address.split("%")[0])
+    except ValueError:
+        return False
+    mapped = getattr(parsed, "ipv4_mapped", None)
+    return (mapped or parsed).is_loopback
+
+
+def _answering_off_loopback(port: int) -> tuple[str, ...]:
+    found = []
+    for address in _addresses_of_this_box():
+        try:
+            with socket.create_connection((address, port), timeout=PROBE_TIMEOUT):
+                found.append(address)
+        except OSError:
+            continue
+    return tuple(found)
+
+
+def _addresses_of_this_box() -> tuple[str, ...]:
+    """The addresses this box can name for itself, loopback left out."""
+    found: set[str] = set()
+    try:
+        for *_rest, sockaddr in socket.getaddrinfo(socket.gethostname(), None):
+            found.add(str(sockaddr[0]))
+    except OSError:
+        pass
+    # The source address of each default route, without sending anything: a
+    # UDP `connect` only chooses the route. The far ends are documentation
+    # addresses (RFC 5737, RFC 3849), so nothing is ever reached.
+    for family, far in ((socket.AF_INET, "192.0.2.1"), (socket.AF_INET6, "2001:db8::1")):
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as probe:
+                probe.connect((far, 9))
+                found.add(str(probe.getsockname()[0]))
+        except OSError:
+            continue
+    return tuple(sorted(one for one in found if _a_reachable_address(one)))
+
+
+def _a_reachable_address(address: str) -> bool:
+    try:
+        parsed = ipaddress.ip_address(address.split("%")[0])
+    except ValueError:
+        return False
+    return not _is_loopback(address) and not parsed.is_unspecified
+
+
+def _registration_of(registrations: dict[str, bool]) -> bool | None:
+    """The one answer, from every account's: any lost is lost, then any OK."""
+    if any(state is False for state in registrations.values()):
+        return False
+    if any(state is True for state in registrations.values()):
+        return True
+    return None
+
+
 def _user_part(aor) -> str | None:
     """The user part of an address of record, and nothing else of it.
 
@@ -762,10 +946,13 @@ __all__ = [
     "EVENT_KINDS",
     "FORBIDDEN_AUDIO_DRIVER",
     "INTROSPECTION_MODULE",
+    "PROBE_TIMEOUT",
+    "PROC_NET",
     "RECONNECT_FLOOR",
     "REQUIRED_MODULES",
     "SESSION_FAILED",
     "TESTED_VERSIONS",
     "UNKNOWN_ACCOUNT_STATUS",
     "BaresipUa",
+    "listening_off_loopback",
 ]

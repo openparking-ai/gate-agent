@@ -65,7 +65,7 @@ from .board import (
     items_of,
 )
 from .cases import LaneReading, decision_case, derive, offers_ticket
-from .client import ReadOnlyClient, TargetRefusedUs, TargetUnreachable
+from .client import ReadOnlyClient
 from .config import AgentConfig, Intercom
 from .contract import (
     ACTS,
@@ -124,6 +124,10 @@ class State(Enum):
     """Where one case has got to. One case at a time, so this is the agent's."""
 
     IDLE = auto()
+    #: The call is answered and its lane is being read, ON ANOTHER THREAD. The
+    #: case is derived from that one read when it arrives; until then nothing
+    #: is said, exactly as while the read used to block the whole loop.
+    READING_LANE = auto()
     #: Speaking the case to the driver, in every declared language.
     SPEAKING_CASE = auto()
     #: The operator's phone is ringing. `no_answer_seconds` is running.
@@ -236,6 +240,155 @@ class Pulse:
 
 
 @dataclass
+class LaneRound:
+    """One lane's reads for one turn of its `poll_seconds`, made OFF THE LOOP.
+
+    Every lane used to be read inline, on the one thread that also plays the
+    speech, reads the keys and runs every dialogue timer. A lane that accepts a
+    connection and never answers made each pass of that loop wait out its
+    timeouts -- about twenty seconds at the defaults -- so a driver at ANOTHER
+    door heard two sentences in ten seconds and every other caller was refused
+    `busy` for minutes. The relay was moved off that thread for this reason and
+    the lanes were not. Now each round runs on a thread of its own, the loop
+    applies it on a later pass, and a lane whose round is still out is simply
+    not read again until it is back: a wedged lane holds up nothing but itself.
+
+    THE WORKER ONLY READS. Everything a round's answers lead to -- a cursor, a
+    ticket, a void, a frame, a health code -- is done by the loop, on the
+    loop's thread, in the order `_follow_lanes` always did it.
+    """
+
+    lane: str
+    #: The cursor this round asks the lane's events from; `None` is the first
+    #: read, which adopts the lane's position and acts on nothing.
+    since: int | None
+    #: `Agent._lane_seq` for this lane when the round started. A read of the
+    #: same lane the loop began or acted on after that -- a call answered, a
+    #: person's open -- may be newer than anything this round holds.
+    seq: int
+    #: Whether `GET /v1/lane` -- what the lane IS -- is part of this round.
+    describe: bool = False
+    #: Whether this lane's fee, closed message and board are read (a screen).
+    fee: bool = False
+    #: Whether a ticket was pending at this lane when the round started, so the
+    #: lane is asked whether its car is still there when nothing new happened.
+    pending: bool = False
+    #: Whether an intercom sits at this lane, which is what a reading is for.
+    reads: bool = False
+    #: The answers: a payload, or the exception the read raised. `None` for a
+    #: read this round did not make.
+    description: object = None
+    fee_state: object = None
+    page: object = None
+    reading: object = None
+    thread: object = None
+    done: bool = False
+
+
+@dataclass
+class CallRead:
+    """THE read a call is answered on, made off the loop like a round.
+
+    One read for the whole of what follows -- the case, whether a ticket is
+    offered and what the vend will echo -- made AFTER the call arrived, as it
+    always was. Only where it waits changed: the call sits in
+    `State.READING_LANE` while the lane answers, and every other door and
+    screen goes on being served.
+    """
+
+    session: object
+    lane: str
+    #: `(state, health)`, or the exception the read raised.
+    raw: object = None
+    thread: object = None
+    done: bool = False
+
+
+def on_a_thread(name: str, work) -> threading.Thread:
+    """How a lane read is started: on a thread of its own, collected later.
+
+    NOT A DAEMON, for the reason `Pulse` gives: a daemon thread mid-request when
+    the interpreter starts finalising is the abort `tests/serving.py` exists
+    about, and this one is bounded by the lane's own `timeout_seconds`.
+    """
+    thread = threading.Thread(target=work, name=name, daemon=False)
+    thread.start()
+    return thread
+
+
+def inline(name: str, work) -> None:  # noqa: ARG001
+    """The same read, made BEFORE THIS RETURNS, so it is applied in the same pass.
+
+    For a caller that drives `Agent.poll()` by hand and asserts after each pass:
+    the order of every read and every act is then exactly the loop's. The
+    process itself never runs this way -- `cli` builds the agent with
+    `on_a_thread`, and that is the default.
+    """
+    work()
+
+
+def _attempt(client, path: str):
+    """One GET, or the exception it raised. Run on a worker thread."""
+    try:
+        return client.get(path)
+    except Exception as exc:  # noqa: BLE001
+        # EVERY failure is an answer the loop has to see. One that escaped the
+        # thread would leave its round `done` false and the lane unread for the
+        # life of the process.
+        return exc
+
+
+def _fetch_reading(client):
+    """`(state, health)` off a lane, or the exception the first failure raised.
+
+    State first and health only if state answered, which is the order the
+    loop always read them in.
+    """
+    state = _attempt(client, "/v1/lane/state")
+    if isinstance(state, Exception):
+        return state
+    health = _attempt(client, "/v1/lane/health")
+    if isinstance(health, Exception):
+        return health
+    return state, health
+
+
+def _wants_reading(round_: LaneRound) -> bool:
+    """Whether the loop would ask this lane for a reading after this page.
+
+    The same branches `_take_page` takes: a page it cannot read, a first read
+    and a reset act on nothing; a new decision is considered; a pending ticket
+    is checked when nothing new happened.
+    """
+    page = round_.page
+    if not isinstance(page, dict):
+        return False
+    cursor, events = page.get("cursor"), page.get("events")
+    if not isinstance(cursor, int) or isinstance(cursor, bool) or not isinstance(events, list):
+        return False
+    if round_.since is None or page.get("reset") or cursor < round_.since:
+        return False
+    decided = any(
+        isinstance(event, dict) and event.get("kind") == "decision" for event in events
+    )
+    return decided or round_.pending
+
+
+def _read_round(client, round_: LaneRound) -> None:
+    """Every read one round makes, in the order the loop made them."""
+    try:
+        if round_.describe:
+            round_.description = _attempt(client, "/v1/lane")
+        if round_.fee:
+            round_.fee_state = _attempt(client, "/v1/lane/state")
+        round_.page = _attempt(client, f"/v1/lane/events?since={round_.since or 0}")
+        if round_.reads and _wants_reading(round_):
+            round_.reading = _fetch_reading(client)
+    finally:
+        round_.done = True
+
+
+@dataclass
 class Session:
     """One case, from the moment a call is answered until the call ends."""
 
@@ -334,11 +487,27 @@ class Agent:
         clock=monotonic,
         now=utc_now,
         client_factory=ReadOnlyClient,
+        start_read=on_a_thread,
     ) -> None:
         self.config = config
         self.ua = user_agent
         self._clock = clock
         self._now = now
+        #: How a lane read is started: `on_a_thread`, or `inline` for a caller
+        #: that drives `poll()` by hand -- see `LaneRound`.
+        self._start_read = start_read
+        #: The round in flight at each lane, if any. One at a time per lane: a
+        #: lane whose round is still out is not read again until it is back.
+        self._rounds: dict[str, LaneRound] = {}
+        #: Bumped each time the LOOP begins, or acts on, a read of that lane of
+        #: its own (a call answered, a person's open), so a round that started
+        #: before is known to be older than it -- see `_apply_round`.
+        self._lane_seq: dict[str, int] = {lane.name: 0 for lane in config.lanes}
+        #: What each lane says it is on `GET /v1/lane` (`entry` / `exit`), read
+        #: on the first round and again after a reset. Absent until read.
+        self._directions: dict[str, str] = {}
+        #: The read the call in progress is waiting on, if any.
+        self._call_read: CallRead | None = None
         self._clients = {
             lane.name: client_factory(lane.url, lane.token, lane.timeout_seconds)
             for lane in config.lanes
@@ -730,7 +899,25 @@ class Agent:
             self._reconnect()
             return
         for event in events:
-            self._handle(event)
+            # EACH EVENT ON ITS OWN. The whole batch is taken off the user
+            # agent at once, so one event whose handling raised used to throw
+            # away every event behind it for good -- measured: a caller who
+            # cancelled at once, then the person's digit 4; the hang-up of the
+            # cancelled call was refused, and the digit was never handled.
+            try:
+                self._handle(event)
+            except Exception as exc:
+                if isinstance(exc, UaUnreachable) and not isinstance(exc, UaRefused):
+                    # THE SOCKET IS GONE, which is not one event's problem:
+                    # this poll stops, and the next one reopens it, as before.
+                    raise
+                log.exception(
+                    "handling a %s event raised; the rest of this batch is still handled",
+                    event.kind.value,
+                )
+        # The read a call is waiting on, BEFORE the lanes: it is the answer the
+        # driver is standing there for.
+        self._collect_call_read()
         self._registration_state()
         # BEFORE the lanes and before the dialogue: a pulse that has finished is
         # a record to write and a sentence somebody is waiting for.
@@ -748,6 +935,13 @@ class Agent:
         agent is still holding is dealt with by the same rule the agent applies
         to any new call -- one that is still RINGING is answered, and anything
         else is released.
+
+        **On EVERY reopen, including one that finds no calls at all.** `None`
+        is "nothing was reopened"; a tuple, empty or not, is a socket that came
+        back. A RESTARTED user agent holds no calls, and an empty answer used to
+        read as nothing to do: the old case stayed open with its dead calls, so
+        every new caller was refused `busy` while its timers rang a person for a
+        driver who had gone.
         """
         reconnect = getattr(self.ua, "reconnect", None)
         if reconnect is None:
@@ -757,7 +951,7 @@ class Agent:
         except UaUnreachable as exc:
             log.debug("the control socket is still down: %s", exc)
             return
-        if not calls:
+        if calls is None:
             return
         log.warning("the control socket came back; %d call(s) were held", len(calls))
         self._code(AgentCode.UA_UNREACHABLE, self.config.agent_id, HealthState.OK)
@@ -818,30 +1012,102 @@ class Agent:
         **THE FEE IS READ FIRST**, before the events: a new decision voids the
         ticket that was up, and the screen that ticket leaves has to go to the
         fee the lane is publishing NOW, not to the one it published a poll ago.
+
+        **THE READS ARE MADE OFF THIS THREAD** -- see `LaneRound`. A round is
+        started when the lane is due and none is out, and applied when it is
+        back: in this same pass where it was quick, on a later one where it was
+        not, and a lane that never answers holds up nothing but itself.
         """
+        self._collect_rounds()
         for lane in self.config.lanes:
             shows = bool(self._displays_at.get(lane.name))
             if not (self._offers_a_ticket_at(lane.name) or lane.can_act or shows):
+                continue
+            if lane.name in self._rounds:
+                # STILL OUT. Not read again until it is back: a second round
+                # behind a wedged one is a second thread waiting on it.
                 continue
             now = self._clock()
             if now < self._lane_due[lane.name]:
                 continue
             self._lane_due[lane.name] = now + lane.poll_seconds
-            if shows:
-                self._read_fee(lane)
-            self._poll_lane(lane)
-            # THE SAME CADENCE, and after whatever that read did: a ticket the
-            # poll has just voided is not redrawn, and a lane that could not be
-            # read does not stop the screen in front of the driver being
-            # checked.
-            self._reassert(lane.name)
-            if shows:
-                self._paint_fee(lane.name)
+            self._start_round(lane, shows)
+            self._collect_rounds()
         self._expire_tickets()
+
+    def _start_round(self, lane, shows: bool) -> None:
+        """This lane's reads for this turn, on a worker. The loop applies them."""
+        round_ = LaneRound(
+            lane=lane.name,
+            since=self._cursors[lane.name],
+            seq=self._lane_seq[lane.name],
+            describe=lane.name not in self._directions,
+            fee=shows,
+            pending=lane.name in self._pending,
+            reads=any(one.lane == lane.name for one in self.config.intercoms),
+        )
+        client = self._clients[lane.name]
+        self._rounds[lane.name] = round_
+        round_.thread = self._start_read(
+            f"lane-round-{lane.name}", lambda: _read_round(client, round_)
+        )
+
+    def _collect_rounds(self) -> None:
+        """Every round that is back, applied in the order of the lanes."""
+        for name, round_ in list(self._rounds.items()):
+            if not round_.done:
+                continue
+            del self._rounds[name]
+            if round_.thread is not None:
+                round_.thread.join(timeout=1.0)
+            self._apply_round(round_)
+
+    def _apply_round(self, round_: LaneRound) -> None:
+        """What one round's answers lead to. Everything `_follow_lanes` did.
+
+        **A ROUND OLDER THAN THE CALL'S OWN READ IS NOT APPLIED.** The loop
+        reads a lane itself when a call is answered and when a person opens,
+        and acts on that read -- a ticket minted at the press, one confirmed. A
+        round that started before that read began, or before it was acted on,
+        can hold a decision from before it: applied, it voided the code that
+        driver was just told about as `a new decision`, or put up a code for
+        the old decision for them to be told about instead. It is dropped
+        whole -- its cursor is not adopted -- and the lane is read again at
+        once. The loop used to read a lane only on its own thread, in order,
+        so this could not happen; with the reads on workers it is what keeps
+        that order.
+        """
+        lane = next(one for one in self.config.lanes if one.name == round_.lane)
+        if round_.seq != self._lane_seq[lane.name]:
+            self._lane_due[lane.name] = 0.0
+            return
+        if round_.describe:
+            self._learn_what_it_is(lane.name, round_.description)
+        if round_.fee:
+            self._take_fee(lane, round_.fee_state)
+        self._take_page(lane, round_)
+        # THE SAME CADENCE, and after whatever that read did: a ticket the
+        # poll has just voided is not redrawn, and a lane that could not be
+        # read does not stop the screen in front of the driver being
+        # checked.
+        self._reassert(lane.name)
+        if round_.fee:
+            self._paint_fee(lane.name)
+
+    def _learn_what_it_is(self, lane: str, description) -> None:
+        """`GET /v1/lane`'s `direction`, kept. Unread stays unknown, retried."""
+        if isinstance(description, Exception) or not isinstance(description, dict):
+            log.warning("lane %s: what it is could not be read: %s", lane, description)
+            return
+        direction = description.get("direction")
+        if description.get("contract_version") in KNOWN_LANE_VERSIONS and direction in (
+            "entry", "exit"
+        ):
+            self._directions[lane] = direction
 
     # -- the fee -------------------------------------------------------------
 
-    def _read_fee(self, lane) -> None:
+    def _take_fee(self, lane, state) -> None:
         """The lane's `exit_fee`, as the screen it becomes. GET only.
 
         A lane that cannot be read has said NOTHING, so what this agent last
@@ -849,10 +1115,8 @@ class Agent:
         on a version this build does not read has its fee dropped -- a payload
         this cannot interpret is not drawn from.
         """
-        try:
-            state = self._clients[lane.name].get("/v1/lane/state")
-        except (TargetUnreachable, TargetRefusedUs) as exc:
-            log.warning("lane %s: the fee could not be read: %s", lane.name, exc)
+        if isinstance(state, Exception) or not isinstance(state, dict):
+            log.warning("lane %s: the fee could not be read: %s", lane.name, state)
             return
         if state.get("contract_version") not in KNOWN_LANE_VERSIONS:
             self._fees[lane.name] = None
@@ -976,14 +1240,11 @@ class Agent:
             self._code(AgentCode.DISPLAY_UNAVAILABLE, screen.name, HealthState.OK)
         self._lane_drawn[lane] = True
 
-    def _poll_lane(self, lane) -> None:
+    def _take_page(self, lane, round_: LaneRound) -> None:
         """One read of a lane's events, and one of its state where a ticket is up."""
-        try:
-            page = self._clients[lane.name].get(
-                f"/v1/lane/events?since={self._cursors[lane.name] or 0}"
-            )
-        except (TargetUnreachable, TargetRefusedUs) as exc:
-            log.warning("lane %s could not be followed: %s", lane.name, exc)
+        page = round_.page
+        if isinstance(page, Exception) or not isinstance(page, dict):
+            log.warning("lane %s could not be followed: %s", lane.name, page)
             self._code(AgentCode.LANE_UNAVAILABLE, lane.name, HealthState.ACTIVE)
             return
         cursor = page.get("cursor")
@@ -1012,6 +1273,9 @@ class Agent:
             # its own contract. Either way nothing in the gap is acted on.
             log.warning("lane %s reset the cursor (%s -> %s)", lane.name, held, cursor)
             self._cursors[lane.name] = cursor
+            # A lane that reset may be a lane that restarted, so what it IS is
+            # read again on its next round.
+            self._directions.pop(lane.name, None)
             self._void_at(lane.name, "lane_decided_again")
             return
 
@@ -1019,23 +1283,26 @@ class Agent:
             isinstance(event, dict) and event.get("kind") == "decision" for event in events
         )
         self._cursors[lane.name] = cursor
+        reading = (
+            None if round_.reading is None
+            else self._reading_from(lane.name, round_.reading)
+        )
         if decided:
-            self._consider_ticket(lane.name)
-        elif lane.name in self._pending:
+            self._consider_ticket(lane.name, reading)
+        elif lane.name in self._pending and reading is not None:
             # NOTHING NEW, and a ticket is up. The lane is asked whether the car
             # is still there: presence can go false with no decision behind it --
             # the driver reversed away -- and a code on a screen for an empty
             # lane is a ticket the vend route would refuse `no_vehicle`.
-            self._check_pending(lane.name)
+            self._check_pending(lane.name, reading)
 
-    def _consider_ticket(self, lane: str) -> None:
+    def _consider_ticket(self, lane: str, reading: LaneReading | None) -> None:
         """A new decision at this lane. Void what was up, and maybe mint."""
         intercom = next(
             (one for one in self.config.intercoms if one.lane == lane), None
         )
-        if intercom is None:
+        if intercom is None or reading is None:
             return
-        reading = self._read_lane(intercom)
         pending = self._pending.get(lane)
         if (
             pending is not None
@@ -1307,13 +1574,12 @@ class Agent:
                     AgentCode.DISPLAY_UNAVAILABLE, screen.name, HealthState.ACTIVE
                 )
 
-    def _check_pending(self, lane: str) -> None:
+    def _check_pending(self, lane: str, reading: LaneReading) -> None:
         """Is the ticket on this lane's screen still about the car in front of it?"""
         pending = self._pending.get(lane)
         intercom = next((one for one in self.config.intercoms if one.lane == lane), None)
         if pending is None or intercom is None:
             return
-        reading = self._read_lane(intercom)
         if not reading.readable:
             # NOT a void. A lane that cannot be read has not said the car left,
             # and voiding on silence would take a ticket off a screen somebody
@@ -1526,8 +1792,56 @@ class Agent:
         # ONE LANE READ for the whole of what follows. The case, whether a
         # ticket is offered and what the vend will echo all come off the same
         # answer, so a driver cannot be told about one decision and vended
-        # against another.
-        reading = self._read_lane(intercom)
+        # against another. It is made NOW, after the call arrived, and OFF THIS
+        # THREAD -- see `CallRead` -- and the rest is `_answered`, when it is
+        # back.
+        if intercom.lane is None:
+            return self._answered(session, intercom, LaneReading(lane=None))
+        self._begin_call_read(session)
+
+    def _begin_call_read(self, session: Session) -> None:
+        """The answered call's lane, read on a worker. Nothing is said until it is back."""
+        lane = session.intercom.lane
+        session.state = State.READING_LANE
+        session.deadline = None
+        # A round of this lane that started before this read holds an answer
+        # from before the call, and this read is the one the call is answered
+        # on: see `_apply_round`. Bumped again when it is acted on.
+        self._lane_seq[lane] += 1
+        read = CallRead(session=session, lane=lane)
+        client = self._clients[lane]
+
+        def work() -> None:
+            try:
+                read.raw = _fetch_reading(client)
+            finally:
+                read.done = True
+
+        self._call_read = read
+        read.thread = self._start_read(f"lane-read-{lane}", work)
+        self._collect_call_read()
+
+    def _collect_call_read(self) -> None:
+        """The answered call's read, if it is back: the case, from it."""
+        read = self._call_read
+        if read is None or not read.done:
+            return
+        self._call_read = None
+        if read.thread is not None:
+            read.thread.join(timeout=1.0)
+        session = read.session
+        if self.session is not session or session.state is not State.READING_LANE:
+            # The call ended -- the driver hung up, the control socket was lost
+            # -- while its lane was being read. There is nobody to tell.
+            return
+        reading = self._reading_from(read.lane, read.raw)
+        # THE LOOP IS ABOUT TO ACT ON THIS READ, so a round of this lane that
+        # started before it is older than what is acted on: see `_apply_round`.
+        self._lane_seq[read.lane] += 1
+        self._answered(session, session.intercom, reading)
+
+    def _answered(self, session: Session, intercom: Intercom, reading: LaneReading) -> None:
+        """The rest of an answered call, from its one lane read."""
         now = datetime.now(UTC)
 
         # **HELP IS THE NEXT PRESS, and it is checked BEFORE the ticket.** A
@@ -1916,25 +2230,30 @@ class Agent:
         """
         if intercom.lane is None:
             return LaneReading(lane=None)
-        client = self._clients[intercom.lane]
-        try:
-            state = client.get("/v1/lane/state")
-            health = client.get("/v1/lane/health")
-        except (TargetUnreachable, TargetRefusedUs) as exc:
-            log.warning("lane %s could not be read: %s", intercom.lane, exc)
-            self._code(AgentCode.LANE_UNAVAILABLE, intercom.lane, HealthState.ACTIVE)
-            return LaneReading(lane=intercom.lane, readable=False)
+        return self._reading_from(intercom.lane, _fetch_reading(self._clients[intercom.lane]))
+
+    def _reading_from(self, lane: str, raw) -> LaneReading:
+        """`(state, health)` -- or the exception the read raised -- as a reading.
+
+        On the LOOP's thread, wherever the read itself was made: the health
+        code it sets and the reading it returns are the loop's to act on.
+        """
+        if isinstance(raw, Exception) or not isinstance(raw, tuple):
+            log.warning("lane %s could not be read: %s", lane, raw)
+            self._code(AgentCode.LANE_UNAVAILABLE, lane, HealthState.ACTIVE)
+            return LaneReading(lane=lane, readable=False)
+        state, health = raw
         version = state.get("contract_version")
         if version not in KNOWN_LANE_VERSIONS or health.get("contract_version") not in (
             KNOWN_LANE_VERSIONS
         ):
-            log.error("lane %s speaks contract version %r", intercom.lane, version)
-            self._code(AgentCode.LANE_UNAVAILABLE, intercom.lane, HealthState.ACTIVE)
-            return LaneReading(lane=intercom.lane, readable=False)
+            log.error("lane %s speaks contract version %r", lane, version)
+            self._code(AgentCode.LANE_UNAVAILABLE, lane, HealthState.ACTIVE)
+            return LaneReading(lane=lane, readable=False)
         codes = health.get("codes")
         if not isinstance(codes, list):
-            self._code(AgentCode.LANE_UNAVAILABLE, intercom.lane, HealthState.ACTIVE)
-            return LaneReading(lane=intercom.lane, readable=False)
+            self._code(AgentCode.LANE_UNAVAILABLE, lane, HealthState.ACTIVE)
+            return LaneReading(lane=lane, readable=False)
         malfunctions = []
         for entry in codes:
             if not isinstance(entry, dict):
@@ -1948,11 +2267,11 @@ class Agent:
                 entry.get("never_alarm") is False
             ):
                 malfunctions.append(str(entry.get("code")))
-        self._code(AgentCode.LANE_UNAVAILABLE, intercom.lane, HealthState.OK)
+        self._code(AgentCode.LANE_UNAVAILABLE, lane, HealthState.OK)
         decision = state.get("decision")
         transit = state.get("transit")
         return LaneReading(
-            lane=intercom.lane,
+            lane=lane,
             readable=True,
             outcome=_string(decision, "outcome"),
             reason=_string(decision, "reason"),
@@ -1970,6 +2289,12 @@ class Agent:
             # Closed by its owner (U4c), read by the screen's own reader, so the
             # call and the screen cannot disagree about whether it is.
             closed=closing_of(state) is not None,
+            # Whether a vend already completed this decision, as a BOOLEAN: a
+            # completed decision offers no second ticket (`offers_ticket`).
+            completed=_boolean(decision, "completed"),
+            # What the lane said it is on `GET /v1/lane`, when that was read:
+            # an exit offers no ticket (`offers_ticket`).
+            direction=self._directions.get(lane),
         )
 
     # -- the human ---------------------------------------------------------
@@ -2346,6 +2671,8 @@ class Agent:
         if intercom is None:
             return None
         reading = self._read_lane(intercom)
+        # Acted on now, so a round of this lane already out is older than it.
+        self._lane_seq[lane] += 1
         if not reading.readable or reading.decision_at is None:
             return None
         case = derive(
