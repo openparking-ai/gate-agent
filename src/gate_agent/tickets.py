@@ -388,6 +388,14 @@ VOID_REASONS: tuple[str, ...] = (
     #: build cannot say either way", which is why it is its own reason and why
     #: `lane_answer` carries whatever the lane did say.
     "outcome_unknown",
+    #: A press confirmed it at a lane this agent holds NO ACT TOKEN for, so no
+    #: vend was sent and none ever will be: the lane never learns of this
+    #: ticket. Closed at the press, because left `confirmed` it was replayed by
+    #: nothing at the next start and read `outcome_unknown` over a known one.
+    "no_act_route",
+    #: The person on the call keyed `do_not_open`. A ticket at that lane left
+    #: pending was one the driver's next press would vend against their word.
+    "do_not_open",
 )
 
 #: A ticket id is uppercase hex, and a record is named by it. The same shape

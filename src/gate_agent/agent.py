@@ -278,6 +278,15 @@ class Session:
     telling: object = None
     #: The relay pulse this call is waiting on, STANDALONE only.
     pulse: object = None
+    #: The ticket a PERSON's open vended, which is still on the screen so the
+    #: driver can photograph it while they are told the outcome. It comes down
+    #: when this case ends: nothing else clears it, because it is not pending,
+    #: and a code left up is the next car's to photograph.
+    shown: object = None
+    #: Whether the person who keyed an open has its OUTCOME still to hear --
+    #: `operator.vend_commanded` or `operator.cannot_open`. The case does not
+    #: end, and nobody is hung up, until that sentence has finished on their leg.
+    person_outcome: bool = False
     #: What the operator is told before the case, where this call is a driver
     #: calling back inside the help window: a line saying a ticket was just
     #: confirmed, and the line for whatever the vend answered.
@@ -1077,8 +1086,27 @@ class Agent:
         # IS SOMEBODY ALREADY ON THE PHONE AT THIS DOOR? Then the screen is not
         # where they are looking, and the ticket is theirs to be told about
         # rather than to discover.
-        speaking = self._call_being_spoken_at(self._screen_door_at(lane))
-        self._issue(lane, case, reading.decision_at, told=speaking is None)
+        door = self._screen_door_at(lane)
+        speaking = self._call_being_spoken_at(door)
+        # **NOT TOLD WHILE A CALL AT THAT DOOR IS STILL IN ITS CASE.** `speaking`
+        # is only a call that has not reached a person yet; one past that -- a
+        # person ringing, briefing, waiting for a digit, holding, collecting a
+        # number -- is still somebody on the phone who never saw this code, and
+        # marking it told let their next press vend it against whatever the
+        # person said.
+        #
+        # **A CALL THAT IS CLOSING IS NOT.** Its case is decided and only its
+        # closing sentences are left (`ticket.confirmed`, `ticket.vend_commanded`,
+        # `ticket.on_screen`, an authorisation's sentence), and the code minted
+        # now is usually the NEXT car's, whose driver is on no call: it is told
+        # at the issue, as it always was, so their one press vends it.
+        on_the_phone = (
+            self.session is not None
+            and door is not None
+            and self.session.intercom.sip_uri == door
+            and self.session.state is not State.CLOSING
+        )
+        self._issue(lane, case, reading.decision_at, told=not on_the_phone)
         pending = self._pending.get(lane)
         if speaking is None or pending is None:
             return
@@ -1097,6 +1125,7 @@ class Agent:
         decision_at: str,
         show: bool = True,
         told: bool = True,
+        screen_required: bool = True,
     ) -> None:
         """Mint, record, show. In that order, and the order is the guarantee.
 
@@ -1116,6 +1145,14 @@ class Agent:
         **`told=False` mints a ticket NOBODY HAS BEEN TOLD ABOUT**, which is
         what a mint during a live call is until the sentence saying so has
         finished playing. `told_at` is what a press is checked against.
+
+        **`screen_required=False` is a PERSON'S open**, and a screen that
+        refuses the frame does not void it. A self-service ticket nobody can see
+        is a stay nobody can prove, so that one is voided `display_unavailable`.
+        A person who keyed an open has authorised the barrier, and the screen
+        is only the driver's photograph: the record is written either way, and a
+        dead screen must not turn their open into `operator.cannot_open` at a
+        door that can act.
         """
         tickets = self.config.tickets
         told_at = self._now() if told else None
@@ -1146,7 +1183,7 @@ class Agent:
             displays=self._displays_at.get(lane, ()),
             told_at=told_at,
         )
-        if show and not self._show(pending):
+        if show and not self._show(pending) and screen_required:
             self._store.write(
                 voided(record, self._now(), "display_unavailable")
             )
@@ -1407,6 +1444,12 @@ class Agent:
                 self._end(session)
             elif event.call_id == session.operator_call:
                 session.operator_call = None
+                # NOTHING LEFT FOR THAT LEG CAN BE SAID. A line still queued for
+                # a person who has hung up waited out `line_timeout_seconds`,
+                # then raised `audio_playback_failed` and ended the case under
+                # the driver's own sentences.
+                session.speech[UaLeg.OPERATOR].clear()
+                session.line_due[UaLeg.OPERATOR] = None
                 if session.state in (State.BRIEFING, State.WAITING_DIGIT,
                                      State.COLLECTING_NUMBER):
                     self._nothing_usable(session, hung_up=True)
@@ -1630,7 +1673,9 @@ class Agent:
         self._blank(pending)
         self._command_vend(session, pending, "display_code_confirmed")
 
-    def _command_vend(self, session: Session, pending: Pending, authorised_by: str) -> None:
+    def _command_vend(
+        self, session: Session, pending: Pending, authorised_by: str, *, person: bool = False
+    ) -> None:
         """`POST /v1/lane/vend`, and whatever the lane says about it.
 
         **Every refusal is the LANE'S.** Nothing is checked here first: not
@@ -1638,12 +1683,23 @@ class Agent:
         second copy of those checks would be one that comes to disagree with the
         copy the barrier actually obeys, and the lane's own contract says why in
         its first paragraph.
+
+        **`person` is an open a PERSON keyed, and that person is ON THE LINE.**
+        At a press nobody is on the phone yet, so an answer that is not a vend
+        goes to a person through `_to_a_human`, which dials one. Reused for a
+        person already on the call, that dialled them AGAIN: the answer was
+        queued for a second briefing they never heard, and their first call
+        stayed up -- bridged, no longer the session's, and conferenced into the
+        next driver's case. So a person hears the answer on THEIR call.
         """
         client = self._acts.get(pending.lane)
         if client is None:
-            # READ-ONLY at this lane. The driver has a ticket and a person opens
-            # the barrier: the stay is identified either way, which is what the
-            # ticket was for.
+            # READ-ONLY at this lane: nothing was sent and nothing will be, so
+            # the lane never learns of this ticket and no stay is identified by
+            # it. The record is closed NOW, with that reason; left `confirmed`,
+            # a restart replayed nothing and wrote `outcome_unknown` over an
+            # outcome that was known.
+            self._finish_ticket(pending, "no_act_route", None)
             return self._to_a_human(session, ("operator.cannot_open",))
         try:
             answer = client.vend(
@@ -1660,11 +1716,19 @@ class Agent:
             # `act_refused`, and NOT `lane_decided_again`: the lane did not
             # decide anything, it would not consider the request at all.
             self._finish_ticket(pending, "act_refused", None)
+            if person:
+                return self._person_refused(
+                    session, pending, ("operator.ticket_refused", UNKNOWN_REFUSAL)
+                )
             return self._to_a_human(session, ())
         except LaneUnreachable as exc:
             log.error("lane %s could not be asked to vend: %s", pending.lane, exc)
             self._code(AgentCode.LANE_UNAVAILABLE, pending.lane, HealthState.ACTIVE)
             self._finish_ticket(pending, "lane_unreachable", None)
+            if person:
+                return self._person_refused(
+                    session, pending, ("operator_case.lane_unavailable",)
+                )
             return self._to_a_human(session, ())
         self._code(AgentCode.LANE_ACT_REFUSED, pending.lane, HealthState.OK)
 
@@ -1693,6 +1757,14 @@ class Agent:
             # measured a barrier moving: `boom_did_not_rise` is `no_source` on
             # the lane's own health surface.
             self._say(session, UaLeg.DRIVER, "ticket.vend_commanded")
+            if person:
+                # THE PERSON HEARS IT TOO, on their own call, and the case does
+                # not end under the sentence. They keyed the open; a call that
+                # simply ended told them nothing about what the lane said.
+                self._tell_person(session, "operator.vend_commanded")
+                # And the code stays up while the driver is told, then comes
+                # down with the case: see `Session.shown`.
+                session.shown = pending
             session.state = State.CLOSING
             session.deadline = None
             return
@@ -1737,7 +1809,48 @@ class Agent:
             UaLeg.DRIVER,
             told if told in self._durations_for_lines() else "ticket.vend_refused",
         )
+        if person:
+            return self._person_refused(session, pending, lines)
         self._to_a_human(session, lines)
+
+    def _person_refused(self, session: Session, pending: Pending, lines: tuple) -> None:
+        """A person's open that did not vend, told to THAT PERSON, on their call.
+
+        **Nobody is dialled.** They are on the line. They hear what the lane
+        answered and then the menu again, which still offers `OPEN_NOW`: the
+        lane applies its refusals to a person's completion exactly as to a
+        driver's, so it meets the same refusal unless the cause has changed.
+
+        The ticket is voided, so its code comes off the screen now.
+        """
+        self._take_down(pending)
+        for line in lines:
+            self._say(session, UaLeg.OPERATOR, line, operator=True)
+        self._menu(session)
+        # Keyed during the briefing, the two legs are not put together yet, and
+        # they are put together when this has been said -- as after a briefing.
+        # Either way `nothing_usable_seconds` starts when the menu has been
+        # read, as it does the first time: see `_advance`.
+        session.state = State.WAITING_DIGIT if session.bridged else State.BRIEFING
+        session.deadline = None
+
+    def _tell_person(self, session: Session, line: str) -> None:
+        """The OUTCOME of an open, to the person who keyed it.
+
+        Said on their leg, and the case waits for it: `_advance` hangs up only
+        when it has finished there. The calls used to end the moment the
+        DRIVER's leg went quiet, so at a standalone door -- where the driver's
+        sentence was over before the relay answered -- the person's sentence
+        was started and cut off in the same poll.
+        """
+        self._say(session, UaLeg.OPERATOR, line, operator=True)
+        session.person_outcome = True
+
+    def _take_down(self, pending: Pending) -> None:
+        """A ticket a person's open used comes off its screen, unless a NEWER
+        ticket is up at that lane: that one is somebody else's, and it stays."""
+        if pending.lane not in self._pending:
+            self._blank(pending)
 
     def _remember_help(self, session: Session, lines: tuple) -> None:
         """What the vend answered, onto the help window this call opened.
@@ -1957,6 +2070,12 @@ class Agent:
             # refusal are different acts, and one of them is not made safer by
             # being uncertain.
             return self._human_opens(session, value)
+        if value is Authorisation.DO_NOT_OPEN and session.intercom.lane is not None:
+            # **THE PERSON SAID NO, and a ticket at this lane would overturn
+            # it.** One minted while they were on the line, or one already up,
+            # used to stay pending -- so the driver's next press vended it
+            # against what the person had just decided.
+            self._void_at(session.intercom.lane, "do_not_open")
         self._say(session, UaLeg.DRIVER, f"authorisation.{value.value}")
         if value is Authorisation.HOLD:
             session.state = State.HOLDING
@@ -1992,14 +2111,13 @@ class Agent:
             # sentence, and it is not optional -- a person who believes a barrier
             # moved when it did not is worse off than one who was never called.
             self._say_authorisation(session, value, acting=False)
-            self._say(session, UaLeg.OPERATOR, "operator.cannot_open",
-                      operator=True)
+            self._tell_person(session, "operator.cannot_open")
             session.state = State.CLOSING
             return
         self._say_authorisation(session, value, acting=True)
         session.state = State.CLOSING
         session.deadline = None
-        self._command_vend(session, pending, ACTS[value])
+        self._command_vend(session, pending, ACTS[value], person=True)
 
     def _say_authorisation(self, session: Session, value: Authorisation, *,
                            acting: bool) -> None:
@@ -2039,8 +2157,7 @@ class Agent:
         relay = self._relays.get(session.intercom.sip_uri)
         if relay is None:
             self._say_authorisation(session, value, acting=False)
-            self._say(session, UaLeg.OPERATOR, "operator.cannot_open",
-                      operator=True)
+            self._tell_person(session, "operator.cannot_open")
             session.state = State.CLOSING
             return
         # THE RECORD, ALWAYS, AND BEFORE THE RELAY. Not only where a screen
@@ -2056,7 +2173,7 @@ class Agent:
             # would be one this site cannot prove it opened.
             log.error("no ticket record could be written; the relay is NOT pulsed")
             self._say_authorisation(session, value, acting=False)
-            self._say(session, UaLeg.OPERATOR, "operator.cannot_open", operator=True)
+            self._tell_person(session, "operator.cannot_open")
             session.state = State.CLOSING
             return
         # `TicketStore.write` renames a temporary file into place, which is the
@@ -2171,8 +2288,7 @@ class Agent:
             self._code(AgentCode.RELAY_UNREACHABLE, pulse.intercom, HealthState.OK)
             self._blank(pulse.pending)
             if speaking is not None:
-                self._say(speaking, UaLeg.OPERATOR, "operator.vend_commanded",
-                          operator=True)
+                self._tell_person(speaking, "operator.vend_commanded")
         else:
             log.error("the relay at %s did not pulse: %s", pulse.intercom, pulse.outcome)
             if record is not None:
@@ -2191,7 +2307,7 @@ class Agent:
                 self._code(pulse.code, pulse.intercom, HealthState.ACTIVE)
             self._blank(pulse.pending)
             if speaking is not None:
-                self._say(speaking, UaLeg.OPERATOR, "operator.cannot_open", operator=True)
+                self._tell_person(speaking, "operator.cannot_open")
         if speaking is not None:
             speaking.pulse = None
             speaking.state = State.CLOSING
@@ -2209,6 +2325,9 @@ class Agent:
             AgentCase.STANDALONE,
             self._now(),
             show=bool(intercom.display),
+            # A PERSON'S OPEN: a screen that refuses the frame does not stop
+            # the relay. The record is what has to exist first, not the frame.
+            screen_required=False,
         )
         return self._pending.pop(intercom.sip_uri, None)
 
@@ -2234,7 +2353,9 @@ class Agent:
             now=datetime.now(UTC),
             max_age_seconds=self.config.decision_max_age_seconds,
         )
-        self._issue(lane, case, reading.decision_at)
+        # A PERSON'S OPEN: a screen that refuses the frame does not void it, so
+        # a dead display cannot turn it into "not set up" at a lane that can act.
+        self._issue(lane, case, reading.decision_at, screen_required=False)
         return self._pending.pop(lane, None)
 
     def _finish_call_back(self, session: Session) -> None:
@@ -2330,6 +2451,16 @@ class Agent:
             session.state = State.WAITING_DIGIT
             session.deadline = now + self.config.nothing_usable_seconds
             return
+        if (
+            session.state is State.WAITING_DIGIT
+            and session.deadline is None
+            and self._silent(session, UaLeg.OPERATOR, now)
+        ):
+            # THE MENU HAS BEEN READ AGAIN, after an open that did not vend
+            # (`_person_refused`), and the person's time to key starts now --
+            # as it does after the briefing, not under the sentences.
+            session.deadline = now + self.config.nothing_usable_seconds
+            return
         if session.state in (State.WAITING_DIGIT, State.COLLECTING_NUMBER):
             if session.deadline is not None and now >= session.deadline:
                 self._nothing_usable(session)
@@ -2349,12 +2480,21 @@ class Agent:
                     "the relay at %s has not answered in %.0fs; the operator is told so",
                     session.intercom.sip_uri, self.config.nothing_usable_seconds,
                 )
-                self._say(session, UaLeg.OPERATOR, "operator.cannot_open", operator=True)
+                self._tell_person(session, "operator.cannot_open")
                 session.pulse = None
                 session.state = State.CLOSING
                 session.deadline = None
             return
         if session.state is State.CLOSING and self._silent(session, UaLeg.DRIVER, now):
+            if (
+                session.person_outcome
+                and session.operator_call is not None
+                and not self._silent(session, UaLeg.OPERATOR, now)
+            ):
+                # THE PERSON IS STILL BEING TOLD what their open came to. The
+                # driver's leg going quiet is not the end of the case while that
+                # sentence is playing; hanging up here cut it off.
+                return
             if session.telling is not None:
                 # THE SENTENCE HAS FINISHED, which is the only moment anything
                 # knows the driver heard where to look. Until now a press was
@@ -2543,6 +2683,12 @@ class Agent:
         session.speech[leg].append(path)
 
     def _end(self, session: Session) -> None:
+        if session.shown is not None:
+            # THE CODE A PERSON'S OPEN PUT UP comes down with the case. It is
+            # not pending, so nothing else ever cleared it, and an idle lane
+            # showed it to the next car.
+            self._take_down(session.shown)
+            session.shown = None
         self._record(
             AgentEventKind.CALL_ENDED,
             intercom=session.intercom.sip_uri,

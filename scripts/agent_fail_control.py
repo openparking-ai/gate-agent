@@ -260,9 +260,16 @@ BREAKS = [
         "name": "the_person_is_never_told_it_cannot_open",
         "why": "`open_now` is recorded and the person is left believing a barrier moved",
         "file": "src/gate_agent/agent.py",
-        "from": '            self._say(session, UaLeg.OPERATOR, "operator.cannot_open",\n'
-                "                      operator=True)",
-        "to": "            pass",
+        # Anchored on `_human_opens` by the line after it: the same call is
+        # made at the standalone door, and that one is not this break.
+        "from": '            self._tell_person(session, "operator.cannot_open")\n'
+                "            session.state = State.CLOSING\n"
+                "            return\n"
+                "        self._say_authorisation(session, value, acting=True)",
+        "to": "            pass\n"
+              "            session.state = State.CLOSING\n"
+              "            return\n"
+              "        self._say_authorisation(session, value, acting=True)",
     },
     {
         "name": "the_bridge_comes_first",
@@ -1614,6 +1621,148 @@ BREAKS = [
         "file": "scripts/check_screen_characters.py",
         "from": "    for character in sorted(theirs - ours):\n",
         "to": "    for character in sorted(set()):\n",
+    },
+    # A PERSON'S OPEN, from the side of the person who keyed it
+    # (`tests/test_a_persons_open.py`): told on their own call, never rung
+    # twice, not stopped by a dead screen, its code taken down; a ticket
+    # with no act route closed at the press; `do_not_open` holding.
+    {
+        "name": "a_refused_open_rings_the_person_again",
+        "why": "a person whose open the lane refused is rung again while still on the line",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if person:\n"
+                "            return self._person_refused(session, pending, lines)\n"
+                "        self._to_a_human(session, lines)",
+        "to": "        self._to_a_human(session, lines)",
+    },
+    {
+        "name": "an_unconsidered_act_rings_the_person_again",
+        "why": "a person whose open the lane would not consider is rung again, told nothing",
+        "file": "src/gate_agent/agent.py",
+        "from": "            if person:\n"
+                "                return self._person_refused(\n"
+                "                    session, pending, "
+                "(\"operator.ticket_refused\", UNKNOWN_REFUSAL)\n"
+                "                )\n",
+        "to": "",
+    },
+    {
+        "name": "an_unanswered_vend_rings_the_person_again",
+        "why": "a person whose open the lane did not answer is rung again, told nothing",
+        "file": "src/gate_agent/agent.py",
+        "from": "            if person:\n"
+                "                return self._person_refused(\n"
+                "                    session, pending, (\"operator_case.lane_unavailable\",)\n"
+                "                )\n",
+        "to": "",
+    },
+    {
+        "name": "the_person_is_not_told_the_vend_was_commanded",
+        "why": "the person who keyed an open never hears that the barrier was asked",
+        "file": "src/gate_agent/agent.py",
+        "from": "                self._tell_person(session, \"operator.vend_commanded\")\n"
+                "                # And the code stays up",
+        "to": "                # And the code stays up",
+    },
+    {
+        "name": "the_calls_end_under_the_persons_outcome",
+        "why": "the calls end while the person is still being told what their open came to",
+        "file": "src/gate_agent/agent.py",
+        "from": "            if (\n"
+                "                session.person_outcome\n"
+                "                and session.operator_call is not None",
+        "to": "            if (\n"
+              "                False\n"
+              "                and session.operator_call is not None",
+    },
+    {
+        "name": "the_menu_is_read_again_under_the_persons_timer",
+        "why": "the person's time to key runs out while the menu is still being read again",
+        "file": "src/gate_agent/agent.py",
+        "from": "        session.state = State.WAITING_DIGIT if session.bridged "
+                "else State.BRIEFING\n"
+                "        session.deadline = None\n",
+        "to": "        session.state = State.WAITING_DIGIT if session.bridged "
+              "else State.BRIEFING\n"
+              "        session.deadline = self._clock() + self.config.nothing_usable_seconds\n",
+    },
+    {
+        "name": "a_gone_persons_line_waits_out_the_timeout",
+        "why": "a line for a person who hung up fails the case under the driver's sentences",
+        "file": "src/gate_agent/agent.py",
+        "from": "                session.speech[UaLeg.OPERATOR].clear()\n"
+                "                session.line_due[UaLeg.OPERATOR] = None\n",
+        "to": "",
+    },
+    {
+        "name": "a_dead_screen_stops_a_persons_open",
+        "why": "a screen that refuses a frame turns a person's open into 'not set up'",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._issue(lane, case, reading.decision_at, screen_required=False)",
+        "to": "        self._issue(lane, case, reading.decision_at)",
+    },
+    {
+        "name": "a_dead_screen_stops_a_standalone_relay",
+        "why": "a screen that refuses a frame stops a standalone relay a person authorised",
+        "file": "src/gate_agent/agent.py",
+        "from": "            screen_required=False,\n"
+                "        )\n"
+                "        return self._pending.pop(intercom.sip_uri, None)",
+        "to": "        )\n"
+              "        return self._pending.pop(intercom.sip_uri, None)",
+    },
+    {
+        "name": "a_ticket_with_no_act_route_is_left_confirmed",
+        "why": "a ticket nothing was sent for stays confirmed and a restart calls it unknown",
+        "file": "src/gate_agent/agent.py",
+        "from": "            self._finish_ticket(pending, \"no_act_route\", None)\n",
+        "to": "",
+    },
+    {
+        "name": "a_ticket_minted_during_a_call_is_marked_told",
+        "why": "a code minted while a person is on the call is vended by the next press",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._issue(lane, case, reading.decision_at, told=not on_the_phone)",
+        "to": "        self._issue(lane, case, reading.decision_at, told=speaking is None)",
+    },
+    {
+        "name": "a_ticket_minted_while_a_call_closes_is_untold",
+        "why": "the next car's code minted while the last call closes needs two presses",
+        "file": "src/gate_agent/agent.py",
+        "from": "            and self.session.intercom.sip_uri == door\n"
+                "            and self.session.state is not State.CLOSING\n",
+        "to": "            and self.session.intercom.sip_uri == door\n",
+    },
+    {
+        "name": "do_not_open_leaves_the_ticket_pending",
+        "why": "the person's 'do not open' leaves a ticket the next press vends",
+        "file": "src/gate_agent/agent.py",
+        "from": "            self._void_at(session.intercom.lane, \"do_not_open\")\n",
+        "to": "            pass\n",
+    },
+    {
+        "name": "a_persons_ticket_stays_on_the_screen",
+        "why": "the code a person's open put up stays on an idle lane for the next car",
+        "file": "src/gate_agent/agent.py",
+        "from": "            self._take_down(session.shown)\n"
+                "            session.shown = None\n",
+        "to": "            session.shown = None\n",
+    },
+    {
+        "name": "a_refused_persons_ticket_stays_up",
+        "why": "a code the lane refused stays up for the driver to photograph",
+        "file": "src/gate_agent/agent.py",
+        "from": "        self._take_down(pending)\n"
+                "        for line in lines:",
+        "to": "        for line in lines:",
+    },
+    {
+        "name": "a_persons_ticket_coming_down_wipes_the_next_one",
+        "why": "taking the person's code down wipes the next car's ticket",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if pending.lane not in self._pending:\n"
+                "            self._blank(pending)",
+        "to": "        self._blank(pending)",
     },
 ]
 
