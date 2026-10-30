@@ -169,6 +169,11 @@ class MonitorCode(StrEnum):
     #: A sink could not deliver. Reported on this surface AND to every other
     #: sink that works -- never wrong silently applies to the messenger too.
     SINK_DELIVERY_FAILED = "sink_delivery_failed"
+    #: The durable record of what this monitor sent could not be written. The
+    #: MESSAGE STILL WENT OUT -- a record store that could stop a page is worse
+    #: than no record -- but the account a platform reads of it is now missing
+    #: from this box, and that is said rather than discovered at the exception.
+    RECORD_STORE_UNWRITABLE = "record_store_unwritable"
     #: A lane device the PLATFORM has not heard from for longer than this site
     #: allows. Derived from `lane_devices.last_seen_at`, which only the platform
     #: can see: a lane that has gone quiet is quiet, so the fault is invisible
@@ -243,6 +248,7 @@ MONITOR_SOURCES: dict[MonitorCode, Source] = {
     MonitorCode.AGENT_REFUSED_US: Source.MEASURED,
     MonitorCode.TARGET_CONTRACT_UNSUPPORTED: Source.MEASURED,
     MonitorCode.SINK_DELIVERY_FAILED: Source.MEASURED,
+    MonitorCode.RECORD_STORE_UNWRITABLE: Source.MEASURED,
     MonitorCode.LANE_GONE_QUIET: Source.MEASURED,
 }
 
@@ -411,6 +417,17 @@ class MonitorDescription:
     #: `reset` rather than served a short page. The lane contract publishes its
     #: own on `GET /v1/lane` for the same reason and in the same field name.
     event_window_depth: int = 0
+    #: `[notify] retry_attempts` and `retry_seconds`: how many more times a
+    #: delivery that failed is tried, and how far apart. Published because a
+    #: consumer of the message records reads `retrying` against them.
+    retry_attempts: int | None = None
+    retry_seconds: float | None = None
+    #: `[records] retention_days` and `max_bytes`: how long the record of what
+    #: this monitor sent is kept, and the most of it this box keeps. The
+    #: directory is NOT published: it is a path on a box, and a consumer reads
+    #: the records through `GET /v1/monitor/messages`, never off the disk.
+    record_retention_days: int | None = None
+    record_max_bytes: int | None = None
     contract_version: int = CONTRACT_VERSION
 
     def __post_init__(self) -> None:
@@ -440,6 +457,10 @@ class MonitorDescription:
             "site_id": self.site_id,
             "contract_version": self.contract_version,
             "event_window_depth": self.event_window_depth,
+            "retry_attempts": self.retry_attempts,
+            "retry_seconds": self.retry_seconds,
+            "record_retention_days": self.record_retention_days,
+            "record_max_bytes": self.record_max_bytes,
             "targets": [target.to_dict() for target in self.targets],
             "sinks": [sink.to_dict() for sink in self.sinks],
         }
@@ -570,6 +591,11 @@ class MonitorHealth:
 
     codes: tuple[MonitorEntry, ...] = field(default_factory=tuple)
     targets: tuple[TargetHealth, ...] = field(default_factory=tuple)
+    #: The message-record store, as READS: how much it holds, how old, and --
+    #: the reason it is on this route -- how many records its bounds have
+    #: removed and up to when, so a gap in the account is counted rather than
+    #: found. See `records.RecordStore.reads`.
+    records: dict | None = None
 
     def __post_init__(self) -> None:
         seen = [(entry.code, entry.subject) for entry in self.codes]
@@ -588,6 +614,7 @@ class MonitorHealth:
             "contract_version": CONTRACT_VERSION,
             "codes": [entry.to_dict() for entry in self.codes],
             "targets": [target.to_dict() for target in self.targets],
+            "records": self.records,
         }
 
 
@@ -690,6 +717,395 @@ class EventPage:
             "reset": self.reset,
             "dropped": self.dropped,
             "events": list(self.events),
+        }
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/monitor/messages -- the DURABLE record of every message it sent
+# ---------------------------------------------------------------------------
+
+
+class MessageKind(StrEnum):
+    """What a message record is a record OF. The webhook's own `kind`, reused.
+
+    The webhook already tells its receiver which of two things arrived, in this
+    word; the record says the same thing in the same word, so there is one
+    vocabulary for it and not two.
+    """
+
+    #: A transition: a code was raised, held, recovered, or stopped being
+    #: measured.
+    TRANSITION = "transition"
+    #: The one message at startup saying what nobody is measuring.
+    UNMEASURED = "unmeasured"
+
+
+#: Whose measurement a message is about. `monitor` is this monitor's own --
+#: `lane_unreachable`, `sink_delivery_failed`; `target` is a code a target
+#: published and this monitor passed through. They are published because two
+#: codes are spelt the same on both sides and mean different machines, and the
+#: record is read months later by somebody who was not there.
+RECORD_ORIGINS: tuple[str, ...] = ("monitor", "target")
+
+#: What a message record can say it is ABOUT: a declared target's kind, or this
+#: monitor itself -- a sink that cannot deliver, the record store, the startup
+#: message.
+RECORD_TARGET_KINDS: tuple[str, ...] = tuple(kind.value for kind in TargetKind) + ("monitor",)
+
+
+class DeliveryState(StrEnum):
+    """Where one sink's delivery of one message has got to."""
+
+    #: The record is written and the sink has not been tried yet. A record that
+    #: says this after a restart is one the last run did not finish, and it is
+    #: closed as `interrupted` at the next start rather than left to look live.
+    PENDING = "pending"
+    #: The sink accepted it -- SMTP's reply, the webhook's 2xx, the line written.
+    DELIVERED = "delivered"
+    #: It failed, and another attempt is due at `next_attempt_at`.
+    RETRYING = "retrying"
+    #: It failed, and no attempt is left.
+    FAILED = "failed"
+    #: The process stopped before this delivery finished. Nothing here can say
+    #: whether the last attempt reached anybody, so it says that.
+    INTERRUPTED = "interrupted"
+
+
+class DeliveryResult(StrEnum):
+    """What ONE attempt came to."""
+
+    ACCEPTED = "accepted"
+    FAILED = "failed"
+
+
+#: What a delivery can say about whether a PERSON acknowledged it. One value
+#: this version, and it is said rather than left out: no sink in this package
+#: carries an acknowledgement back -- SMTP has none, a webhook's 2xx is its
+#: receiver taking the request and not a person reading it, and a log line is
+#: read by whoever reads it. So every delivery is `not_acknowledged`, which
+#: means NOTHING TOLD US, not that nobody read it. A sink that can carry one
+#: adds `acknowledged` here, additively.
+ACKNOWLEDGEMENTS: tuple[str, ...] = ("not_acknowledged",)
+
+
+def _optional_iso(value, field_name: str) -> None:
+    if value is not None:
+        _iso_utc(value, field_name)
+
+
+def _optional_status(value, field_name: str, low: int, high: int) -> None:
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high
+    ):
+        raise ValueError(f"{field_name} must be a status code or null, got {value!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryAttempt:
+    """One try at one sink, with the evidence that sink gives and nothing more.
+
+    `reply_code` and `reply` are the SMTP server's answer to the message -- the
+    one the library raises on unless it is 250 -- and `http_status` is the
+    webhook receiver's. Each is `null` where the sink does not give it: the log
+    sink has no answer but "written", and a failure that never reached a server
+    has no status. `reason` is a plain sentence, on a failure only, and it never
+    carries an email address: the server's own words are reduced before they
+    are kept, because this text is logged as well as recorded.
+    """
+
+    at: str
+    result: str
+    reply_code: int | None = None
+    reply: str | None = None
+    http_status: int | None = None
+    reason: str | None = None
+    #: The recipients an SMTP server REFUSED while accepting the message for
+    #: the rest. A partial acceptance is still a message somebody did not get.
+    refused_recipients: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _iso_utc(self.at, "attempt.at")
+        if self.result not in tuple(one.value for one in DeliveryResult):
+            raise ValueError(f"result must be one of {tuple(DeliveryResult)}, got {self.result!r}")
+        _optional_status(self.reply_code, "reply_code", 200, 599)
+        _optional_status(self.http_status, "http_status", 100, 599)
+        if self.result == DeliveryResult.FAILED and not self.reason:
+            raise ValueError("a failed attempt carries a reason; a failure with none is a guess")
+
+    def to_dict(self) -> dict:
+        return {
+            "at": self.at,
+            "result": self.result,
+            "reply_code": self.reply_code,
+            "reply": self.reply,
+            "http_status": self.http_status,
+            "reason": self.reason,
+            "refused_recipients": list(self.refused_recipients),
+        }
+
+    @classmethod
+    def from_dict(cls, body: dict) -> DeliveryAttempt:
+        return cls(
+            at=body["at"],
+            result=body["result"],
+            reply_code=body.get("reply_code"),
+            reply=body.get("reply"),
+            http_status=body.get("http_status"),
+            reason=body.get("reason"),
+            refused_recipients=tuple(body.get("refused_recipients") or ()),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Delivery:
+    """One sink's part in one message: who it was for, and what became of it.
+
+    `recipients` is the recipient AS CONFIGURED: the addresses an email sink
+    sends to, the host a webhook posts to -- never its path or query, which can
+    carry a token -- and nothing for the log sink, which has nobody behind it.
+    `recipient_configured` is false exactly then, and a message whose every
+    delivery says so is one nobody was paged with.
+
+    **This record is the only place an email address appears.** It is on this
+    route because "who received" is the question it answers; it is never in a
+    log line, never in a sink's failure reason, and never on `GET /v1/monitor`.
+    """
+
+    sink: str
+    kind: str
+    recipients: tuple[str, ...]
+    recipient_configured: bool
+    state: str
+    sent_at: str | None = None
+    delivered_at: str | None = None
+    next_attempt_at: str | None = None
+    attempts: tuple[DeliveryAttempt, ...] = ()
+    acknowledgement: str = ACKNOWLEDGEMENTS[0]
+    acknowledged_at: str | None = None
+    acknowledged_by: str | None = None
+
+    def __post_init__(self) -> None:
+        _text(self.sink, "delivery.sink")
+        if self.kind not in tuple(kind.value for kind in SinkKind):
+            # A test double or a future sink may carry another word; the record
+            # keeps what the sink said it is rather than renaming it.
+            _text(self.kind, "delivery.kind")
+        if self.state not in tuple(one.value for one in DeliveryState):
+            raise ValueError(f"state must be one of {tuple(DeliveryState)}, got {self.state!r}")
+        for name in ("sent_at", "delivered_at", "next_attempt_at", "acknowledged_at"):
+            _optional_iso(getattr(self, name), name)
+        if self.acknowledgement not in ACKNOWLEDGEMENTS:
+            raise ValueError(f"acknowledgement must be one of {ACKNOWLEDGEMENTS}")
+        if self.state == DeliveryState.DELIVERED and self.delivered_at is None:
+            raise ValueError("a delivered delivery says when")
+        if self.state == DeliveryState.RETRYING and self.next_attempt_at is None:
+            raise ValueError("a retrying delivery says when the next attempt is due")
+
+    def to_dict(self) -> dict:
+        return {
+            "sink": self.sink,
+            "kind": self.kind,
+            "recipients": list(self.recipients),
+            "recipient_configured": self.recipient_configured,
+            "state": self.state,
+            "sent_at": self.sent_at,
+            "delivered_at": self.delivered_at,
+            "next_attempt_at": self.next_attempt_at,
+            "attempts": [attempt.to_dict() for attempt in self.attempts],
+            "acknowledgement": self.acknowledgement,
+            "acknowledged_at": self.acknowledged_at,
+            "acknowledged_by": self.acknowledged_by,
+        }
+
+    @classmethod
+    def from_dict(cls, body: dict) -> Delivery:
+        return cls(
+            sink=body["sink"],
+            kind=body["kind"],
+            recipients=tuple(body.get("recipients") or ()),
+            recipient_configured=bool(body.get("recipient_configured")),
+            state=body["state"],
+            sent_at=body.get("sent_at"),
+            delivered_at=body.get("delivered_at"),
+            next_attempt_at=body.get("next_attempt_at"),
+            attempts=tuple(DeliveryAttempt.from_dict(one) for one in body.get("attempts") or ()),
+            acknowledgement=body.get("acknowledgement", ACKNOWLEDGEMENTS[0]),
+            acknowledged_at=body.get("acknowledged_at"),
+            acknowledged_by=body.get("acknowledged_by"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MessageRecord:
+    """One message this monitor sent, kept, and served on the messages route.
+
+    Built from the same `Notification` every sink is handed, plus what only the
+    sending knows: WHO it was for, WHEN each sink took it or refused it, and how
+    the episode it belongs to started and ended. It carries no plate for the
+    reason the notification carries none -- the monitor reads `/health`, so it
+    has none to carry -- and the plate sweep runs over this record too.
+
+    `transition` is the notification's own word: `raised`, `still_active`,
+    `recovered` (cleared), `no_longer_measured`. `first_seen_at` is when THIS
+    RUN of the monitor first saw the episode `active`; `cleared_at` is set on
+    the `recovered` that ends it. A restart re-raises what is still active, as
+    the contract has always said, so the earlier raise and the new one are two
+    records and both are here.
+    """
+
+    record_id: str
+    kind: str
+    site_id: str
+    monitor_id: str
+    lane_id: str | None
+    target: str
+    target_kind: str
+    code: str | None
+    subject: str | None
+    origin: str
+    transition: str | None
+    at: str
+    first_seen_at: str | None
+    cleared_at: str | None
+    source: str | None
+    caveat: str | None
+    status: int | None
+    deliveries: tuple[Delivery, ...]
+    #: Set by the store on every write. `0` until the first one.
+    revision: int = 0
+
+    def __post_init__(self) -> None:
+        _text(self.record_id, "record_id")
+        if self.kind not in tuple(one.value for one in MessageKind):
+            raise ValueError(f"kind must be one of {tuple(MessageKind)}, got {self.kind!r}")
+        _text(self.site_id, "site_id")
+        _text(self.monitor_id, "monitor_id")
+        _text(self.target, "target")
+        if self.target_kind not in RECORD_TARGET_KINDS:
+            raise ValueError(f"target_kind must be one of {RECORD_TARGET_KINDS}")
+        if self.origin not in RECORD_ORIGINS:
+            raise ValueError(f"origin must be one of {RECORD_ORIGINS}")
+        if self.kind == MessageKind.TRANSITION:
+            _text(self.code, "code")
+            if self.transition not in tuple(one.value for one in Transition):
+                raise ValueError(f"transition must be one of {tuple(Transition)}")
+        elif self.transition is not None:
+            raise ValueError("only a transition record carries a transition")
+        _iso_utc(self.at, "at")
+        _optional_iso(self.first_seen_at, "first_seen_at")
+        _optional_iso(self.cleared_at, "cleared_at")
+        if self.cleared_at is not None and self.transition != Transition.RECOVERED:
+            raise ValueError("cleared_at belongs on the `recovered` that ends an episode")
+        _optional_status(self.status, "status", 100, 599)
+        if not self.deliveries:
+            raise ValueError("a message with no delivery was sent to nobody, not to log")
+
+    @property
+    def paged(self) -> bool:
+        """Whether any sink had somebody behind it. DERIVED, so it cannot lie."""
+        return any(delivery.recipient_configured for delivery in self.deliveries)
+
+    @property
+    def unfinished(self) -> bool:
+        return any(
+            delivery.state in (DeliveryState.PENDING, DeliveryState.RETRYING)
+            for delivery in self.deliveries
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "record_id": self.record_id,
+            "revision": self.revision,
+            "kind": self.kind,
+            "site_id": self.site_id,
+            "monitor_id": self.monitor_id,
+            "lane_id": self.lane_id,
+            "target": self.target,
+            "target_kind": self.target_kind,
+            "code": self.code,
+            "subject": self.subject,
+            "origin": self.origin,
+            "transition": self.transition,
+            "at": self.at,
+            "first_seen_at": self.first_seen_at,
+            "cleared_at": self.cleared_at,
+            "source": self.source,
+            "caveat": self.caveat,
+            "status": self.status,
+            "paged": self.paged,
+            "deliveries": [delivery.to_dict() for delivery in self.deliveries],
+        }
+
+    @classmethod
+    def from_dict(cls, body: dict) -> MessageRecord:
+        return cls(
+            record_id=body["record_id"],
+            kind=body["kind"],
+            site_id=body["site_id"],
+            monitor_id=body["monitor_id"],
+            lane_id=body.get("lane_id"),
+            target=body["target"],
+            target_kind=body["target_kind"],
+            code=body.get("code"),
+            subject=body.get("subject"),
+            origin=body["origin"],
+            transition=body.get("transition"),
+            at=body["at"],
+            first_seen_at=body.get("first_seen_at"),
+            cleared_at=body.get("cleared_at"),
+            source=body.get("source"),
+            caveat=body.get("caveat"),
+            status=body.get("status"),
+            deliveries=tuple(Delivery.from_dict(one) for one in body.get("deliveries") or ()),
+            revision=int(body.get("revision") or 0),
+        )
+
+
+def message_record_unfinished(body: dict) -> bool:
+    """Whether a STORED message record was left with a delivery in progress."""
+    return any(
+        isinstance(one, dict)
+        and one.get("state") in (DeliveryState.PENDING.value, DeliveryState.RETRYING.value)
+        for one in body.get("deliveries") or ()
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RecordsPage:
+    """`GET /v1/monitor/messages` and `GET /v1/agent/calls` -- one page of records.
+
+    NOT the event routes' shape, on purpose, because it is not their semantics.
+    Those are a catch-up window, in memory, gone at a restart. This is a store
+    on a disk, and its cursor is a REVISION from a counter persisted beside it:
+    it means the same thing after a restart, and a record that CHANGED -- a
+    retry, a call answered -- comes back under a newer revision with its change.
+
+      * `cursor` is what to send as `since` next. With `more`, it is the last
+        record's revision; without, it is the store's head.
+      * `reset`: `since` is ahead of this store's head. It is not the store that
+        cursor came from; start again from 0.
+      * `gap`: a record written after `since` was removed -- for age or for
+        space -- before it was served. This page is still good; the account is
+        not whole, and the health route counts what went.
+    """
+
+    items_key: str
+    records: tuple[dict, ...]
+    cursor: int
+    more: bool
+    reset: bool
+    gap: bool
+    query: dict
+
+    def to_dict(self) -> dict:
+        return {
+            "contract_version": CONTRACT_VERSION,
+            "cursor": self.cursor,
+            "more": self.more,
+            "reset": self.reset,
+            "gap": self.gap,
+            "query": dict(self.query),
+            self.items_key: list(self.records),
         }
 
 
@@ -1522,6 +1938,11 @@ class AgentCode(StrEnum):
     #: An intercom's own relay answered, and what it answered was no -- a
     #: credential it will not accept, or a port it does not have. Per intercom.
     RELAY_REFUSED_US = "relay_refused_us"
+    #: The durable record of a call could not be written. THE CALL GOES ON --
+    #: a driver at a barrier is not refused because a disk is full -- but the
+    #: account a platform reads of it is missing from this box, and that is
+    #: said rather than discovered at the exception.
+    RECORD_STORE_UNWRITABLE = "record_store_unwritable"
 
 
 #: WHERE each of the agent's codes gets its answer in this build. One copy, and
@@ -1777,6 +2198,11 @@ class AgentDescription:
     #: `[speech] line_timeout_seconds` and `name_audio_max_seconds`.
     line_timeout_seconds: float
     name_audio_max_seconds: float
+    #: `[records] retention_days` and `max_bytes`: how long the record of every
+    #: call is kept and the most of it this box keeps. The directory is not
+    #: published; the records are read through `GET /v1/agent/calls`.
+    record_retention_days: int | None = None
+    record_max_bytes: int | None = None
     contract_version: int = CONTRACT_VERSION
 
     def __post_init__(self) -> None:
@@ -1843,6 +2269,10 @@ class AgentDescription:
                 "line_timeout_seconds": self.line_timeout_seconds,
                 "name_audio_max_seconds": self.name_audio_max_seconds,
             },
+            "records": {
+                "retention_days": self.record_retention_days,
+                "max_bytes": self.record_max_bytes,
+            },
         }
 
 
@@ -1895,6 +2325,9 @@ class AgentHealth:
     """
 
     codes: tuple[AgentEntry, ...] = field(default_factory=tuple)
+    #: The call-record store, as READS -- the same block, in the same words, as
+    #: the monitor's. See `records.RecordStore.reads`.
+    records: dict | None = None
 
     def __post_init__(self) -> None:
         seen = [(entry.code, entry.subject) for entry in self.codes]
@@ -1911,6 +2344,7 @@ class AgentHealth:
         return {
             "contract_version": CONTRACT_VERSION,
             "codes": [entry.to_dict() for entry in self.codes],
+            "records": self.records,
         }
 
 
@@ -2114,3 +2548,195 @@ class AgentEventPage:
             "dropped": self.dropped,
             "events": list(self.events),
         }
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/agent/calls -- the DURABLE record of every call the agent handled
+# ---------------------------------------------------------------------------
+
+
+class CallDisposition(StrEnum):
+    """Whether a call was answered at all, and why not."""
+
+    ANSWERED = "answered"
+    #: A case was in progress, so it was refused unanswered -- `486 Busy Here`.
+    #: Nobody looked at who it was, by design, so it has no lane.
+    REFUSED_BUSY = "refused_busy"
+    #: It arrived at an account no intercom declares, or the user agent refused
+    #: it outright. No lane, because there is no door to name.
+    REFUSED_UNDECLARED = "refused_undeclared"
+
+
+class CallOutcome(StrEnum):
+    """How an ANSWERED call ended, in one word. `null` while it is live.
+
+    The timeline on the record says everything that happened; this says which
+    of a closed set of endings it was, so a consumer can filter on it without
+    replaying the timeline -- and it is set where the agent KNOWS it, never
+    inferred afterwards from what is missing.
+    """
+
+    #: The person keyed an authorisation this site enabled. Which one, and what
+    #: was keyed with it, are on the record.
+    AUTHORISATION_RECEIVED = "authorisation_received"
+    #: The person did not pick up inside `no_answer_seconds`, or could not be
+    #: dialled at all.
+    HUMAN_UNREACHABLE = "human_unreachable"
+    #: The person answered and keyed nothing this site accepts in time.
+    NOTHING_USABLE = "nothing_usable"
+    #: The person answered and hung up before keying anything.
+    OPERATOR_HUNG_UP = "operator_hung_up"
+    #: The driver's press confirmed the ticket on the screen. No person.
+    TICKET_CONFIRMED = "ticket_confirmed"
+    #: A ticket was on the screen that the driver had not been told about; they
+    #: were told where to look. No person.
+    TOLD_TICKET_ON_SCREEN = "told_ticket_on_screen"
+    #: The lane published nothing a person was needed for. No person.
+    NOTHING_TO_DO = "nothing_to_do"
+    #: The user agent would not play the case to anybody, and the call was
+    #: released rather than held open in silence.
+    CASE_NOT_SPOKEN = "case_not_spoken"
+    #: The user agent's control socket was lost mid-case; what was said while
+    #: nobody was listening cannot be known.
+    USER_AGENT_LOST = "user_agent_lost"
+    #: The driver's leg closed before any of the endings above.
+    DRIVER_HUNG_UP = "driver_hung_up"
+    #: The agent stopped while the call was live. Found at the next start, and
+    #: said, rather than left looking like a call still in progress.
+    INTERRUPTED_BY_RESTART = "interrupted_by_restart"
+
+
+#: The agent event kinds a call's timeline can hold: every kind this agent
+#: records about a call it is on. The ticket and display kinds a POLL writes
+#: belong to a lane, not a call, and appear only when this call wrote them.
+CALL_TIMELINE_KINDS: frozenset[str] = frozenset(
+    kind.value
+    for kind in AgentEventKind
+    if kind.value not in ("leftover_calls_released", "display_geometry_changed")
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CallRecord:
+    """One call the agent handled, kept, and served on the calls route.
+
+    The summary fields answer the questions an exception asks -- which lane,
+    when, who was rung, who answered, what they keyed -- and `events` is the
+    timeline: every agent event this call produced, as `GET /v1/agent/events`
+    served it, so nothing on that route is lost when its window turns over.
+
+    `lane` is the AGENT'S name for the lane -- the `[lanes.<name>]` the dialled
+    account's intercom declares -- because that is what the dialled account
+    identifies. It is not the lane's own `lane_id`; a site maps one to the other
+    once, in its own configuration.
+
+    `person_called` and `person_answered_as` are ADDRESSES: the rota address a
+    site declared and the address the user agent reported for the leg that
+    answered. Neither is a person: a rota that rings three handsets answers as
+    the rota, and nothing here can see which handset. `keyed` is the call-back
+    number a person keyed, digits only, as the events route has always carried
+    it. `recording` is `null`: this version records no audio, and the field is
+    here so the round that does fills it rather than inventing a place.
+    """
+
+    call_id: str
+    site_id: str
+    agent_id: str
+    disposition: str
+    intercom: str
+    lane: str | None
+    caller_stated_identity: str | None
+    started_at: str
+    case: str | None = None
+    case_spoken_at: str | None = None
+    person_called: str | None = None
+    rang_person_at: str | None = None
+    person_answered_at: str | None = None
+    person_answered_as: str | None = None
+    authorisation: str | None = None
+    authorisation_at: str | None = None
+    keyed: str | None = None
+    ticket_id: str | None = None
+    ended_at: str | None = None
+    outcome: str | None = None
+    recording: str | None = None
+    events: tuple[dict, ...] = ()
+    revision: int = 0
+
+    def __post_init__(self) -> None:
+        _text(self.call_id, "call_id")
+        _text(self.site_id, "site_id")
+        _text(self.agent_id, "agent_id")
+        if self.disposition not in tuple(one.value for one in CallDisposition):
+            raise ValueError(f"disposition must be one of {tuple(CallDisposition)}")
+        _text(self.intercom, "intercom")
+        _iso_utc(self.started_at, "started_at")
+        for name in (
+            "case_spoken_at", "rang_person_at", "person_answered_at", "authorisation_at",
+            "ended_at",
+        ):
+            _optional_iso(getattr(self, name), name)
+        if self.case is not None and self.case not in tuple(one.value for one in AgentCase):
+            raise ValueError(f"{self.case!r} is not a case in this contract")
+        if self.authorisation is not None and self.authorisation not in tuple(
+            one.value for one in Authorisation
+        ):
+            raise ValueError(f"{self.authorisation!r} is not an authorisation in this contract")
+        if self.keyed is not None and not self.keyed.isdigit():
+            # The one field a CALLER'S side fills, and the field a plate would
+            # end up in. Digits, or nothing -- the rule the events route keeps.
+            raise ValueError("keyed is digits only")
+        if self.outcome is not None and self.outcome not in tuple(
+            one.value for one in CallOutcome
+        ) + tuple(one.value for one in CallDisposition):
+            raise ValueError(f"{self.outcome!r} is not a call outcome in this contract")
+        if self.disposition != CallDisposition.ANSWERED and self.lane is not None:
+            raise ValueError("a refused call was never placed at a door, so it has no lane")
+        for event in self.events:
+            if event.get("kind") not in CALL_TIMELINE_KINDS:
+                raise ValueError(f"{event.get('kind')!r} is not a call event")
+
+    def to_dict(self) -> dict:
+        return {
+            "call_id": self.call_id,
+            "revision": self.revision,
+            "site_id": self.site_id,
+            "agent_id": self.agent_id,
+            "disposition": self.disposition,
+            "intercom": self.intercom,
+            "lane": self.lane,
+            "caller_stated_identity": self.caller_stated_identity,
+            "started_at": self.started_at,
+            "case": self.case,
+            "case_spoken_at": self.case_spoken_at,
+            "person_called": self.person_called,
+            "rang_person_at": self.rang_person_at,
+            "person_answered_at": self.person_answered_at,
+            "person_answered_as": self.person_answered_as,
+            "authorisation": self.authorisation,
+            "authorisation_at": self.authorisation_at,
+            "keyed": self.keyed,
+            "ticket_id": self.ticket_id,
+            "ended_at": self.ended_at,
+            "outcome": self.outcome,
+            "recording": self.recording,
+            "events": [dict(event) for event in self.events],
+        }
+
+    @classmethod
+    def from_dict(cls, body: dict) -> CallRecord:
+        known = {name for name in cls.__dataclass_fields__}
+        fields = {key: value for key, value in body.items() if key in known}
+        fields["events"] = tuple(body.get("events") or ())
+        fields["revision"] = int(body.get("revision") or 0)
+        return cls(**fields)
+
+
+def call_record_unfinished(body: dict) -> bool:
+    """Whether a STORED call record was written while its call was still live.
+
+    On `outcome`, not on `ended_at`: a call the last run never finished is closed
+    as `interrupted_by_restart` with `ended_at` still `null` -- nobody knows when
+    it ended -- and it must not be found again at every start after.
+    """
+    return body.get("disposition") == CallDisposition.ANSWERED.value and not body.get("outcome")

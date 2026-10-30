@@ -37,12 +37,13 @@ from gate_agent.contract import (
     HealthState,
     Source,
 )
+from gate_agent.records import RecordQuery
 from serving import serving
 
 CONTRACT_DOC = Path(__file__).resolve().parent.parent / "docs" / "CONTRACT.md"
 INTERCOM = "sip:door1@10.0.0.9"
 
-AGENT_PAYLOADS = {"agent", "agent_health", "agent_events"}
+AGENT_PAYLOADS = {"agent", "agent_health", "agent_events", "calls"}
 
 
 def doc_payloads() -> dict[str, dict]:
@@ -80,6 +81,7 @@ def live(agent) -> dict[str, dict]:
         "agent": agent.describe().to_dict(),
         "agent_health": agent.health().to_dict(),
         "agent_events": agent.events(0).to_dict(),
+        "calls": agent.calls(RecordQuery()).to_dict(),
     }
 
 
@@ -97,6 +99,7 @@ def test_the_document_shows_exactly_the_payloads_the_code_builds(busy):
     assert served["agent_health"]["codes"]
     assert served["agent_events"]["events"]
     assert served["agent"]["intercoms"]
+    assert served["calls"]["calls"] and served["calls"]["calls"][0]["events"]
 
 
 def test_the_documents_contract_version_is_the_codes(busy):

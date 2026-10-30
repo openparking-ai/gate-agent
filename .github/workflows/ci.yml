@@ -150,6 +150,15 @@ jobs:
       # no deadline over it, a camera that never answered absent from the
       # health payload, the two-clocks note coming apart from its one copy, a
       # negative subtraction hidden, and a backwards cursor adopted.
+      # AND THE MESSAGE RECORD (2026-10-30): the records forgotten at a restart,
+      # the record cursor restarting at zero, a message nobody was paged with not
+      # kept, a retry overwriting the attempt before it, a failed delivery never
+      # retried, an address reaching a log line, the retention and the size rule
+      # not applied or applied to the first written, a page repeating its last
+      # record, the messages route needing no token, an unknown query parameter
+      # ignored, a record id becoming a path, an unfinished delivery left
+      # pending, a refused record store going unsaid, the monitor binding off
+      # loopback with no token, and a cleared fault forgetting when.
       # Each break fails in the REASSURING direction, because that is the
       # direction this kind of software fails in when nobody is looking.
       #
@@ -171,7 +180,9 @@ jobs:
       # intercom with no lane, a site that enables nothing, a transfer quietly
       # not offered, one account for both legs, a password in a SIP URI, the
       # agent's surface accepting a write, and it binding off loopback with no
-      # credential.
+      # credential. And the call record: the calls route needing no token, a
+      # refused call leaving no record, who answered not recorded, and a live
+      # call surviving a restart as live.
       - name: Fail-control — ${{ matrix.part.script }}, shard ${{ matrix.part.index }}/${{ matrix.part.count }}
         shell: bash
         run: |

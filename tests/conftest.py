@@ -10,11 +10,14 @@ like.
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 from itertools import count
+from pathlib import Path
 
 import pytest
 
-from gate_agent.config import MonitorConfig, Target
+from gate_agent.config import MonitorConfig, RecordSettings, Target
 from gate_agent.contract import TargetKind
 from gate_agent.monitor import Monitor
 
@@ -60,6 +63,28 @@ class FakeUtc:
 
 _ids = count(1)
 
+#: Every record directory a builder below made without a `tmp_path` to put it
+#: in, removed when the session ends. A REAL directory on a real disk, always:
+#: the monitor's message records are a property of the disk, and a builder that
+#: handed the monitor something softer would make every guarantee about them a
+#: claim about the double.
+_RECORD_DIRECTORIES: list[str] = []
+
+
+def record_settings(directory=None, **over) -> RecordSettings:
+    """`[records]` for a test: a fresh directory unless one is given."""
+    if directory is None:
+        directory = tempfile.mkdtemp(prefix="gate-agent-records-")
+        _RECORD_DIRECTORIES.append(directory)
+    return RecordSettings(directory=Path(directory), **over)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _remove_record_directories():
+    yield
+    for directory in _RECORD_DIRECTORIES:
+        shutil.rmtree(directory, ignore_errors=True)
+
 
 def config_for(
     *,
@@ -73,6 +98,9 @@ def config_for(
     poll_seconds: float = 30.0,
     renotify_seconds: float | None = None,
     event_window_depth: int = 256,
+    records: RecordSettings | None = None,
+    retry_attempts: int = 3,
+    retry_seconds: float = 60.0,
 ) -> MonitorConfig:
     """A configuration with whatever targets a test names. At least one, always."""
     targets = []
@@ -110,8 +138,11 @@ def config_for(
         site_id="site-1",
         targets=tuple(targets),
         sinks=(),
+        records=records or record_settings(),
         renotify_seconds=renotify_seconds,
         event_window_depth=event_window_depth,
+        retry_attempts=retry_attempts,
+        retry_seconds=retry_seconds,
     )
 
 
@@ -364,6 +395,7 @@ def agent_config_for(
         authorisations=frozenset(Authorisation(one) for one in authorisations),
         human_sip_uri=human_sip_uri,
         audio_directory=audio_directory or _shipped_audio(),
+        records=record_settings(tmp_path / "records"),
         transfer_sip_uri=transfer_sip_uri,
         no_answer_seconds=no_answer_seconds,
         nothing_usable_seconds=nothing_usable_seconds,
@@ -437,6 +469,7 @@ def agent_raw_for(
         "languages": {"driver": ["en"], "operator": "en"},
         "authorisations": {"open_now": True, "do_not_open": True},
         "escalation": {"human_sip_uri": "sip:duty@10.0.0.5"},
+        "records": {"directory": str(tmp_path / "records")},
         **({"tickets": tickets} if tickets else {}),
     }
 

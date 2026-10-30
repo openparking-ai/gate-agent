@@ -33,7 +33,7 @@ The one thing that leaves this process by any other method is a **webhook**,
 which points at a paging system and never at a lane. It lives in its own module,
 that module may not import the target client, and the sweep enforces both.
 
-Three routes, all `GET`. Every other method is answered `405` with `Allow: GET`.
+Four routes, all `GET`. Every other method is answered `405` with `Allow: GET`.
 
 ## Nothing this monitor opens follows a redirect
 
@@ -247,6 +247,10 @@ rendered output, with a planted plate as the control.
   "site_id": "site-1",
   "contract_version": 2,
   "event_window_depth": 256,
+  "retry_attempts": 3,
+  "retry_seconds": 60.0,
+  "record_retention_days": 400,
+  "record_max_bytes": 268435456,
   "targets": [
     {
       "name": "lane",
@@ -305,7 +309,16 @@ consumer of that route falls. The lane contract publishes its own on
 
 A sink is published as a name and a kind and **nothing else**. No host, no
 recipient, no URL. A consumer is entitled to know that somebody is being told;
-putting where they are on a read route would publish an address list.
+putting where they are on a read route would publish an address list. **Who
+received a particular message** is a different question with a different answer:
+it is on that message's record, on `GET /v1/monitor/messages`, behind the same
+credential — and nowhere else.
+
+`retry_attempts` and `retry_seconds` are how many more times a delivery that
+failed is tried and how far apart; `record_retention_days` and
+`record_max_bytes` are the bounds on the record of what was sent. All four are
+described under `GET /v1/monitor/messages`. The record directory is not
+published: it is a path on a box, and the records are read through the route.
 
 ## `GET /v1/monitor/health` — its own codes, and every target's
 
@@ -338,9 +351,39 @@ putting where they are on a read route would publish an address list.
         }
       ]
     }
-  ]
+  ],
+  "records": {
+    "held": null,
+    "bytes_used": null,
+    "max_bytes": 268435456,
+    "retention_days": 400,
+    "oldest_at": "2025-10-01T08:02:11+00:00",
+    "newest_at": "2026-10-30T22:15:05+00:00",
+    "cursor": 4117,
+    "purged_for_age": 0,
+    "dropped_for_space": 0,
+    "last_dropped_at": null,
+    "dropped_through": null,
+    "unreadable": 0,
+    "writable": true
+  }
 }
 ```
+
+`held` and `bytes_used` are `null` in this example for the reason every size in
+the capture examples is: a figure in a document reads as measured, and how much a
+site's store holds is a read of that site's disk. Live, they are never `null`.
+
+`records` is the message-record store as READS, every count every time: how many
+records it holds and how many bytes, its two bounds, the oldest and newest
+record's time, the head `cursor`, how many records the age rule has deleted
+(`purged_for_age`) and how many the size rule has dropped oldest-first
+(`dropped_for_space`), when it last dropped one, and **`dropped_through` — the
+time of the newest record dropped for space, before which the account is not
+whole**. `unreadable` counts files in the directory this build could not read the
+age of; they are left, not deleted on a guess. `writable` is whether the last
+write succeeded; a write that fails is also `record_store_unwritable`, below, and
+the message it was about is still sent.
 
 ### `codes` — the monitor's own
 
@@ -386,6 +429,7 @@ without adding it here.
     "agent_refused_us",
     "target_contract_unsupported",
     "sink_delivery_failed",
+    "record_store_unwritable",
     "lane_gone_quiet"
   ],
   "capture_codes": [
@@ -429,7 +473,8 @@ without adding it here.
     "display_unavailable",
     "lane_act_refused",
     "relay_unreachable",
-    "relay_refused_us"
+    "relay_refused_us",
+    "record_store_unwritable"
   ],
   "agent_cases": [
     "malfunction_active",
@@ -503,9 +548,96 @@ without adding it here.
   "shipped_languages": [
     "en",
     "es-ES"
-  ]
+  ],
+  "message_kinds": [
+    "transition",
+    "unmeasured"
+  ],
+  "message_origins": [
+    "monitor",
+    "target"
+  ],
+  "message_target_kinds": [
+    "lane",
+    "identity_service",
+    "platform",
+    "capture",
+    "agent",
+    "monitor"
+  ],
+  "delivery_states": [
+    "pending",
+    "delivered",
+    "retrying",
+    "failed",
+    "interrupted"
+  ],
+  "delivery_results": [
+    "accepted",
+    "failed"
+  ],
+  "acknowledgements": [
+    "not_acknowledged"
+  ],
+  "call_dispositions": [
+    "answered",
+    "refused_busy",
+    "refused_undeclared"
+  ],
+  "call_outcomes": [
+    "authorisation_received",
+    "human_unreachable",
+    "nothing_usable",
+    "operator_hung_up",
+    "ticket_confirmed",
+    "told_ticket_on_screen",
+    "nothing_to_do",
+    "case_not_spoken",
+    "user_agent_lost",
+    "driver_hung_up",
+    "interrupted_by_restart"
+  ],
+  "record_query_keys": [
+    "since",
+    "lane",
+    "from",
+    "to",
+    "limit"
+  ],
+  "record_defaults": {
+    "retention_days": 400,
+    "max_bytes": 268435456,
+    "max_bytes_bounds": [
+      1048576,
+      17179869184
+    ],
+    "page_limit": 100,
+    "page_limit_max": 500,
+    "retry_attempts": 3,
+    "retry_attempts_bounds": [
+      0,
+      10
+    ],
+    "retry_seconds": 60.0,
+    "retry_seconds_bounds": [
+      1.0,
+      86400.0
+    ]
+  }
 }
 ```
+
+The `message_*`, `delivery_*`, `acknowledgements`, `call_*` and `record_*`
+entries belong to the two record routes, `GET /v1/monitor/messages` and
+`GET /v1/agent/calls`, and are described there. `record_defaults` is every
+published default and bound those routes and their settings rest on, held to the
+constants by the same test.
+
+`record_store_unwritable` is on both lists, the monitor's and the agent's: the
+durable record of a message or a call could not be written. **The message is
+still sent and the call goes on** — a record store that could stop a page or
+refuse a driver would be worse than none — and the gap in the account is said,
+on the health route and to every sink, rather than found at the exception.
 
 `capture_codes`, `camera_unreachable_causes` and `capture_reasons` belong to the
 capture process and are described under its own routes below;
@@ -605,8 +737,9 @@ for field, so **one consumer can hold one cursor policy for three surfaces**.
 
 - The cursor is **monotonic within one run** and is **not durable across a
   restart**. It is a catch-up window for a consumer that blinked, not a record of
-  anything; the durable record of what this monitor said is whatever its sinks
-  delivered it to.
+  anything; the durable record of what this monitor said is
+  `GET /v1/monitor/messages`, below. This route is unchanged by it, field for
+  field, so nothing that reads it breaks.
 - `since` ahead of this monitor's own cursor sets **`reset`**. An empty list
   without that flag is indistinguishable from "nothing happened", which is how a
   consumer silently misses everything after a restart.
@@ -622,6 +755,270 @@ for field, so **one consumer can hold one cursor policy for three surfaces**.
 being measured is not one, and is not here: the same information is on
 `GET /v1/monitor/health` continuously, which is strictly better than one entry in
 a bounded window.
+
+## `GET /v1/monitor/messages` — every message it sent, kept
+
+Gokhan, 2026-10-30, on a car let out without paying: *"record it as exceptions
+and add as much information as we can. what happened, who did what, gate agent
+sent messages times, who received, etc"*, and *"gate agent records sending
+messages for hardware, network failures"*. The platform builds the exception;
+this route is the half it reads from the monitor.
+
+**Every message this monitor sends is a record on this box's own disk.** Written
+before any sink is tried and written again with what each sink answered, so a
+crash between the two leaves a record whose delivery says it never finished —
+not no record. It exists **whatever the sinks are**: at a site whose only sink
+is `log`, a lane that cannot be reached is still a record, and its one delivery
+says nobody was configured to receive it (`recipients: []`,
+`recipient_configured: false`, and the record's `paged: false`). Transitions and
+the one startup message are both recorded; a transition on a code whose
+`never_alarm` is `true` is **not** — it was not sent, so there is no message to
+record, and its state is on the health route as it always was.
+
+**It survives a restart, and its cursor does.** The store is one JSON file per
+record in `[records] directory`, written atomically and synced; its index is
+rebuilt from the disk at every start. Every write — a new record, or a record
+that changed because a delivery was retried — takes the next **revision** from
+one counter persisted beside the records, so `since` means the same thing after
+a restart as before it, and a record that changed comes back under its new
+revision with the change in it.
+
+**Bounded, and the bound says so.** `[records] retention_days` (published
+default **400**, inside the same 1–3650 every retention here uses): a record
+older than that is deleted. `[records] max_bytes` (published default
+**268435456**, 256 MiB, a setting and an assumption — what is known is the size
+of a record, because this package writes it: under a kilobyte with one sink and
+about two with three, read off the records this suite writes; how many a site
+produces is not known): past it the **oldest go first**. Both are counted on
+`GET /v1/monitor/health` under `records`, with the time of the newest record
+dropped for space (`dropped_through`) — before that moment the account is not
+whole, and it says so rather than leaving it to be found.
+
+**A delivery that fails is tried again.** `[notify] retry_attempts` (published
+default **3**, bounds 0–10) more times, `[notify] retry_seconds` (default
+**60**, bounds 1–86400) apart. Every attempt is on the record with its time and
+the far end's answer. This is not `renotify_seconds`, which repeats a message
+somebody received and has no default; this repeats one nobody received. The
+cost, stated: a sink that took a message and failed to say so — a webhook that
+took the POST and timed out answering — is told twice. A retry that succeeds is
+the sink coming back, and `sink_delivery_failed` for it recovers by the
+ordinary rule. A delivery still in progress when the process stopped is closed
+as `interrupted` at the next start, not retried: nothing knows whether that
+attempt reached anybody, and everything still active is raised again anyway.
+
+**No acknowledgement exists in any sink this version, and the record says so.**
+SMTP carries none back, a webhook's 2xx is its receiver taking the request and
+not a person reading it, and a log line is read by whoever reads it. Every
+delivery is `acknowledgement: "not_acknowledged"` with `acknowledged_at` and
+`acknowledged_by` `null` — which means **nothing told us**, not that nobody
+read it. A sink that can carry one adds `acknowledged`, additively.
+
+**The recipient is on the record, and it is the only place an email address
+appears.** `recipients` is the recipient as configured: the email sink's
+addresses; the webhook's **host** — never its path or query, which commonly
+carry a token; nothing for `log`. It is on this route because "who received" is
+the question it answers. **No log line ever prints an email address**: a
+failure's reason is built from the server's code and words and reduced before
+anything can log it, and the startup line names sinks, never recipients.
+`GET /v1/monitor` still publishes a sink as a name and a kind and nothing else.
+
+### The query
+
+| parameter | |
+|---|---|
+| `since` | A revision. Records whose latest revision is after it. Digits only, at most `2^63-1`; default `0`. It is compared with a number and never touches a path. |
+| `lane` | A lane's own `lane_id`, as the lane publishes it on `GET /v1/lane`. **Matches that lane's records AND every record about no lane** (`lane_id: null`): a platform that cannot be reached, a sink that cannot deliver, a camera the capture process names, a monitor restarting — each is a fact about every lane at the site, and an exception about one lane is missing it otherwise. Every record says its `lane_id`, `null` included, so a consumer wanting one lane only drops the nulls. 1–128 printable characters. |
+| `from`, `to` | ISO 8601 **with a UTC offset** — a naive time is refused, not assumed. On the record's `at`. `from` inclusive, `to` exclusive, `from` before `to`. |
+| `limit` | 1–500, default 100. |
+
+Anything else — an unknown parameter, one given twice, a cursor that is not
+digits, a time without an offset, a query over 1024 characters — is **`400`
+with the reason**. A parameter spelt wrong and ignored would serve every lane's
+records to a consumer who believes it filtered them.
+
+`lane_id` on a record is known when the record is about a lane target and the
+monitor has read that lane's identity; a monitor that started while its lane was
+down has not, and its records about that lane say `null` until it restarts.
+
+### The page
+
+<!--payload:messages-->
+```json
+{
+  "contract_version": 2,
+  "cursor": 41,
+  "more": false,
+  "reset": false,
+  "gap": false,
+  "query": {
+    "since": 30,
+    "lane": "lane-1",
+    "from": "2026-10-30T21:00:00+00:00",
+    "to": "2026-10-30T23:00:00+00:00",
+    "limit": 100
+  },
+  "messages": [
+    {
+      "record_id": "m-3f9a0c1d2e4b5a6978c0d1e2f3a4b5c6",
+      "revision": 41,
+      "kind": "transition",
+      "site_id": "site-1",
+      "monitor_id": "monitor-1",
+      "lane_id": "lane-1",
+      "target": "lane",
+      "target_kind": "lane",
+      "code": "outbox_depth_growing",
+      "subject": null,
+      "origin": "target",
+      "transition": "raised",
+      "at": "2026-10-30T22:14:05+00:00",
+      "first_seen_at": "2026-10-30T22:14:05+00:00",
+      "cleared_at": null,
+      "source": "measured",
+      "caveat": null,
+      "status": null,
+      "paged": true,
+      "deliveries": [
+        {
+          "sink": "log",
+          "kind": "log",
+          "recipients": [],
+          "recipient_configured": false,
+          "state": "delivered",
+          "sent_at": "2026-10-30T22:14:05+00:00",
+          "delivered_at": "2026-10-30T22:14:05+00:00",
+          "next_attempt_at": null,
+          "attempts": [
+            {
+              "at": "2026-10-30T22:14:05+00:00",
+              "result": "accepted",
+              "reply_code": null,
+              "reply": null,
+              "http_status": null,
+              "reason": null,
+              "refused_recipients": []
+            }
+          ],
+          "acknowledgement": "not_acknowledged",
+          "acknowledged_at": null,
+          "acknowledged_by": null
+        },
+        {
+          "sink": "email",
+          "kind": "email",
+          "recipients": ["night-desk@example.com"],
+          "recipient_configured": true,
+          "state": "delivered",
+          "sent_at": "2026-10-30T22:14:05+00:00",
+          "delivered_at": "2026-10-30T22:15:05+00:00",
+          "next_attempt_at": null,
+          "attempts": [
+            {
+              "at": "2026-10-30T22:14:05+00:00",
+              "result": "failed",
+              "reply_code": null,
+              "reply": null,
+              "http_status": null,
+              "reason": "email: Connection unexpectedly closed",
+              "refused_recipients": []
+            },
+            {
+              "at": "2026-10-30T22:15:05+00:00",
+              "result": "accepted",
+              "reply_code": 250,
+              "reply": "2.0.0 Ok: queued as 4F2A9C01",
+              "http_status": null,
+              "reason": null,
+              "refused_recipients": []
+            }
+          ],
+          "acknowledgement": "not_acknowledged",
+          "acknowledged_at": null,
+          "acknowledged_by": null
+        },
+        {
+          "sink": "webhook",
+          "kind": "webhook",
+          "recipients": ["paging.example.com"],
+          "recipient_configured": true,
+          "state": "delivered",
+          "sent_at": "2026-10-30T22:14:05+00:00",
+          "delivered_at": "2026-10-30T22:14:05+00:00",
+          "next_attempt_at": null,
+          "attempts": [
+            {
+              "at": "2026-10-30T22:14:05+00:00",
+              "result": "accepted",
+              "reply_code": null,
+              "reply": null,
+              "http_status": 204,
+              "reason": null,
+              "refused_recipients": []
+            }
+          ],
+          "acknowledgement": "not_acknowledged",
+          "acknowledged_at": null,
+          "acknowledged_by": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+- `cursor` is what to send as `since` next: the last record's revision when
+  `more` is `true`, the store's head when it is not — so a consumer polling from
+  it hears about every later write, including a retry landing on an old record.
+- `reset`: `since` is ahead of this store's head. It is not the store that
+  cursor came from — a new disk, a wiped directory. Start again from 0.
+- `gap`: a record written after `since` was removed, for age or for space,
+  before it was served. This page is still good; carry on from `cursor`; the
+  account is not whole, and `records` on the health route counts what went.
+- `query` echoes the filter the page was cut with.
+
+**Every field of a record:**
+
+| field | |
+|---|---|
+| `record_id` | `m-` and 32 hex digits. Stable for the life of the record. |
+| `revision` | The store's counter at this record's latest write. |
+| `kind` | `transition`, or `unmeasured` for the one startup message. The webhook's own word for the same distinction. |
+| `site_id`, `monitor_id` | Who sent it. |
+| `lane_id` | The lane it is about, when it is about a lane target and the lane's identity was read. `null` otherwise — see the query. |
+| `target`, `target_kind` | What it is about: the declared target (`lane`, `identity_service`, `platform`, `capture`, `agent`), or this monitor itself (`monitor`: a sink that cannot deliver, the record store, the startup message). |
+| `code`, `subject` | The code and what it names — which camera, which sink, which device. `null` on the startup message. A camera's name, a card reader's or an intercom case's is the subject the target published, passed through. |
+| `origin` | `monitor` for this monitor's own measurement, `target` for a code a target published and this monitor passed through. Two codes are spelt the same on both sides and are different machines. |
+| `transition` | `raised`, `still_active` (still raised), `recovered` (cleared), `no_longer_measured`. `null` on the startup message. |
+| `at` | When the message was decided — the notification's own `at`. |
+| `first_seen_at` | When **this run** of the monitor first saw this episode `active`. A restart re-raises what is still active, so the earlier raise and the new one are two records and both are here. |
+| `cleared_at` | On a `recovered` only: when it cleared. A `no_longer_measured` is not a clearing. |
+| `source`, `caveat`, `status` | As the notification carries them. |
+| `paged` | Whether any delivery had a recipient configured. Derived. `false` is a message nobody was paged with. |
+| `deliveries[]` | One per sink, in the order the sinks are declared. |
+
+**Every field of a delivery and an attempt:**
+
+| field | |
+|---|---|
+| `sink`, `kind` | The sink's name and kind. |
+| `recipients` | As configured: email addresses, the webhook's host, nothing for `log`. |
+| `recipient_configured` | `false` exactly when `recipients` is empty. |
+| `state` | `pending` (written, not yet tried), `delivered`, `retrying` (failed; another attempt at `next_attempt_at`), `failed` (no attempt left), `interrupted` (the process stopped first). |
+| `sent_at` | The first attempt. |
+| `delivered_at` | The attempt that was accepted. |
+| `next_attempt_at` | While `retrying`. |
+| `attempts[].result` | `accepted` or `failed`. |
+| `attempts[].reply_code`, `reply` | The SMTP server's answer to the message — the one the library raises on unless it is 250 — and its text, which is where a mail server puts the queue id somebody can find the message by. A refusal's code is here too. `null` where there was no SMTP answer. |
+| `attempts[].http_status` | The webhook receiver's status, accepted or not. |
+| `attempts[].reason` | A failure's plain reason, **never carrying an email address**. |
+| `attempts[].refused_recipients` | Recipients an SMTP server refused while accepting the message for the rest — a partial acceptance is still somebody who was not told. |
+| `acknowledgement`, `acknowledged_at`, `acknowledged_by` | `not_acknowledged`, `null`, `null` — see above. |
+
+**This route is a READ.** The store behind it is written by the poller and by
+nothing a caller can reach; the parameters are parsed by one function that
+refuses what it does not recognise. Off loopback the credential is required here
+as on every other route, and the reason is sharper than on the others: this one
+carries the addresses a site pages.
 
 ---
 
@@ -668,6 +1065,12 @@ gate-agent monitor --config monitor.toml
 Binds `127.0.0.1:8092`. **Local by design** — this is meant to run beside the
 lane it watches.
 
+**`[records] directory` is declared and refused at startup if absent**, and so is
+a directory that will not take a write: a monitor that paged people for a
+fortnight and kept no account of it is the gap the message record exists to
+close. The directory is created `0700` and every record file `0600` — they hold
+the addresses a site pages.
+
 **Off loopback it refuses to start without a credential.** `--host` anything but
 loopback requires `--auth-token-file`, and with a token every route requires
 `Authorization: Bearer <token>` and answers `401` without it. The exposure that
@@ -688,9 +1091,12 @@ There is no flag that turns any of that off.
 
 - **No act surface.** No vend, no resolve, no route that changes anything, here
   or at a target.
-- **No state store.** Everything this monitor knows is lost on a restart, and the
-  startup message says what it does not yet know rather than reporting the last
-  thing it happened to remember. **A restart therefore re-sends `raised` for
+- **No state store for what it is WATCHING.** Every code's state is lost on a
+  restart, and the startup message says what it does not yet know rather than
+  reporting the last thing it happened to remember. What it SENT is kept — see
+  `GET /v1/monitor/messages` — and a message record is not read back as a state:
+  the record of a fault raised yesterday is not evidence the fault is active
+  now. **A restart therefore re-sends `raised` for
   every code that is still active**, because every code starts `unknown` and a
   code seen for the first time as `active` is a transition into a fault. That is
   deliberate — a monitor that started while a lane was already broken must say
@@ -699,6 +1105,8 @@ There is no flag that turns any of that off.
 - **No SMS**, no SIP, no audio, no DTMF. The agent that answers a driver at the
   barrier is a later round in this same repository.
 - **No SMTP credential.** See above.
+- **No acknowledgement from any sink**, so no message record says one arrived:
+  every delivery is `not_acknowledged`, which means nothing told us.
 - **`identity_service_degraded` is not read from the identity target.** That
   service publishes `status: degraded` when a read was lost or its queue held a
   line it could not read, and the LANE reads it — it reaches this surface as a
@@ -2551,6 +2959,10 @@ assumptions** — nothing here measures how long a person takes to reach a phone
   "speech": {
     "line_timeout_seconds": 10.0,
     "name_audio_max_seconds": 10.0
+  },
+  "records": {
+    "retention_days": 400,
+    "max_bytes": 268435456
   }
 }
 ```
@@ -2576,9 +2988,27 @@ publishing where a process's control channel lives is publishing a way in.
       "source": "measured",
       "never_alarm": false
     }
-  ]
+  ],
+  "records": {
+    "held": null,
+    "bytes_used": null,
+    "max_bytes": 268435456,
+    "retention_days": 400,
+    "oldest_at": "2026-09-02T07:40:19+00:00",
+    "newest_at": "2026-10-30T22:16:40+00:00",
+    "cursor": 512,
+    "purged_for_age": 0,
+    "dropped_for_space": 0,
+    "last_dropped_at": null,
+    "dropped_through": null,
+    "unreadable": 0,
+    "writable": true
+  }
 }
 ```
+
+`records` is the call-record store as READS — the same block, in the same words,
+as `records` on `GET /v1/monitor/health`.
 
 Entries are in the **lane's shape** — `state`, `source`, `never_alarm` on the
 wire — so a monitor reads this with the code that already reads a lane and a
@@ -2600,6 +3030,7 @@ has been taken at it.
 | `human_unreachable` | the escalation address | the person did not answer inside `no_answer_seconds`. **It recovers**: the next call they answer clears it, because a code that could only ever go one way is a latch that reads like a state |
 | `audio_missing` | the line, or the file | a file the agent reaches for is not there. Startup refuses on this, so on a running agent it is a file that has gone missing since |
 | `lane_unavailable` | the lane's name | per declared lane |
+| `record_store_unwritable` | this agent | the durable record of a call could not be written. The call goes on; the gap in the account is said here |
 
 Nothing here is `never_alarm`: every member is a reason somebody at a barrier
 cannot be helped.
@@ -2645,7 +3076,9 @@ cannot be helped.
 
 The same cursor shape and the same semantics as the lane's, the monitor's and the
 capture process's, field for field, so one consumer holds one policy for all of
-them: monotonic within one run, not durable across a restart, `reset` when
+them — and it is unchanged by the call record below, which keeps every one of
+these events on the call it belongs to: monotonic within one run, not durable
+across a restart, `reset` when
 `since` is ahead of the cursor or behind the oldest event still held, and
 `dropped` counting what the window evicted.
 
@@ -2667,13 +3100,135 @@ intercom is the ACCOUNT the call arrived at, which never appears on this surface
 because its user part is a secret. On a refusal it is the whole record of who
 tried, and it is worth exactly what a stranger's word is worth.
 
+## `GET /v1/agent/calls` — every call it handled, kept
+
+The intercom half of the same account: when a car leaves unpaid, the platform's
+exception wants every call at that lane in the window — who called, who was
+rung, who answered, what they keyed. The events route holds those for one run
+and a bounded window; this holds them for `[records] retention_days`.
+
+**Every call the agent handles is one record**, answered or refused, written at
+every step it takes — answered, case spoken, person rung, person answered,
+authorisation keyed, vend asked for or refused, ended — so a crash leaves the
+steps that happened. A call the last run was on when it stopped is closed at the
+next start as `interrupted_by_restart`, with `ended_at` left `null`: nothing
+here knows when it ended. A relay's outcome that arrives after its call has
+ended goes onto THAT call's record, never onto whichever call is live by then.
+
+The store, its revision cursor, its two bounds and the page are **the same as
+the monitor's messages**, in the same words — one implementation, `records.py`
+— with `[records]` declared in the agent's own configuration, `retention_days`
+default 400 and `max_bytes` default 268435456, counted under `records` on
+`GET /v1/agent/health`. The query takes the same five parameters and refuses
+the same things; `from`/`to` are on `started_at`; and `lane` is **the agent's
+own name for the lane** — the `[lanes.<name>]` the dialled account's intercom
+declares, which is what identified the call. It is not the lane's `lane_id`;
+a site maps one to the other once, in its own configuration. As on the
+messages route, `lane` also matches every record with `lane: null` — the calls
+refused before anybody knew which door they were.
+
+<!--payload:calls-->
+```json
+{
+  "contract_version": 2,
+  "cursor": 12,
+  "more": false,
+  "reset": false,
+  "gap": false,
+  "query": {
+    "since": 0,
+    "lane": "entry",
+    "from": "2026-10-30T21:00:00+00:00",
+    "to": "2026-10-30T23:00:00+00:00",
+    "limit": 100
+  },
+  "calls": [
+    {
+      "call_id": "c-0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "revision": 12,
+      "site_id": "site-1",
+      "agent_id": "agent-1",
+      "disposition": "answered",
+      "intercom": "sip:door1@10.0.0.9",
+      "lane": "entry",
+      "caller_stated_identity": "sip:door1@10.0.0.9",
+      "started_at": "2026-10-30T22:16:40+00:00",
+      "case": "identification_unavailable",
+      "case_spoken_at": "2026-10-30T22:16:52+00:00",
+      "person_called": "sip:duty@10.0.0.5",
+      "rang_person_at": "2026-10-30T22:16:52+00:00",
+      "person_answered_at": "2026-10-30T22:17:01+00:00",
+      "person_answered_as": "sip:duty@10.0.0.5",
+      "authorisation": "call_back",
+      "authorisation_at": "2026-10-30T22:17:30+00:00",
+      "keyed": "5550100",
+      "ticket_id": null,
+      "ended_at": "2026-10-30T22:17:38+00:00",
+      "outcome": "authorisation_received",
+      "recording": null,
+      "events": [
+        {
+          "kind": "call_answered",
+          "site_id": "site-1",
+          "agent_id": "agent-1",
+          "intercom": "sip:door1@10.0.0.9",
+          "lane": "entry",
+          "case": null,
+          "authorisation": null,
+          "human": null,
+          "at": "2026-10-30T22:16:40+00:00",
+          "keyed": null,
+          "caller_stated_identity": "sip:door1@10.0.0.9",
+          "released": null,
+          "ticket_id": null,
+          "authorised_by": null,
+          "code": null,
+          "reason": null,
+          "lane_event_cursor": null,
+          "relay_port": null,
+          "relay_ms": null,
+          "cause": null,
+          "display": null,
+          "geometry": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Every field of a call:**
+
+| field | |
+|---|---|
+| `call_id` | `c-` and 32 hex digits. |
+| `revision` | The store's counter at this record's latest write. |
+| `disposition` | `answered`; `refused_busy` (a case was in progress — `486 Busy Here`, unanswered, and nobody looked at who it was); `refused_undeclared` (an account no intercom declares, or one the user agent refused itself). |
+| `intercom` | The site's LABEL for the door — the `[intercoms.<sip-uri>]` key. This agent's id on a refusal: there is no door to name. |
+| `lane` | The agent's lane name, from the dialled account. `null` for a refusal and for a standalone door. |
+| `caller_stated_identity` | The `From`, reduced by shape. A CLAIM, and named as one: nothing is decided by it. |
+| `started_at` | When the call was answered, or refused. |
+| `case`, `case_spoken_at` | What the driver was told, and when the last file of it FINISHED. `null` where the driver was told something else — a ticket on the screen. |
+| `person_called`, `rang_person_at` | The `[escalation] human_sip_uri` that was dialled, and when. An ADDRESS, not a person. |
+| `person_answered_at`, `person_answered_as` | When that leg was answered, and the address the user agent reported for it. A rota that rings three handsets answers as the rota; nothing here can see which handset. |
+| `authorisation`, `authorisation_at`, `keyed` | What the person keyed, when, and the call-back number keyed with `call_back` — digits only, as the events route carries it. |
+| `ticket_id` | The ticket this call confirmed, was told about, or whose vend it asked for. |
+| `ended_at` | When the call ended. `null` while it is live, and on `interrupted_by_restart`. |
+| `outcome` | `null` while live; then one of `authorisation_received`, `human_unreachable`, `nothing_usable`, `operator_hung_up`, `ticket_confirmed`, `told_ticket_on_screen`, `nothing_to_do`, `case_not_spoken`, `user_agent_lost`, `driver_hung_up`, `interrupted_by_restart` — set where the agent KNOWS it, never inferred afterwards. A refused call's outcome is its disposition. |
+| `recording` | **`null`. This version records no audio**: the user agent is not configured to record and nothing here asks it to. The field is here so the round that does fills it. |
+| `events[]` | Every agent event this call produced, exactly as `GET /v1/agent/events` serves it — vend asked for or refused, relay pulsed or not, with their codes. |
+
+`person_answered_as` comes from the user agent's own report on the answered leg,
+measured against a real baresip in `tests/test_agent_sip.py`.
+
 ## Running it
 
 ```sh
 gate-agent agent --config agent.toml
 ```
 
-Binds `127.0.0.1:8094`. **Local by design.** Off loopback it refuses to start
+Binds `127.0.0.1:8094`. **Local by design.** `[records] directory` is declared
+and refused at startup if absent or unwritable, for the reason the monitor's is. Off loopback it refuses to start
 without a credential — the same rule and the same words as the other two
 surfaces, imported rather than restated. The exposure here is its own kind: this
 publishes which intercoms a site has, which of its lanes cannot be read, and when
@@ -2682,8 +3237,8 @@ watching a garage.
 
 ## What is NOT here, stated rather than left to be discovered
 
-- **No act ROUTE on this surface.** `GET /v1/agent`, `/health` and `/events`,
-  and every other method is one shared `405`. The agent COMMANDS a vend as a
+- **No act ROUTE on this surface.** `GET /v1/agent`, `/health`, `/events` and
+  `/calls`, and every other method is one shared `405`. The agent COMMANDS a vend as a
   CLIENT of the lane's contract; nothing that can reach this port can make it.
 - **No SMS.** A driver with no phone camera, or a display that refused, reaches
   a person. Sending a message needs a provider account, which is a decision
@@ -2695,8 +3250,9 @@ watching a garage.
 - **No relay but Axis.** 2N and Akuvox are named, not built.
 - **No voice recognition.** Nothing here listens to what a driver says; the case
   is derived from the lane, never asked.
-- **No state store.** The event window is a catch-up buffer, not a record. What
-  happened at a site durably is whatever a monitor's sinks delivered and whatever
-  the platform holds.
+- **No state store for a case.** The event window is a catch-up buffer, and a
+  case in progress is lost at a restart. What a CALL was is kept — see
+  `GET /v1/agent/calls` — and a call record is never read back to resume one.
+- **No recording of a call's audio.** `recording` on a call record is `null`.
 - **No measurement of a real intercom.** Stated at the top of this section, and
   it is the sentence to read before any of the others.

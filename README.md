@@ -208,12 +208,42 @@ nobody is paged; the process says so on the line it prints when it starts.
 route and to every other sink that works. Never wrong silently applies to the
 messenger too.
 
+## What it keeps of what it did
+
+Gokhan, on a car let out without paying: *"record it as exceptions and add as
+much information as we can. what happened, who did what, gate agent sent
+messages times, who received"*. The platform builds the exception; this package
+keeps its half, on its own disk, for `[records] retention_days` (default 400).
+
+**Every message the monitor sends is a record** — written before any sink is
+tried and again with what each sink answered: who it was for (the addresses, the
+webhook's host), when each attempt was made, the SMTP reply code or the HTTP
+status, a plain reason on a failure, and every retry. It exists whatever the
+sinks are: with only `log` declared, a lane nobody can reach is still a record,
+and it says nobody was configured to receive it. **No log line ever prints an
+email address**; the record is the only place one is kept. No sink carries an
+acknowledgement back, so every record says `not_acknowledged` rather than
+guessing.
+
+**Every call the agent handles is a record** — answered or turned away: the lane
+the dialled account names, when it started, who was rung and when, who answered
+and when, what they keyed, how it ended, and every event the call produced. No
+audio is recorded.
+
+Both stores survive a restart, cursor included; both are bounded by age and by
+size, oldest first, and the health routes count everything a bound removed. The
+directory is DECLARED, never defaulted — the files hold the addresses and numbers
+a site configured.
+
 ## What it publishes
 
 ```
 GET /v1/monitor                    who it is, what it watches, what it can tell
 GET /v1/monitor/health             its own codes, and every target's, passed through
-GET /v1/monitor/events?since=N     the notifications it sent
+GET /v1/monitor/events?since=N     the notifications it sent, this run
+GET /v1/monitor/messages?...       every message it sent, kept: who received, when, what came back
+
+GET /v1/agent/calls?...            every call it handled, kept: who was rung, who answered, what was keyed
 
 GET /v1/capture                    who it is, what it is set to do
 GET /v1/capture/health             every capture code, and what is on the disk
@@ -229,7 +259,10 @@ readable by anyone who can enumerate a record id.
 
 **How much disk a site needs is a READ, on `GET /v1/capture/health`**, against
 that site's own directory. This repository publishes no size, no rate and no
-capacity anywhere, because nothing in it has measured one.
+capacity for a capture, because nothing in it has measured one. The one disk
+figure it does publish is the record store's default cap, `[records] max_bytes`
+— a setting and an assumption, drawn from the size of a record this package
+writes, and said to be one.
 
 A target's codes are **passed through** — the state and the source that target
 gave, unchanged. A monitor that restated a lane's health in its own words would

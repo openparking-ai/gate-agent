@@ -210,14 +210,19 @@ class FakeUa:
             return tuple(self.declared_accounts)
         return tuple(self.held_accounts)
 
-    def established(self, call_id: str, media: bool = True) -> None:
+    def established(
+        self, call_id: str, media: bool = True, peer_uri: str | None = None
+    ) -> None:
         """Answered, and -- unless a test says otherwise -- media up too.
 
         Two events, because a real user agent sends two and the gap between them
         is a whole sentence. `media=False` is how a test asks what happens in
-        that gap.
+        that gap. `peer_uri` is what the user agent reports for the other end,
+        which on an answered outbound leg is the address that answered.
         """
-        self.events.append(UaEvent(kind=UaEventKind.CALL_ESTABLISHED, call_id=call_id))
+        self.events.append(
+            UaEvent(kind=UaEventKind.CALL_ESTABLISHED, call_id=call_id, peer_uri=peer_uri)
+        )
         if media:
             self.events.append(UaEvent(kind=UaEventKind.CALL_MEDIA, call_id=call_id))
 

@@ -108,6 +108,9 @@ sysfs = "{sysfs}"
 signing_key_file = "{key}"
 directory = "{tmp_path / "ticket-records"}"
 
+[records]
+directory = "{tmp_path / "call-records"}"
+
 [languages]
 driver = ["en"]
 operator = "en"

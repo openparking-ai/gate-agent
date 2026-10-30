@@ -194,6 +194,20 @@ directory = "/var/lib/openparking/gate-agent/tickets"
 #                                   # inside it is HELP about THAT ticket and
 #                                   # never a second vend.
 
+# --- what it keeps -----------------------------------------------------------
+# Every call this agent handles -- answered or turned away -- is kept here: the
+# door, the lane the dialled account names, when it started, who was rung and
+# when, who answered and when, what they keyed, how it ended, and every event it
+# produced. Served on GET /v1/agent/calls. DECLARED, no default: a record holds
+# the call-back number a person keyed, and a default would put that somewhere
+# nobody chose. The directory is created 0700 and every file 0600.
+[records]
+directory = "/var/lib/openparking/gate-agent/call-records"
+# retention_days = 400              # published default, inside 1-3650.
+# max_bytes = 268435456             # published default, an ASSUMPTION: past it
+#                                   # the OLDEST go first and
+#                                   # GET /v1/agent/health counts them.
+
 # --- the screens ------------------------------------------------------------
 # The geometry is NOT here and cannot be: `virtual_size` and `bits_per_pixel`
 # are read from the driver at startup. A site that typed its own resolution is a

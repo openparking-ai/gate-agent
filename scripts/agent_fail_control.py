@@ -1764,6 +1764,40 @@ BREAKS = [
                 "            self._blank(pending)",
         "to": "        self._blank(pending)",
     },
+    # ---- THE CALL RECORD (2026-10-30). One break per guarantee. ----
+    # The intercom half of the account a platform builds when a car leaves
+    # unpaid. Each break loses a call, or something a call record says.
+    {
+        "name": "the_calls_route_needs_no_token",
+        "why": "every call, who was rung and what they keyed, on an open port",
+        "file": "src/gate_agent/agent_service.py",
+        "from": "        if not self._authorised():\n            return self._unauthorised()",
+        "to": "        if not self._authorised() and url.path != \"/v1/agent/calls\":\n"
+              "            return self._unauthorised()",
+    },
+    {
+        "name": "a_refused_call_leaves_no_record",
+        "why": "a call turned away unanswered is in no record, so nobody can see who tried",
+        "file": "src/gate_agent/agent.py",
+        "from": "    def _refused_call(self, disposition: CallDisposition, claimed: str, "
+                "event: dict) -> None:\n",
+        "to": "    def _refused_call(self, disposition: CallDisposition, claimed: str, "
+              "event: dict) -> None:\n        return\n",
+    },
+    {
+        "name": "who_answered_is_not_recorded",
+        "why": "the call record drops the address the user agent reported for the answer",
+        "file": "src/gate_agent/agent.py",
+        "from": "                    person_answered_as=answered_as,",
+        "to": "                    person_answered_as=None,",
+    },
+    {
+        "name": "a_live_call_survives_a_restart_as_live",
+        "why": "a call the last run was on still reads as in progress, for ever",
+        "file": "src/gate_agent/agent.py",
+        "from": "        for call_id in self._calls.unfinished():",
+        "to": "        for call_id in ():",
+    },
 ]
 
 

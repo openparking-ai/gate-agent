@@ -1,8 +1,14 @@
-"""The monitor's own local service. Three routes, all `GET`, and no fourth.
+"""The monitor's own local service. Four routes, all `GET`, and no fifth.
 
     GET /v1/monitor                 who this monitor is and what it watches
     GET /v1/monitor/health          its own codes, and every target's
-    GET /v1/monitor/events?since=N  the notifications it sent
+    GET /v1/monitor/events?since=N  the notifications it sent, this run
+    GET /v1/monitor/messages?...    the DURABLE record of every message it sent
+
+The fourth is a READ like the other three: the store behind it is written by
+the poller, never by a caller, and the query it takes is parsed by
+`records.parse_query`, which refuses anything it does not recognise -- a
+parameter, a duplicate, a cursor that is not digits, a time with no offset.
 
 There is deliberately no route that changes anything. `ACT_ROUTES` below is
 empty and every method other than `GET` is answered by one shared refusal, swept
@@ -35,6 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from .contract import CONTRACT_VERSION
+from .records import BadQuery, parse_query
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +49,7 @@ READ_ROUTES: tuple[str, ...] = (
     "/v1/monitor",
     "/v1/monitor/health",
     "/v1/monitor/events",
+    "/v1/monitor/messages",
 )
 
 #: Routes that CHANGE something. EMPTY, and this module has no way to grow one
@@ -124,6 +132,9 @@ class MonitorService:
     def events(self, since: int):
         return self.monitor.events(since)
 
+    def messages(self, query):
+        return self.monitor.messages(query)
+
 
 class _Handler(BaseHTTPRequestHandler):
     service: MonitorService
@@ -155,6 +166,13 @@ class _Handler(BaseHTTPRequestHandler):
             if since < 0 or since > MAX_QUERY_CURSOR:
                 return self._json(400, {"error": f"since is out of range: {raw!r}"})
             return self._json(200, self.service.events(since).to_dict())
+
+        if url.path == "/v1/monitor/messages":
+            try:
+                query = parse_query(url.query)
+            except BadQuery as exc:
+                return self._json(400, {"error": str(exc)})
+            return self._json(200, self.service.messages(query).to_dict())
 
         return self._json(404, {"error": "no such route"})
 

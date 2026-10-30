@@ -47,6 +47,9 @@ do_not_open = true
 
 [escalation]
 human_sip_uri = "sip:duty@10.0.0.5"
+
+[records]
+directory = "records"
 """
 
 

@@ -29,11 +29,16 @@ from gate_agent.config import (
 )
 from gate_agent.contract import TargetKind
 
-BASE = {"monitor": {"id": "monitor-1", "site_id": "site-1"}}
+BASE = {
+    "monitor": {"id": "monitor-1", "site_id": "site-1"},
+    # DECLARED, no default. A path a parse resolves and never opens: nothing in
+    # this file builds a monitor.
+    "records": {"directory": "records"},
+}
 
 
 def config(**over):
-    raw = {"monitor": dict(BASE["monitor"])}
+    raw = {"monitor": dict(BASE["monitor"]), "records": dict(BASE["records"])}
     raw.update(over)
     return MonitorConfig.from_dict(raw)
 
@@ -310,7 +315,7 @@ def test_a_token_file_path_resolves_against_the_configuration_file(tmp_path):
     token.chmod(0o600)
     config_file = tmp_path / "monitor.toml"
     config_file.write_text(
-        '[monitor]\nid = "m"\nsite_id = "s"\n\n'
+        '[monitor]\nid = "m"\nsite_id = "s"\n\n[records]\ndirectory = "records"\n\n'
         '[targets.platform]\nurl = "http://x"\ngarage_id = "g"\ntoken_file = "platform.token"\n'
     )
     parsed = MonitorConfig.from_file(config_file)
