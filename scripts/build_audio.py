@@ -112,7 +112,7 @@ TEXT_PROVENANCE: dict[str, dict] = {
         "professional translator, and no independent read against the English. Nor did it "
         "see the two `lane_closed` lines, added 2026-10-06 the same way and unreviewed "
         "in the same way.",
-        "register": "Castilian. `matrícula`, `aparcamiento`, `almohadilla`, `Pulse`. This "
+        "register": "Castilian. `matrícula`, `aparcamiento`, `Pulse`. This "
         "is why the key is `es-ES` and not `es`: at a garage in Texas or Bogotá several of "
         "those words are wrong, and a generic tag would have chosen a register for that "
         "site's drivers without telling anybody.",

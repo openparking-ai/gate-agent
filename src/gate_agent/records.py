@@ -39,8 +39,9 @@ one that is counted. Neither rule ever leaves a consumer believing it has seen
 everything: a page whose `since` is behind a record that was removed before it
 was served says `reset`.
 
-**These files hold personal data** -- an email address a site configured, a
-call-back number a person keyed -- so the directory is made `0700` at every
+**These files hold personal data** -- an email address a site configured, and
+in records written before 2026-10-31 a call-back number a person keyed -- so the
+directory is made `0700` at every
 start, even when it already existed wider, and every file is written `0600`. A
 directory that cannot be made private is refused, in words.
 

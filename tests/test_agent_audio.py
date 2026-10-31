@@ -226,5 +226,7 @@ def test_the_spanish_ships_under_a_regional_tag():
     # And the words that make it Castilian are actually in there, so the claim
     # in the key is about the text rather than about a tag somebody typed.
     spanish = " ".join(TEXT[line]["es-ES"] for line in LINES)
-    for word in ("matrícula", "aparcamiento", "almohadilla"):
+    # (`almohadilla` was one of them until the only line that said it -- the
+    # call-back number's "then hash" -- went with `call_back` on 2026-10-31.)
+    for word in ("matrícula", "aparcamiento", "Pulse"):
         assert word in spanish, f"{word} is not in the Spanish this key claims to be"

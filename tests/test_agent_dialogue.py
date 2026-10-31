@@ -20,7 +20,12 @@ from fake_ua import FakeUa
 from foreign_lane import ForeignLane, decided_at
 from foreign_lane import make_server as foreign_server
 from gate_agent.agent import REPROMPTS
-from gate_agent.contract import AgentCase, AgentEventKind, Authorisation
+from gate_agent.contract import (
+    AUTHORISATION_DIGITS,
+    AgentCase,
+    AgentEventKind,
+    Authorisation,
+)
 from gate_agent.lines import TEXT
 from serving import serving
 
@@ -403,21 +408,51 @@ def test_hold_reprompts_the_driver_on_the_sites_interval(tmp_path, lane):
     assert "vend" not in [verb for verb, _ in ua.commands]
 
 
-def test_call_back_records_the_number_that_was_keyed(tmp_path, lane):
+def test_six_is_an_unknown_digit_now_and_records_no_number(tmp_path, lane):
+    """`call_back` was removed on 2026-10-31: Gokhan, *"no need for option 6"*.
+
+    A person keying 6 from habit, and then the number they would have keyed,
+    is re-prompted exactly as for any digit this site has not enabled: nothing
+    is recorded as an authorisation, no number is collected, and no sentence
+    about a call-back is played to anybody. Then the menu still works.
+    """
     _served, url = lane
     agent, ua, _clock, operator = brief_and_bridge(tmp_path, url)
+    played = len(ua.played)
     ua.dtmf(operator, "6")
     agent.poll()
-    for digit in "5551234#":
-        ua.dtmf(operator, digit)
+    assert said(ua, "operator.menu_repeat"), "a 6 was not treated as an unknown digit"
+    # And the key that used to END the number, which is unknown too.
+    ua.dtmf(operator, "#")
     agent.poll()
-    recorded = [
-        event
-        for event in agent.events(0).to_dict()["events"]
-        if event["kind"] == AgentEventKind.AUTHORISATION_RECEIVED.value
-    ]
-    assert recorded and recorded[0]["keyed"] == "5551234"
-    assert recorded[0]["authorisation"] == Authorisation.CALL_BACK.value
+    events = agent.events(0).to_dict()["events"]
+    assert not [e for e in events if e["kind"] == AgentEventKind.AUTHORISATION_RECEIVED.value]
+    assert all(event["keyed"] is None for event in events)
+    assert not [path for _leg, path in ua.played[played:] if "call_back" in path
+                or "callback" in path]
+    assert "6" not in AUTHORISATION_DIGITS
+    assert "call_back" not in {value.value for value in Authorisation}
+
+    # THE CONTROL: a digit this site enabled, keyed next, is still taken.
+    ua.dtmf(operator, "3")
+    agent.poll()
+    recorded = [e for e in agent.events(0).to_dict()["events"]
+                if e["kind"] == AgentEventKind.AUTHORISATION_RECEIVED.value]
+    assert [e["authorisation"] for e in recorded] == [Authorisation.DO_NOT_OPEN.value]
+    assert recorded[0]["keyed"] is None
+
+
+def test_a_site_that_still_enables_call_back_is_refused_by_name(tmp_path):
+    from conftest import agent_raw_for
+    from gate_agent.config import AgentConfig, ConfigError
+
+    for value in (True, False):
+        raw = agent_raw_for(tmp_path)
+        raw["authorisations"]["call_back"] = value
+        with pytest.raises(ConfigError, match="call_back, which was removed on 2026-10-31"):
+            AgentConfig.from_dict(raw)
+    # The control: the same file without it loads.
+    AgentConfig.from_dict(agent_raw_for(tmp_path))
 
 
 # ---------------------------------------------------------------------------

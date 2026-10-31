@@ -174,7 +174,7 @@ def test_a_refused_open_is_said_to_the_person_and_nobody_is_rung_again(tmp_path)
         assert agent.session is not None and agent.session.state.name == "WAITING_DIGIT"
         assert agent.session.operator_call == operator
         # AND THEIR TIME TO KEY STARTS WHEN THE MENU HAS BEEN READ, not under it.
-        assert heard[-1] == "menu.call_back.wav", heard
+        assert heard[-1] == "menu.hold.wav", heard
         assert agent.session.deadline is not None
         assert agent.session.deadline - agent._clock() >= 15.0
 

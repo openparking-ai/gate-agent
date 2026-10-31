@@ -344,7 +344,7 @@ def agent_config_for(
     standalone: bool = False,
     driver_languages=("en", "es-ES"),
     operator_language: str = "en",
-    authorisations=("open_now", "open_and_flag", "do_not_open", "hold", "call_back"),
+    authorisations=("open_now", "open_and_flag", "do_not_open", "hold"),
     human_sip_uri: str = "sip:duty@10.0.0.5",
     transfer_sip_uri: str | None = None,
     no_answer_seconds: float = 30.0,

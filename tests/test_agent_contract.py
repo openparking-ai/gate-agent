@@ -323,7 +323,7 @@ def test_a_keyed_value_that_is_not_digits_is_refused():
             intercom="sip:door1@10.0.0.9",
             lane=None,
             case=None,
-            authorisation="call_back",
+            authorisation="do_not_open",
             human="sip:duty@10.0.0.5",
             at="2026-08-30T14:00:00+00:00",
             keyed=keyed,

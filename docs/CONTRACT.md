@@ -498,16 +498,14 @@ without adding it here.
     "open_and_flag",
     "do_not_open",
     "hold",
-    "transfer",
-    "call_back"
+    "transfer"
   ],
   "authorisation_digits": {
     "1": "open_now",
     "2": "open_and_flag",
     "3": "do_not_open",
     "4": "hold",
-    "5": "transfer",
-    "6": "call_back"
+    "5": "transfer"
   },
   "agent_event_kinds": [
     "call_answered",
@@ -2853,7 +2851,7 @@ software that wrote the rest of this package, and neither has been through a
 professional editor, a translation service, or a native speaker.
 
 **The Spanish ships as `es-ES`, not `es`.** It is Castilian — `matrícula`,
-`aparcamiento`, `almohadilla`, `Pulse` — and under a generic tag a garage in
+`aparcamiento`, `Pulse` — and under a generic tag a garage in
 Texas or Bogotá would declare "Spanish", get this, and hear several words that
 are wrong for its drivers. A regional tag is the one thing that makes that
 visible in the site's own configuration file.
@@ -2935,7 +2933,15 @@ would be a wrong decision made by muscle memory.
 | 3 | `do_not_open` | records it; the driver is told |
 | 4 | `hold` | records it, and the driver is re-prompted every `hold_reprompt_seconds` |
 | 5 | `transfer` | records it. Needs `[escalation] transfer_sip_uri`, and startup refuses the pair otherwise rather than quietly not offering an option a site switched on |
-| 6 | `call_back` | records the number keyed, ending with `#`. Digits only |
+
+**6 is not assigned, and is not to be reassigned.** It was `call_back` — a
+call-back number keyed and ended with `#` — until **2026-10-31**, when it was
+removed on Gokhan's decision (*"no need for option 6"*). A person who keys 6 from
+habit is re-prompted exactly as for any other digit this site has not enabled:
+nothing is recorded as an authorisation and no number is collected after it. A
+configuration that still names `call_back`, true or false, is refused at startup
+by name. `call_back` may still appear as the `authorisation` of a record written
+before then, with its number in `keyed`; readers of the store accept it there.
 
 `[authorisations]` is a block of booleans, **no default**, and a site that
 enables none is refused: a person called who can authorise nothing has been rung
@@ -2998,8 +3004,7 @@ assumptions** — nothing here measures how long a person takes to reach a phone
     "open_now",
     "open_and_flag",
     "do_not_open",
-    "hold",
-    "call_back"
+    "hold"
   ],
   "event_window_depth": 256,
   "concurrent_cases": 1,
@@ -3139,9 +3144,11 @@ across a restart, `reset` when
 `dropped` counting what the window evicted.
 
 **There is no field here for a plate, and there is no plate to put in one.**
-`keyed` is the only value on this surface a caller supplies — the call-back
-number — and it is **digits only, refused otherwise**, because a field a caller
-fills is the field a plate ends up in.
+`keyed` is **always `null` from this version**: it carried the call-back number
+keyed with `call_back`, which was removed on 2026-10-31, and no authorisation
+left carries a value. The field is kept rather than dropped so a consumer written
+against it keeps working, and it is still **digits only, refused otherwise**,
+because a field a caller fills is the field a plate ends up in.
 
 `intercom` and `human` are addresses a site declared, not people: this surface
 says which door and which rota, and whoever wants to know who was on shift asks
@@ -3215,9 +3222,9 @@ refused before anybody knew which door they were.
       "rang_person_at": "2026-10-30T22:16:52+00:00",
       "person_answered_at": "2026-10-30T22:17:01+00:00",
       "person_answered_as": "sip:duty@10.0.0.5",
-      "authorisation": "call_back",
+      "authorisation": "do_not_open",
       "authorisation_at": "2026-10-30T22:17:30+00:00",
-      "keyed": "5550100",
+      "keyed": null,
       "ticket_id": null,
       "ended_at": "2026-10-30T22:17:38+00:00",
       "outcome": "authorisation_received",
@@ -3267,7 +3274,7 @@ refused before anybody knew which door they were.
 | `case`, `case_spoken_at` | What the driver was told, and when the last file of it FINISHED. `null` where the driver was told something else — a ticket on the screen. |
 | `person_called`, `rang_person_at` | The `[escalation] human_sip_uri` that was dialled, and when. An ADDRESS, not a person. |
 | `person_answered_at`, `person_answered_as` | When that leg was answered, and the address the user agent reported for it — **the leg's address, not a person**. A rota that rings three handsets answers as the rota; nothing here can see which handset, or who held it. Whoever needs a name asks the rota for who was on shift at `person_answered_at`. |
-| `authorisation`, `authorisation_at`, `keyed` | What the person keyed, when, and the call-back number keyed with `call_back` — digits only, as the events route carries it. |
+| `authorisation`, `authorisation_at`, `keyed` | What the person keyed, and when. `keyed` is **always `null`** from this version (`call_back`, digit 6, was removed on 2026-10-31); a record written before then may still carry `authorisation: "call_back"` and the number in `keyed`, and is read as written. |
 | `ticket_id` | The ticket this call confirmed, was told about, or whose vend it asked for. |
 | `ended_at` | When the call ended. `null` while it is live, and on `interrupted_by_restart`. |
 | `outcome` | `null` while live; then one of `authorisation_received`, `human_unreachable`, `nothing_usable`, `operator_hung_up`, `ticket_confirmed`, `told_ticket_on_screen`, `nothing_to_do`, `case_not_spoken`, `user_agent_lost`, `driver_hung_up`, `interrupted_by_restart` — set where the agent KNOWS it, never inferred afterwards. A refused call's outcome is its disposition. |

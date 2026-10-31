@@ -1861,7 +1861,15 @@ class Authorisation(StrEnum):
     DO_NOT_OPEN = "do_not_open"
     HOLD = "hold"
     TRANSFER = "transfer"
-    CALL_BACK = "call_back"
+
+
+#: Authorisations this contract HAD and no longer offers, accepted only when a
+#: record written before their removal is READ back. `call_back` -- digit 6, a
+#: call-back number keyed and ended with `#` -- was removed on 2026-10-31,
+#: Gokhan's decision: *"no need for option 6"*. Nothing offers it, accepts it or
+#: records it now; a record written before then may still say it, and a reader
+#: of the store must not refuse that record for saying it.
+RETIRED_AUTHORISATIONS: tuple[str, ...] = ("call_back",)
 
 
 #: WHICH DIGIT selects which authorisation. **Fixed and published, not per
@@ -1870,13 +1878,16 @@ class Authorisation(StrEnum):
 #: morning, and a mapping that moved between sites is a wrong barrier decided by
 #: muscle memory. A digit whose authorisation this site has not enabled is not
 #: accepted -- it is re-prompted, and then it is `nothing usable`.
+#:
+#: **6 IS NOT ASSIGNED**, and it is not to be reassigned: it was `call_back`
+#: until 2026-10-31, and a person who still keys it from habit must reach the
+#: re-prompt every other unknown digit reaches, never a different decision.
 AUTHORISATION_DIGITS: dict[str, Authorisation] = {
     "1": Authorisation.OPEN_NOW,
     "2": Authorisation.OPEN_AND_FLAG,
     "3": Authorisation.DO_NOT_OPEN,
     "4": Authorisation.HOLD,
     "5": Authorisation.TRANSFER,
-    "6": Authorisation.CALL_BACK,
 }
 
 #: WHICH authorisations are an ACT, and what each one is called on the lane's
@@ -1888,7 +1899,7 @@ AUTHORISATION_DIGITS: dict[str, Authorisation] = {
 #: out of the INSTALLED package and requires the two to agree -- an authority
 #: invented here goes red, and so does one added there without an answer here.
 #:
-#: `DO_NOT_OPEN`, `HOLD`, `TRANSFER` and `CALL_BACK` are deliberately not on it.
+#: `DO_NOT_OPEN`, `HOLD` and `TRANSFER` are deliberately not on it.
 #: None of them opens anything, and a lane has no route for "the human said
 #: no": the record of that decision is this agent's, on its own event surface.
 ACTS: dict[Authorisation, str] = {
@@ -2437,10 +2448,12 @@ class AgentEvent:
     authorisation: str | None
     human: str | None
     at: str
-    #: What the human keyed when the authorisation carries a value -- the number
-    #: for `call_back`, and `null` for every other. It is the one free value on
-    #: this surface and it is DIGITS ONLY, refused otherwise, because a field a
-    #: caller fills is the field a plate ends up in.
+    #: ALWAYS `null` from this build. It carried the number keyed with
+    #: `call_back`, which was removed on 2026-10-31 (`RETIRED_AUTHORISATIONS`);
+    #: no authorisation left carries a value. KEPT, rather than dropped, so a
+    #: reader written against the field keeps working -- removing a field is a
+    #: change a consumer notices. Still DIGITS ONLY if it is ever set, because a
+    #: field a caller fills is the field a plate ends up in.
     keyed: str | None = None
     #: What the caller's `From` header SAID, reduced to `sip:user@host`. A
     #: CLAIM, never a check: anybody who can send an INVITE can write any value
@@ -2682,9 +2695,11 @@ class CallRecord:
     `person_called` and `person_answered_as` are ADDRESSES: the rota address a
     site declared and the address the user agent reported for the leg that
     answered. Neither is a person: a rota that rings three handsets answers as
-    the rota, and nothing here can see which handset. `keyed` is the call-back
-    number a person keyed, digits only, as the events route has always carried
-    it. `recording` is `null`: this version records no audio, and the field is
+    the rota, and nothing here can see which handset. `keyed` is ALWAYS `null`
+    from this build: it held the call-back number keyed with `call_back`, which
+    was removed on 2026-10-31, and it is kept so a reader of older records --
+    which may still carry one, and `authorisation: "call_back"` -- keeps working.
+    `recording` is `null`: this version records no audio, and the field is
     here so the round that does fills it rather than inventing a place.
     """
 
@@ -2729,7 +2744,7 @@ class CallRecord:
             raise ValueError(f"{self.case!r} is not a case in this contract")
         if self.authorisation is not None and self.authorisation not in tuple(
             one.value for one in Authorisation
-        ):
+        ) + RETIRED_AUTHORISATIONS:
             raise ValueError(f"{self.authorisation!r} is not an authorisation in this contract")
         if self.keyed is not None and not self.keyed.isdigit():
             # The one field a CALLER'S side fills, and the field a plate would
