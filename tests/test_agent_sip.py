@@ -37,6 +37,7 @@ from conftest import INTERCOM_ACCOUNT, agent_config_for, wav
 from gate_agent.agent import Agent
 from gate_agent.config import AgentConfig, Intercom, UserAgentSettings
 from gate_agent.contract import AgentEventKind, Authorisation, HealthState
+from gate_agent.records import RecordQuery
 from gate_agent.ua_baresip import TESTED_VERSIONS, BaresipUa
 from real_sip import Instance, Registrar
 
@@ -190,6 +191,7 @@ def agent_on(world, tmp_path, **kwargs):
         authorisations=base.authorisations,
         human_sip_uri=f"sip:duty@127.0.0.1:{_person.sip_port}",
         audio_directory=base.audio_directory,
+        records=base.records,
         no_answer_seconds=20.0,
         nothing_usable_seconds=30.0,
     )
@@ -333,6 +335,16 @@ def test_a_whole_case_over_real_sip(world, tmp_path):
         ]
         assert recorded[0]["authorisation"] == Authorisation.OPEN_NOW.value
         assert recorded[0]["intercom"] == "sip:door1@127.0.0.1"
+        # THE CALL RECORD, from what the REAL user agent reported: who was rung,
+        # and the address baresip gave for the leg that answered -- read off its
+        # own `CALL_ESTABLISHED`, not off the configuration.
+        record = agent.calls(RecordQuery()).to_dict()["calls"][-1]
+        assert record["disposition"] == "answered"
+        assert record["person_called"] == f"sip:duty@127.0.0.1:{person.sip_port}"
+        assert record["person_answered_at"] is not None
+        assert record["person_answered_at"] >= record["rang_person_at"]
+        assert record["person_answered_as"] == "sip:duty@127.0.0.1", record
+        assert record["authorisation"] == Authorisation.OPEN_NOW.value
         # And no plate anywhere near any of it.
         assert "plate" not in json.dumps(agent.events(0).to_dict()).lower()
 
@@ -724,7 +736,9 @@ def test_a_restarted_agent_releases_the_calls_the_previous_one_left(world, tmp_p
         assert len(before) >= 2, before
 
         # THE AGENT DIES. Its socket goes; baresip does not, and it keeps both.
+        # So does its hold on the call records, which a dead process lets go.
         first_ua.close()
+        first.close_records()
         assert ours.process.poll() is None, "baresip died; this measures the wrong thing"
 
         # A SECOND AGENT PROCESS starts against the same user agent.

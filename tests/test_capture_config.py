@@ -196,6 +196,7 @@ def test_the_monitors_event_window_is_a_per_site_setting_now():
     """It was reachable only from Python, so exactly one parameter was not one."""
     raw = {
         "monitor": {"id": "monitor-1", "site_id": "site-1"},
+        "records": {"directory": "records"},
         "targets": {"lane": {"url": "http://127.0.0.1:8090"}},
     }
     assert MonitorConfig.from_dict(raw).event_window_depth == DEFAULT_EVENT_WINDOW_DEPTH

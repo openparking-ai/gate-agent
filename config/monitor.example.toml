@@ -15,6 +15,25 @@ site_id = "site-1"
 # short page. Omit it and the default applies.
 event_window_depth = 256
 
+# --- what it keeps -----------------------------------------------------------
+
+# Every message this monitor sends is kept here, with who it was for and what
+# each sink answered, and served on GET /v1/monitor/messages so a platform can
+# build its account of an exception after the fact. OPTIONAL: left out, the
+# records go to the published default, /var/lib/openparking/gate-agent/records
+# (shared safely with the agent), with one warning at start -- a monitor that
+# refused to start for want of this line would page nobody. Declared and
+# unusable, startup refuses. These files hold the addresses configured below,
+# so the directory is made 0700 and every file 0600.
+[records]
+directory = "/var/lib/openparking/gate-agent/records"
+# How long a record is kept, in days. Published default 400, inside 1-3650.
+retention_days = 400
+# The most this store may hold, in bytes. A SETTING AND AN ASSUMPTION, published
+# default 268435456 (256 MiB): past it the OLDEST records go first, and
+# GET /v1/monitor/health counts every one that went.
+# max_bytes = 268435456
+
 # --- what to watch ----------------------------------------------------------
 
 # A service implementing lane-controller/docs/CONTRACT.md. Ours or a third
@@ -113,5 +132,13 @@ token_file = "/etc/openparking/webhook.token"
 # Absent by default, and absent means NEVER: a fault is announced once and its
 # recovery is announced once. Uncomment to be reminded while a code is still
 # active — one message per interval per code.
+#
+# retry_attempts / retry_seconds are a different thing: how many MORE times a
+# delivery that FAILED is tried, and how far apart. Published defaults 3 and 60,
+# bounds 0-10 and 1-86400. A message nobody received has told nobody anything;
+# the cost is that a sink which took a message and then failed to say so is told
+# twice. Every attempt is on the message record.
 # [notify]
 # renotify_seconds = 3600
+# retry_attempts = 3
+# retry_seconds = 60

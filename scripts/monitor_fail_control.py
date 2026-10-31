@@ -816,6 +816,238 @@ BREAKS = [
         "to": '    "lane_event_at",\n    "lane_event_id",\n    "capture_minus_lane_event_ms",\n'
         '    "bytes",\n)\n',
     },
+    # ---- THE MESSAGE RECORD (2026-10-30). One break per guarantee. ----
+    # Gokhan: "gate agent records sending messages for hardware, network
+    # failures". Every break below loses the record, or loses something it
+    # says, in the reassuring direction: the store LOOKS complete.
+    {
+        "name": "records_forgotten_at_a_restart",
+        "why": "the index is not rebuilt from the disk, so a restart serves no record",
+        "file": "src/gate_agent/records.py",
+        "from": '        for path in self.directory.glob(f"{self.kind}-*.json"):',
+        "to": "        for path in ():",
+    },
+    {
+        "name": "the_record_cursor_restarts_at_zero",
+        "why": "the revision counter is not read back, so a cursor means something else",
+        "file": "src/gate_agent/records.py",
+        "from": '        self._revision = max(int(head.get("revision", 0)), newest)',
+        "to": "        self._revision = 0",
+    },
+    {
+        "name": "a_message_nobody_was_paged_with_is_not_kept",
+        "why": "a site whose only sink is log keeps no record of a network failure",
+        "file": "src/gate_agent/monitor.py",
+        "from": "        try:\n"
+                "            revision = self._records.put(record.record_id, record.to_dict())",
+        "to": "        if not record.paged:\n"
+              "            return record\n"
+              "        try:\n"
+              "            revision = self._records.put(record.record_id, record.to_dict())",
+    },
+    {
+        "name": "a_retry_overwrites_the_last_attempt",
+        "why": "each attempt replaces the one before, so the record shows one try",
+        "file": "src/gate_agent/monitor.py",
+        "from": "        attempts = delivery.attempts + (attempt,)",
+        "to": "        attempts = (attempt,)",
+    },
+    {
+        "name": "a_failed_delivery_is_never_retried",
+        "why": "a message nobody received is given up on at the first refusal",
+        "file": "src/gate_agent/monitor.py",
+        "from": "        if transient and len(attempts) <= self.config.retry_attempts:",
+        "to": "        if False:",
+    },
+    {
+        "name": "an_address_reaches_a_log_line",
+        "why": "a sink's failure reason is logged as the SMTP library spelt it, addresses and all",
+        "file": "src/gate_agent/sinks.py",
+        "from": "        super().__init__(redact_addresses(message))",
+        "to": "        super().__init__(message)",
+    },
+    {
+        "name": "the_record_retention_is_not_applied",
+        "why": "a message record is kept past retention_days, for as long as the disk allows",
+        "file": "src/gate_agent/records.py",
+        "from": "            while self._by_age and self._by_age[0][0] < cutoff:",
+        "to": "            while False:",
+    },
+    {
+        "name": "the_record_size_rule_drops_the_first_written",
+        "why": "past max_bytes the first WRITTEN goes, not the oldest by its time",
+        "file": "src/gate_agent/records.py",
+        "from": "            moment, record_id = self._by_age[0]\n"
+                "            if record_id == keep:\n"
+                "                moment, record_id = self._by_age[1]",
+        "to": "            record_id = next(iter(self._index))\n"
+              "            if record_id == keep:\n"
+              "                record_id = list(self._index)[1]\n"
+              "            moment = self._index[record_id].moment",
+    },
+    {
+        "name": "a_record_page_repeats_its_last_record",
+        "why": "the next page's cursor is one short, so a consumer is served a record twice",
+        "file": "src/gate_agent/records.py",
+        "from": "            cursor = chosen[-1][1] if more else self._revision",
+        "to": "            cursor = chosen[-1][1] - 1 if more else self._revision",
+    },
+    {
+        "name": "the_messages_route_needs_no_token",
+        "why": "the addresses a site pages, on an open port, to anybody who asks",
+        "file": "src/gate_agent/service.py",
+        "from": "        if not self._authorised():\n            return self._unauthorised()",
+        "to": "        if not self._authorised() and url.path != \"/v1/monitor/messages\":\n"
+              "            return self._unauthorised()",
+    },
+    {
+        "name": "an_unknown_record_parameter_is_ignored",
+        "why": "`?lane_id=` is ignored and every lane's records are served as one lane's",
+        "file": "src/gate_agent/records.py",
+        "from": "        if key not in QUERY_KEYS:\n            raise BadQuery(",
+        "to": "        if False:\n            raise BadQuery(",
+    },
+    {
+        "name": "a_record_id_becomes_a_path",
+        "why": "a record is read from whatever path the id names",
+        "file": "src/gate_agent/records.py",
+        "from": "        if not RECORD_ID.match(record_id):\n"
+                "            return None\n"
+                "        with self._lock:\n"
+                "            if record_id not in self._index:\n"
+                "                return None\n",
+        "to": "        with self._lock:\n",
+    },
+    {
+        "name": "an_unfinished_delivery_stays_pending",
+        "why": "a delivery the last run never finished still looks live after a restart",
+        "file": "src/gate_agent/monitor.py",
+        "from": "        for record_id in self._records.unfinished():",
+        "to": "        for record_id in ():",
+    },
+    {
+        "name": "a_refused_record_store_is_silent",
+        "why": "the record of what was sent stops being written and nothing says so",
+        "file": "src/gate_agent/monitor.py",
+        "from": "            HealthState.ACTIVE if self._record_failed else HealthState.OK,",
+        "to": "            HealthState.OK,",
+    },
+    {
+        "name": "the_monitor_binds_off_loopback_with_no_token",
+        "why": "the command line takes a public host with no credential file",
+        "file": "src/gate_agent/cli.py",
+        "from": "def cmd_monitor(args) -> int:\n"
+                "    # The bind refusal BEFORE anything is built or read, so a configuration no\n"
+                "    # file would fix is reported in the moment.\n"
+                "    token = _token(args)\n"
+                "    try:\n"
+                "        assert_bind_allowed(args.host, args.port, token)",
+        "to": "def cmd_monitor(args) -> int:\n"
+              "    token = _token(args)\n"
+              "    try:\n"
+              "        pass",
+    },
+    {
+        "name": "a_cleared_fault_forgets_when",
+        "why": "the recovery that ends an episode carries no cleared_at",
+        "file": "src/gate_agent/monitor.py",
+        "from": "        if transition is Transition.RECOVERED:\n"
+                "            return first, self._now()",
+        "to": "        if transition is Transition.RECOVERED:\n            return first, None",
+    },
+    # ---- THE MESSAGE RECORD, ROUND 2 (the independent check of #22). ----
+    {
+        "name": "a_late_retry_is_not_superseded",
+        "why": "a raised retried after its recovered reopens the incident on a pager",
+        "file": "src/gate_agent/monitor.py",
+        "from": "                superseded, by = self._superseded(record, delivery)",
+        "to": "                superseded, by = False, None",
+    },
+    {
+        "name": "a_permanent_refusal_is_retried",
+        "why": "an SMTP 550 or an HTTP 404 is sent again, and refused again",
+        "file": "src/gate_agent/monitor.py",
+        "from": "        if transient and len(attempts) <= self.config.retry_attempts:",
+        "to": "        if len(attempts) <= self.config.retry_attempts:",
+    },
+    {
+        "name": "a_payload_carries_no_record_id",
+        "why": "a receiver handed a retry cannot tell it from a new message",
+        "file": "src/gate_agent/monitor.py",
+        "from": "            Notification(\n                record_id=new_record_id(\"m\"),",
+        "to": "            Notification(\n                record_id=None,",
+    },
+    {
+        "name": "a_retry_is_lost_at_a_restart",
+        "why": "a delivery that was retrying is abandoned by the next run",
+        "file": "src/gate_agent/monitor.py",
+        "from": "                if delivery.state == DeliveryState.RETRYING and resumable:",
+        "to": "                if False:",
+    },
+    {
+        "name": "the_lane_filter_is_ignored",
+        "why": "`?lane=` serves every lane's records as that lane's",
+        "file": "src/gate_agent/records.py",
+        "from": "                if query.lane is not None and entry.lane not in "
+                "(query.lane, None):",
+        "to": "                if False:",
+    },
+    {
+        "name": "refused_recipients_are_dropped",
+        "why": "a partly accepted email is recorded as everybody told",
+        "file": "src/gate_agent/sinks.py",
+        "from": "            refused_recipients=tuple(sorted(str(one) for one in refused)),",
+        "to": "            refused_recipients=(),",
+    },
+    {
+        "name": "the_webhook_recipient_is_the_whole_url",
+        "why": "a hook URL's path token is published as the recipient",
+        "file": "src/gate_agent/sinks.py",
+        "from": "        host = urlsplit(self.config.url).hostname",
+        "to": "        host = self.config.url",
+    },
+    {
+        "name": "record_files_are_not_private",
+        "why": "every user on the box can read the addresses a site pages",
+        "file": "src/gate_agent/records.py",
+        "from": "            os.fchmod(descriptor, 0o600)",
+        "to": "            os.fchmod(descriptor, 0o644)",
+    },
+    {
+        "name": "the_records_directory_is_left_open",
+        "why": "a records directory that existed 0755 stays 0755",
+        "file": "src/gate_agent/records.py",
+        "from": "                if mode & 0o077:",
+        "to": "                if False:",
+    },
+    {
+        "name": "a_second_process_shares_the_store",
+        "why": "two monitors write one store, one counter, and sweep each other's writes",
+        "file": "src/gate_agent/records.py",
+        "from": "            self._take_lock()",
+        "to": "            pass",
+    },
+    {
+        "name": "one_head_for_every_kind",
+        "why": "the monitor and the agent share one counter file in a shared directory",
+        "file": "src/gate_agent/records.py",
+        "from": '        self._head_name = f"head.{KINDS[kind]}.json"',
+        "to": '        self._head_name = "head.json"',
+    },
+    {
+        "name": "the_sweep_takes_the_other_kinds_files",
+        "why": "a monitor starting deletes the agent's half-written call record",
+        "file": "src/gate_agent/records.py",
+        "from": '            f"{TEMP_PREFIX}{self.kind}-*",',
+        "to": '            f"{TEMP_PREFIX}*",',
+    },
+    {
+        "name": "an_undeclared_directory_refuses_startup",
+        "why": "a monitor with no [records] line and no usable default pages nobody",
+        "file": "src/gate_agent/monitor.py",
+        "from": "            if settings.declared:\n                raise",
+        "to": "            if True:\n                raise",
+    },
 ]
 
 

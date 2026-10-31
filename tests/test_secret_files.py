@@ -72,6 +72,7 @@ def _targets_token_file(tmp_path, mode):
     return lambda: MonitorConfig.from_dict(
         {
             "monitor": {"id": "monitor-1", "site_id": "site-1"},
+            "records": {"directory": str(tmp_path / "records")},
             "targets": {
                 "platform": {
                     "url": "http://127.0.0.1:8080",
@@ -88,6 +89,7 @@ def _webhook_token_file(tmp_path, mode):
     return lambda: MonitorConfig.from_dict(
         {
             "monitor": {"id": "monitor-1", "site_id": "site-1"},
+            "records": {"directory": str(tmp_path / "records")},
             "targets": {"lane": {"url": "http://127.0.0.1:8090"}},
             "sinks": {
                 "webhook": {"url": "https://pager.example.com/hook", "token_file": str(token)}
@@ -260,6 +262,8 @@ NOT_A_CREDENTIAL = {
     ("display.py", "read_geometry"): "a framebuffer's geometry, out of the driver's sysfs",
     ("display.py", "read"): "a framebuffer's geometry, out of the driver's sysfs",
     ("display.py", "show"): "a frame, and it is a WRITE to the screen",
+    ("records.py", "_read_path"): "a message or call record, which holds no credential",
+    ("records.py", "_read_head"): "the record store's revision counter",
 }
 
 

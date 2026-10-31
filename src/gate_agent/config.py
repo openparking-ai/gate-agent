@@ -50,6 +50,12 @@ from .lines import (
     missing_text,
     undrawable_display_text,
 )
+from .records import (
+    DEFAULT_RECORD_DIRECTORY,
+    DEFAULT_RECORD_MAX_BYTES,
+    DEFAULT_RECORD_RETENTION_DAYS,
+    RECORD_MAX_BYTES_BOUNDS,
+)
 from .relay import (
     DEFAULT_ANSWER_MARGIN_S,
     PORTS,
@@ -108,6 +114,26 @@ DEFAULT_EMAIL_TLS = True
 #: short page. Published on `GET /v1/monitor`, the way the lane publishes its
 #: own, because a consumer's catch-up policy depends on the number.
 DEFAULT_EVENT_WINDOW_DEPTH = 256
+
+#: The published default for how many MORE times a delivery that failed is tried.
+#:
+#: A PER-SITE SETTING AND AN ASSUMPTION, and it is not `renotify_seconds`: that
+#: repeats a message somebody RECEIVED, and has no default because how often to
+#: wake a person is a site's decision. This repeats one nobody received -- the
+#: mail server refused it, the paging endpoint timed out -- and a message that
+#: was never delivered has told nobody anything. Three more tries a minute apart
+#: carries a page past a relay restarting or a dropped connection, and stops
+#: long before a dead endpoint becomes a queue. The cost, stated: a sink that
+#: delivered and then failed to SAY so -- a webhook that took the POST and timed
+#: out answering -- is told twice. Each attempt is on the record either way.
+DEFAULT_RETRY_ATTEMPTS = 3
+DEFAULT_RETRY_SECONDS = 60.0
+#: The bounds a site's retry settings must fall inside. Ten more tries is past
+#: any outage worth retrying through; a second is the shortest gap that is not
+#: the same failure twice, and a day is the longest after which a page is news
+#: about yesterday.
+RETRY_ATTEMPTS_BOUNDS = (0, 10)
+RETRY_SECONDS_BOUNDS = (1.0, 86400.0)
 
 #: The published default for how often each camera is photographed when nothing
 #: has happened. Gokhan's spec, his words: *"camera captures an image every
@@ -400,11 +426,86 @@ class WebhookSinkConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordSettings:
+    """`[records]`: where the durable account of what a process did is kept.
+
+    The directory has a PUBLISHED DEFAULT, `records.DEFAULT_RECORD_DIRECTORY`,
+    and that is a decision against this package's habit, made for one reason: a
+    monitor that refused to start for want of this line would page nobody. So
+    an undeclared directory starts, with one warning saying where the records
+    went; a DECLARED one that cannot be used refuses, because then somebody
+    chose it and it is wrong. The files hold personal data, so whichever it is
+    is made `0700` and every file `0600`.
+    """
+
+    directory: Path = DEFAULT_RECORD_DIRECTORY
+    retention_days: int = DEFAULT_RECORD_RETENTION_DAYS
+    max_bytes: int = DEFAULT_RECORD_MAX_BYTES
+    #: Whether a site WROTE the directory. Decides what an unusable one does.
+    declared: bool = True
+
+
+def _records(raw: dict, relative_to: Path | None, process: str) -> RecordSettings:
+    directory = raw.get("directory")
+    if directory is not None and (not isinstance(directory, str) or not directory.strip()):
+        raise ConfigError("[records].directory must be a path")
+    retention = _positive_int(
+        raw.get("retention_days"), "[records].retention_days", DEFAULT_RECORD_RETENTION_DAYS
+    )
+    low, high = RETENTION_DAYS_BOUNDS
+    if not low <= retention <= high:
+        raise ConfigError(
+            f"[records].retention_days is {retention}, outside {low}-{high}: the bounds every "
+            "retention in this package uses."
+        )
+    max_bytes = _positive_int(
+        raw.get("max_bytes"), "[records].max_bytes", DEFAULT_RECORD_MAX_BYTES
+    )
+    low, high = RECORD_MAX_BYTES_BOUNDS
+    if not low <= max_bytes <= high:
+        raise ConfigError(
+            f"[records].max_bytes is {max_bytes}, outside {low}-{high}. Below a mebibyte the "
+            "size rule would delete what the retention rule keeps."
+        )
+    return RecordSettings(
+        directory=(
+            _resolve(directory, relative_to) if directory is not None
+            else DEFAULT_RECORD_DIRECTORY
+        ),
+        retention_days=retention,
+        max_bytes=max_bytes,
+        declared=directory is not None,
+    )
+
+
+def _retry(raw: dict) -> tuple[int, float]:
+    attempts = raw.get("retry_attempts", DEFAULT_RETRY_ATTEMPTS)
+    low, high = RETRY_ATTEMPTS_BOUNDS
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or not low <= attempts <= high:
+        raise ConfigError(
+            f"[notify].retry_attempts must be a whole number from {low} to {high}, "
+            f"got {attempts!r}"
+        )
+    seconds = raw.get("retry_seconds", DEFAULT_RETRY_SECONDS)
+    low_s, high_s = RETRY_SECONDS_BOUNDS
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not (
+        low_s <= seconds <= high_s
+    ):
+        raise ConfigError(
+            f"[notify].retry_seconds must be from {low_s:g} to {high_s:g} seconds, "
+            f"got {seconds!r}"
+        )
+    return attempts, float(seconds)
+
+
+@dataclass(frozen=True, slots=True)
 class MonitorConfig:
     monitor_id: str
     site_id: str
     targets: tuple[Target, ...]
     sinks: tuple[object, ...]
+    #: `[records]`. Where every message this monitor sends is kept.
+    records: RecordSettings
     #: How long a state must hold before it is reported AGAIN. `None` -- the
     #: default -- means never: a fault is announced once and its recovery is
     #: announced once. A site that wants to be reminded while a lane is still
@@ -416,6 +517,9 @@ class MonitorConfig:
     #: one round, which made "every parameter is a per-site setting with a
     #: published default" untrue of exactly one parameter.
     event_window_depth: int = DEFAULT_EVENT_WINDOW_DEPTH
+    #: `[notify] retry_attempts` / `retry_seconds`, with published defaults.
+    retry_attempts: int = DEFAULT_RETRY_ATTEMPTS
+    retry_seconds: float = DEFAULT_RETRY_SECONDS
 
     @classmethod
     def from_file(cls, path: str | Path) -> MonitorConfig:
@@ -446,11 +550,15 @@ class MonitorConfig:
                 "to prevent. Declare at least one of "
                 f"{', '.join('[targets.' + kind.value + ']' for kind in TargetKind)}."
             )
+        retry_attempts, retry_seconds = _retry(_table(raw, "notify", required=False))
         return cls(
             monitor_id=str(monitor["id"]),
             site_id=str(monitor["site_id"]),
             targets=targets,
             sinks=_sinks(_table(raw, "sinks", required=False), relative_to),
+            records=_records(_table(raw, "records", required=False), relative_to, "monitor"),
+            retry_attempts=retry_attempts,
+            retry_seconds=retry_seconds,
             renotify_seconds=_renotify(_table(raw, "notify", required=False)),
             event_window_depth=_positive_int(
                 monitor.get("event_window_depth"),
@@ -982,6 +1090,11 @@ __all__ = [
     "DEFAULT_LANE_QUIET_SECONDS",
     "DEFAULT_POLL_SECONDS",
     "RETENTION_DAYS_BOUNDS",
+    "DEFAULT_RETRY_ATTEMPTS",
+    "DEFAULT_RETRY_SECONDS",
+    "RETRY_ATTEMPTS_BOUNDS",
+    "RETRY_SECONDS_BOUNDS",
+    "RecordSettings",
     "CameraConfig",
     "CaptureConfig",
     "ConfigError",
@@ -1326,6 +1439,8 @@ class AgentConfig:
     authorisations: frozenset[Authorisation]
     human_sip_uri: str
     audio_directory: Path
+    #: `[records]`. Where every call this agent handles is kept.
+    records: RecordSettings
     transfer_sip_uri: str | None = None
     no_answer_seconds: float = DEFAULT_NO_ANSWER_SECONDS
     nothing_usable_seconds: float = DEFAULT_NOTHING_USABLE_SECONDS
@@ -1477,6 +1592,7 @@ class AgentConfig:
             authorisations=authorisations,
             human_sip_uri=human,
             audio_directory=audio_directory,
+            records=_records(_table(raw, "records", required=False), relative_to, "agent"),
             transfer_sip_uri=transfer.strip() if isinstance(transfer, str) else None,
             no_answer_seconds=_positive(
                 escalation.get("no_answer_seconds"),

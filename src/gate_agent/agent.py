@@ -42,6 +42,14 @@ case is REFUSED WITHOUT BEING ANSWERED -- **and the live case is checked before
 the caller's identity is**, because being undeclared is the default state of
 every caller on a network, not a rare one. Measured from the caller's side, the
 refusal is `486 Busy Here` after `180 Ringing`.
+
+**Every call it handles is a RECORD, on its own disk, as it happens.** Gokhan,
+2026-10-30, on a car let out unpaid: *"what happened, who did what, ... who
+received"*. Answered or refused, a call gets one record -- which door, which
+lane the dialled account names, when it started, who was rung and when, who
+answered and when, what they keyed, how it ended, and every event it produced --
+written at each step, so a crash leaves the steps that happened rather than
+nothing. `GET /v1/agent/calls` reads it; `records.py` is the store.
 """
 
 from __future__ import annotations
@@ -70,6 +78,7 @@ from .config import AgentConfig, Intercom
 from .contract import (
     ACTS,
     AUTHORISATION_DIGITS,
+    CALL_TIMELINE_KINDS,
     CONTRACT_VERSION,
     KNOWN_LANE_VERSIONS,
     OPENING_AUTHORISATIONS,
@@ -82,14 +91,26 @@ from .contract import (
     AgentEventPage,
     AgentHealth,
     Authorisation,
+    CallDisposition,
+    CallOutcome,
+    CallRecord,
     HealthState,
     IntercomDescription,
     LaneCapability,
+    RecordsPage,
     UserAgentDescription,
+    call_record_unfinished,
 )
 from .display import DisplayUnavailable, Frame, frame_for, frame_wanted
 from .fee import FeeScreen, fee_frame_for, screen_for
 from .lines import DISPLAY_TEXT, UNKNOWN_REFUSAL, audio_name
+from .records import (
+    RecordQuery,
+    RecordStore,
+    RecordStoreInUse,
+    RecordUnwritable,
+    new_record_id,
+)
 from .relay import RelayRefusedUs, RelayUnreachable
 from .relay import build as relay_build
 from .tickets import CONFIRMED, ISSUED, TicketStore, confirmed, mint, vended, voided
@@ -232,6 +253,9 @@ class Pulse:
     #: The case this call was, held here because the outcome may arrive after
     #: the call it belongs to has ended.
     case: str | None = None
+    #: The call RECORD this pulse belongs to, for the same reason: the outcome
+    #: goes onto that call's timeline, not onto whichever call is live by then.
+    call_id: str | None = None
     done: bool = False
 
 
@@ -306,6 +330,12 @@ class Session:
     line_due: dict[UaLeg, float | None] = field(default_factory=lambda: {
         UaLeg.DRIVER: None, UaLeg.OPERATOR: None
     })
+    #: THE DURABLE RECORD of this call, as it stands. Written at every step.
+    call: CallRecord | None = None
+    #: How this call ended, set at the moment the agent KNOWS it -- the person
+    #: keyed something, nobody answered, the press confirmed a ticket -- and
+    #: never worked out afterwards from what is missing.
+    outcome: CallOutcome | None = None
 
     def call_of(self, leg: UaLeg) -> str | None:
         return self.driver_call if leg is UaLeg.DRIVER else self.operator_call
@@ -443,6 +473,17 @@ class Agent:
         #: `GET /v1/agent` because the UA is an INSTALL REQUIREMENT and a
         #: consumer is entitled to see which one is running.
         self._ua_version: str | None = None
+        #: THE DURABLE RECORD of every call, aged on the clock that stamps it.
+        self._calls = RecordStore(
+            config.records.directory,
+            kind="c",
+            time_key="started_at",
+            lane_key="lane",
+            unfinished=call_record_unfinished,
+            retention_days=config.records.retention_days,
+            max_bytes=config.records.max_bytes,
+            now=lambda: datetime.fromisoformat(self._now()),
+        )
 
     # -- startup -----------------------------------------------------------
 
@@ -455,6 +496,41 @@ class Agent:
         call that user agent is still holding, because they are not ours.
         """
         self._measure_audio()
+        # THE CALL RECORDS BEFORE THE USER AGENT, for the reason the tickets
+        # are: finding out costs a `mkdir`. A DECLARED directory that cannot be
+        # used refuses, and so does a store another process holds. The DEFAULT
+        # one does not: an agent that would not start for want of a line in its
+        # configuration answers nobody, so it starts, says where the records
+        # are once, and where even that cannot be used runs with
+        # `record_store_unwritable` active.
+        if not self.config.records.declared:
+            log.warning(
+                "[records] directory is not declared; every call is kept in %s",
+                self.config.records.directory,
+            )
+        try:
+            self._calls.open()
+        except RecordStoreInUse:
+            raise
+        except RecordUnwritable as exc:
+            if self.config.records.declared:
+                raise
+            log.error("%s", exc)
+            self._code(
+                AgentCode.RECORD_STORE_UNWRITABLE, self.config.agent_id, HealthState.ACTIVE
+            )
+        else:
+            self._code(AgentCode.RECORD_STORE_UNWRITABLE, self.config.agent_id, HealthState.OK)
+            self._close_interrupted_calls()
+        try:
+            self._start_the_rest()
+        except BaseException:
+            # A start that failed lets the lock go, as the process exiting on
+            # it would: the next start must not find its own corpse holding it.
+            self._calls.close()
+            raise
+
+    def _start_the_rest(self) -> None:
         self._code(AgentCode.AUDIO_MISSING, self.config.agent_id, HealthState.OK)
         for leg in UaLeg:
             self._code(AgentCode.AUDIO_PLAYBACK_FAILED, leg.value, HealthState.OK)
@@ -476,6 +552,28 @@ class Agent:
         self._ua_version = self.ua.version()
         self._code(AgentCode.UA_UNREACHABLE, self.config.agent_id, HealthState.OK)
         self._code(AgentCode.UA_UNSUPPORTED_VERSION, self.config.agent_id, HealthState.OK)
+
+    def close_records(self) -> None:
+        """Let the call store's lock go. What an exiting process does."""
+        self._calls.close()
+
+    def _close_interrupted_calls(self) -> None:
+        """A call the LAST run was on when it stopped: closed, and said so.
+
+        `interrupted_by_restart`, with `ended_at` left `null` -- nothing here
+        knows when it ended, and a time this process made up would be the one
+        field on the record nobody measured.
+        """
+        for call_id in self._calls.unfinished():
+            body = self._calls.get(call_id)
+            if body is None:
+                continue
+            try:
+                record = CallRecord.from_dict(body)
+            except (KeyError, TypeError, ValueError) as exc:
+                log.warning("%s: a call record this build cannot read: %s", call_id, exc)
+                continue
+            self._keep_call(replace(record, outcome=CallOutcome.INTERRUPTED_BY_RESTART.value))
 
     def _reconcile(self) -> None:
         """SETTLE every record a previous process left in a non-terminal state.
@@ -768,6 +866,7 @@ class Agent:
                 lane=self.session.intercom.lane,
                 case=self.session.case.value if self.session.case else None,
             )
+            self.session.outcome = CallOutcome.USER_AGENT_LOST
             self._end(self.session)
         for call in calls:
             if call.ringing:
@@ -1429,7 +1528,7 @@ class Agent:
             return
         if event.kind is UaEventKind.CALL_ESTABLISHED:
             if event.call_id == session.operator_call and session.state is State.CALLING_HUMAN:
-                self._brief(session)
+                self._brief(session, _bare_uri(event.peer_uri) or None)
             return
         if event.kind is UaEventKind.CALL_CLOSED:
             if event.call_id == session.driver_call:
@@ -1441,6 +1540,8 @@ class Agent:
                 if session.operator_call:
                     self.ua.hangup(session.operator_call)
                     session.operator_call = None
+                if session.outcome is None:
+                    session.outcome = CallOutcome.DRIVER_HUNG_UP
                 self._end(session)
             elif event.call_id == session.operator_call:
                 session.operator_call = None
@@ -1490,9 +1591,13 @@ class Agent:
             # NOT answered, whoever it is. The refusal carries the identity the
             # caller CLAIMED so a site can see who was turned away, and reading
             # it is the only thing done with it.
-            self._record(
-                AgentEventKind.CALL_REFUSED_BUSY,
-                caller_stated_identity=claimed or None,
+            self._refused_call(
+                CallDisposition.REFUSED_BUSY,
+                claimed,
+                self._record(
+                    AgentEventKind.CALL_REFUSED_BUSY,
+                    caller_stated_identity=claimed or None,
+                ),
             )
             if event.call_id:
                 self.ua.hangup(event.call_id)
@@ -1515,6 +1620,19 @@ class Agent:
             driver_call=event.call_id,
             started=self._clock(),
             languages=self.config.driver_languages,
+            # THE RECORD, from the moment it is answered: the lane is the one
+            # the DIALLED ACCOUNT'S intercom declares, which is what identified
+            # it, and the `From` is kept as the claim it is.
+            call=CallRecord(
+                call_id=new_record_id("c"),
+                site_id=self.config.site_id,
+                agent_id=self.config.agent_id,
+                disposition=CallDisposition.ANSWERED.value,
+                intercom=intercom.sip_uri,
+                lane=intercom.lane,
+                caller_stated_identity=claimed or None,
+                started_at=self._now(),
+            ),
         )
         self.session = session
         self._code(
@@ -1588,6 +1706,7 @@ class Agent:
         # true in the log through thirty-three hours of a user agent refusing
         # every one of them.
         if session.case is AgentCase.NOTHING_TO_DO:
+            session.outcome = CallOutcome.NOTHING_TO_DO
             session.state = State.CLOSING
         else:
             session.state = State.SPEAKING_CASE
@@ -1611,6 +1730,7 @@ class Agent:
         were actually told.
         """
         self._say(session, UaLeg.DRIVER, "ticket.on_screen")
+        session.outcome = CallOutcome.TOLD_TICKET_ON_SCREEN
         self._record(
             AgentEventKind.TICKET_ON_SCREEN,
             intercom=intercom.sip_uri,
@@ -1653,6 +1773,7 @@ class Agent:
         pending = self._pending.pop(lane)
         session.case = pending.case
         session.confirmed_ticket = pending
+        session.outcome = CallOutcome.TICKET_CONFIRMED
         # THE WINDOW BELONGS TO THIS TICKET. It ends when the lane decides again
         # or a new ticket is issued here, so the next driver is never briefed
         # with two sentences about the last one.
@@ -1901,9 +2022,13 @@ class Agent:
             self.config.agent_id,
             HealthState.ACTIVE,
         )
-        self._record(
-            AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM,
-            caller_stated_identity=claimed or None,
+        self._refused_call(
+            CallDisposition.REFUSED_UNDECLARED,
+            claimed,
+            self._record(
+                AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM,
+                caller_stated_identity=claimed or None,
+            ),
         )
 
     def _read_lane(self, intercom: Intercom) -> LaneReading:
@@ -1991,16 +2116,29 @@ class Agent:
             human=self.config.human_sip_uri,
         )
 
-    def _brief(self, session: Session) -> None:
+    def _brief(self, session: Session, answered_as: str | None = None) -> None:
         """Where the call is from, what the case is, and what may be keyed.
 
         PRIVATE -- the bridge is made after this, not before -- and it carries
         the intercom's name and the case and NOTHING ELSE. No plate: this agent
         never reads one, from this surface or any other, so there is none here
         to leave out.
+
+        `answered_as` is the address the user agent reported for the leg that
+        answered -- a rota's address, not a handset, and on the call record as
+        exactly that.
         """
         session.state = State.BRIEFING
         session.deadline = None
+        if session.call is not None:
+            self._keep_session_call(
+                session,
+                replace(
+                    session.call,
+                    person_answered_at=self._now(),
+                    person_answered_as=answered_as,
+                ),
+            )
         # The person answered, so they are reachable. **It RECOVERS**: a code
         # that could only ever go one way would be a latch that reads like a
         # state -- `active` for the life of the process however long ago the
@@ -2208,6 +2346,7 @@ class Agent:
             pulse_ms=relay.relay.pulse_ms,
         )
         pulse.case = session.case.value if session.case else None
+        pulse.call_id = session.call.call_id if session.call is not None else None
 
         def run() -> None:
             try:
@@ -2277,6 +2416,7 @@ class Agent:
                 self._store.write(vended(record, self._now(), None))
             self._record(
                 AgentEventKind.RELAY_PULSED,
+                for_call=pulse.call_id,
                 intercom=pulse.intercom,
                 lane=None,
                 case=pulse.case,
@@ -2295,6 +2435,7 @@ class Agent:
                 self._store.write(voided(record, self._now(), "relay_failed"))
             self._record(
                 AgentEventKind.RELAY_PULSE_FAILED,
+                for_call=pulse.call_id,
                 intercom=pulse.intercom,
                 lane=None,
                 case=pulse.case,
@@ -2368,6 +2509,7 @@ class Agent:
         session.state = State.CLOSING
 
     def _record_authorisation(self, session, value: Authorisation, keyed: str | None) -> None:
+        session.outcome = CallOutcome.AUTHORISATION_RECEIVED
         self._record(
             AgentEventKind.AUTHORISATION_RECEIVED,
             intercom=session.intercom.sip_uri,
@@ -2379,6 +2521,7 @@ class Agent:
         )
 
     def _human_unreachable(self, session: Session) -> None:
+        session.outcome = CallOutcome.HUMAN_UNREACHABLE
         self._code(
             AgentCode.HUMAN_UNREACHABLE, self.config.human_sip_uri, HealthState.ACTIVE
         )
@@ -2404,6 +2547,9 @@ class Agent:
         could not take an instruction" for both -- which is not what happened in
         the second, and a driver told it goes on standing there.
         """
+        session.outcome = (
+            CallOutcome.OPERATOR_HUNG_UP if hung_up else CallOutcome.NOTHING_USABLE
+        )
         self._record(
             AgentEventKind.NOTHING_USABLE,
             intercom=session.intercom.sip_uri,
@@ -2588,6 +2734,7 @@ class Agent:
         self._not_spoken(session)
 
     def _not_spoken(self, session: Session) -> None:
+        session.outcome = CallOutcome.CASE_NOT_SPOKEN
         self._record(
             AgentEventKind.CASE_NOT_SPOKEN,
             intercom=session.intercom.sip_uri,
@@ -2700,7 +2847,14 @@ class Agent:
 
     # -- the record --------------------------------------------------------
 
-    def _record(self, kind: AgentEventKind, **fields) -> None:
+    def _record(self, kind: AgentEventKind, *, for_call: str | None = None, **fields) -> dict:
+        """One event onto the window, AND onto the record of the call it is about.
+
+        Which call: `for_call` where the caller names one -- a relay's outcome,
+        which can arrive after its call has ended -- and otherwise the call that
+        is live, when the event is about ITS door. Returns the event as the
+        events route serves it.
+        """
         event = AgentEvent(
             kind=kind.value,
             site_id=self.config.site_id,
@@ -2729,6 +2883,99 @@ class Agent:
             self._dropped += 1
         self._cursor += 1
         self._log.append((self._cursor, event))
+        served = event.to_dict()
+        session = self.session
+        if for_call is not None:
+            if session is not None and session.call is not None and (
+                session.call.call_id == for_call
+            ):
+                self._note(session, served)
+            else:
+                self._note_ended(for_call, served)
+        elif (
+            session is not None
+            and session.call is not None
+            and served["intercom"] == session.intercom.sip_uri
+            and served["kind"] in CALL_TIMELINE_KINDS
+        ):
+            self._note(session, served)
+        return served
+
+    # -- the call record ----------------------------------------------------
+
+    def _note(self, session: Session, event: dict) -> None:
+        """One event onto the live call's record, and the summary it moves."""
+        call = session.call
+        changes: dict = {"events": call.events + (event,)}
+        kind = event["kind"]
+        if session.case is not None:
+            changes["case"] = session.case.value
+        if kind == AgentEventKind.CASE_SPOKEN:
+            changes["case_spoken_at"] = event["at"]
+        elif kind == AgentEventKind.HUMAN_CALLED:
+            changes["person_called"] = event["human"]
+            changes["rang_person_at"] = event["at"]
+        elif kind == AgentEventKind.AUTHORISATION_RECEIVED:
+            changes["authorisation"] = event["authorisation"]
+            changes["authorisation_at"] = event["at"]
+            changes["keyed"] = event["keyed"]
+        elif kind == AgentEventKind.CALL_ENDED:
+            changes["ended_at"] = event["at"]
+            changes["outcome"] = session.outcome.value if session.outcome else None
+            if session.outcome is None:
+                log.warning("call %s ended with no outcome set", call.call_id)
+        if event.get("ticket_id"):
+            changes["ticket_id"] = event["ticket_id"]
+        self._keep_session_call(session, replace(call, **changes))
+
+    def _note_ended(self, call_id: str, event: dict) -> None:
+        """An event about a call that has ENDED -- a relay answering late."""
+        body = self._calls.get(call_id)
+        if body is None:
+            return
+        try:
+            call = CallRecord.from_dict(body)
+        except (KeyError, TypeError, ValueError) as exc:
+            log.warning("%s: a call record this build cannot read: %s", call_id, exc)
+            return
+        self._keep_call(replace(call, events=call.events + (event,)))
+
+    def _refused_call(self, disposition: CallDisposition, claimed: str, event: dict) -> None:
+        """A call turned away unanswered is a call too, and it has a record.
+
+        No lane: a busy refusal is made before anybody looks at who it is, and
+        an undeclared one has no door to name. Who it CLAIMED to be is kept as
+        the claim it is.
+        """
+        self._keep_call(
+            CallRecord(
+                call_id=new_record_id("c"),
+                site_id=self.config.site_id,
+                agent_id=self.config.agent_id,
+                disposition=disposition.value,
+                intercom=self.config.agent_id,
+                lane=None,
+                caller_stated_identity=claimed or None,
+                started_at=event["at"],
+                ended_at=event["at"],
+                outcome=disposition.value,
+                events=(event,),
+            )
+        )
+
+    def _keep_session_call(self, session: Session, call: CallRecord) -> None:
+        session.call = self._keep_call(call)
+
+    def _keep_call(self, call: CallRecord) -> CallRecord:
+        """Write it. A store that refuses is a CODE; the call goes on regardless."""
+        try:
+            revision = self._calls.put(call.call_id, call.to_dict())
+        except RecordUnwritable as exc:
+            log.error("the call record %s could not be kept: %s", call.call_id, exc)
+            self._code(AgentCode.RECORD_STORE_UNWRITABLE, self.config.agent_id, HealthState.ACTIVE)
+            return call
+        self._code(AgentCode.RECORD_STORE_UNWRITABLE, self.config.agent_id, HealthState.OK)
+        return replace(call, revision=revision)
 
     def _code(self, code: AgentCode, subject: str, state: HealthState) -> None:
         self._states[(code.value, subject)] = state.value
@@ -2779,6 +3026,8 @@ class Agent:
             decision_max_age_seconds=self.config.decision_max_age_seconds,
             line_timeout_seconds=self.config.line_timeout_seconds,
             name_audio_max_seconds=self.config.name_audio_max_seconds,
+            record_retention_days=self.config.records.retention_days,
+            record_max_bytes=self.config.records.max_bytes,
         )
 
     def health(self) -> AgentHealth:
@@ -2804,7 +3053,20 @@ class Agent:
                 AgentEntry(code=code.value, subject=subject, state=state)
                 for subject, state in sorted(subjects.items())
             )
-        return AgentHealth(codes=tuple(entries))
+        return AgentHealth(codes=tuple(entries), records=self._calls.reads())
+
+    def calls(self, query: RecordQuery) -> RecordsPage:
+        """`GET /v1/agent/calls` -- the durable record of calls, one page of it."""
+        records, cursor, more, reset, gap = self._calls.page(query)
+        return RecordsPage(
+            items_key="calls",
+            records=tuple(records),
+            cursor=cursor,
+            more=more,
+            reset=reset,
+            gap=gap,
+            query=query.echo(),
+        )
 
     def events(self, since: int) -> AgentEventPage:
         current = self._cursor

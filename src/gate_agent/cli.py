@@ -54,6 +54,7 @@ from .config import (
     read_secret_file,
 )
 from .monitor import Monitor, UnsupportedContract
+from .records import RecordUnwritable
 from .service import (
     InsecureBind,
     MonitorService,
@@ -176,6 +177,9 @@ def cmd_agent(args) -> int:
         print("  STANDALONE: no intercom has a lane, so every call is a human case")
     print("  ONE CASE AT A TIME: a call arriving during a case is refused unanswered, "
           "whoever it is from (486 Busy Here)")
+    print(f"  records:  {config.records.directory}"
+          f"{'' if config.records.declared else ' (the default)'}, kept "
+          f"{config.records.retention_days} day(s): every call, answered or refused")
     print(opening_line(config))
 
     try:
@@ -192,6 +196,9 @@ def cmd_agent(args) -> int:
         print(f"\n{exc}\n", file=sys.stderr)
         return 2
     except UaUnreachable as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+    except RecordUnwritable as exc:
         print(f"\n{exc}\n", file=sys.stderr)
         return 2
 
@@ -336,10 +343,16 @@ def cmd_monitor(args) -> int:
         # the configuration where they come apart.
         print("  NOBODY IS PAGED: `log` is the only sink, so notifications go to stdout only")
     print("  READ ONLY: this monitor has no route to a vend, here or at any target")
+    print(f"  records:  {config.records.directory}"
+          f"{'' if config.records.declared else ' (the default)'}, kept "
+          f"{config.records.retention_days} day(s): every message, whoever it reached")
 
     try:
         monitor.start()
     except UnsupportedContract as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 2
+    except RecordUnwritable as exc:
         print(f"\n{exc}\n", file=sys.stderr)
         return 2
 

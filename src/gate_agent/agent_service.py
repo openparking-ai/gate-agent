@@ -1,8 +1,9 @@
-"""The agent's own local service. Three routes, all `GET`, and no fourth.
+"""The agent's own local service. Four routes, all `GET`, and no fifth.
 
     GET /v1/agent                 who it is, what it answers, and `can_vend`
     GET /v1/agent/health          every agent code, every time
     GET /v1/agent/events?since=N  what it did, and never a plate
+    GET /v1/agent/calls?...       the DURABLE record of every call it handled
 
 **There is deliberately no route that changes anything ON THIS SURFACE, and that
 is the whole point of it.** `ACT_ROUTES` is empty; every method other than `GET`
@@ -39,6 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from .contract import CONTRACT_VERSION
+from .records import BadQuery, parse_query
 from .service import InsecureBind, assert_bind_allowed, bearer, is_loopback
 
 log = logging.getLogger(__name__)
@@ -47,6 +49,7 @@ READ_ROUTES: tuple[str, ...] = (
     "/v1/agent",
     "/v1/agent/health",
     "/v1/agent/events",
+    "/v1/agent/calls",
 )
 
 #: Routes that CHANGE something. EMPTY, and it is empty by decision rather than
@@ -73,6 +76,9 @@ class AgentService:
 
     def events(self, since: int):
         return self.agent.events(since)
+
+    def calls(self, query):
+        return self.agent.calls(query)
 
     def act_surface(self) -> tuple[str, ...]:
         """What the agent behind this surface can ask a barrier to do.
@@ -114,6 +120,16 @@ class _Handler(BaseHTTPRequestHandler):
             if since < 0 or since > MAX_QUERY_CURSOR:
                 return self._json(400, {"error": f"since is out of range: {raw!r}"})
             return self._json(200, self.service.events(since).to_dict())
+
+        if url.path == "/v1/agent/calls":
+            # A READ of a store the agent writes as calls happen. The query is
+            # parsed by the same function the monitor's records route uses, so
+            # the two refuse the same things in the same words.
+            try:
+                query = parse_query(url.query)
+            except BadQuery as exc:
+                return self._json(400, {"error": str(exc)})
+            return self._json(200, self.service.calls(query).to_dict())
 
         return self._json(404, {"error": "no such route"})
 

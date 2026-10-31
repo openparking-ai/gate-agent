@@ -35,16 +35,24 @@ from foreign_lane import ForeignLane
 from foreign_lane import make_server as foreign_server
 from gate_agent.config import DEFAULT_MAX_SNAPSHOT_BYTES_SETTING, RETENTION_DAYS_BOUNDS
 from gate_agent.contract import (
+    ACKNOWLEDGEMENTS,
     AUTHORISATION_DIGITS,
     CONTRACT_VERSION,
+    RECORD_ORIGINS,
+    RECORD_TARGET_KINDS,
     AgentCase,
     AgentCode,
     AgentEventKind,
     Authorisation,
+    CallDisposition,
+    CallOutcome,
     CameraUnreachableCause,
     CaptureCode,
     CaptureReason,
+    DeliveryResult,
+    DeliveryState,
     HealthState,
+    MessageKind,
     MonitorCode,
     MonitorEntry,
     MonitorHealth,
@@ -52,6 +60,15 @@ from gate_agent.contract import (
     Source,
     TargetKind,
     Transition,
+)
+from gate_agent.records import (
+    DEFAULT_PAGE_LIMIT,
+    DEFAULT_RECORD_MAX_BYTES,
+    DEFAULT_RECORD_RETENTION_DAYS,
+    MAX_PAGE_LIMIT,
+    QUERY_KEYS,
+    RECORD_MAX_BYTES_BOUNDS,
+    RecordQuery,
 )
 from gate_agent.service import (
     ACT_ROUTES,
@@ -108,7 +125,7 @@ def watched():
 #: the same marked-block mechanism and is deliberately not one of them: it
 #: publishes the closed sets a consumer branches on, and each is compared
 #: against the enum or the constant it comes from.
-ROUTE_PAYLOADS = {"monitor", "health", "events"}
+ROUTE_PAYLOADS = {"monitor", "health", "events", "messages"}
 
 #: The capture process's route payloads, checked in
 #: `tests/test_capture_contract.py`. Named here so THIS file's "every block
@@ -121,7 +138,7 @@ CAPTURE_PAYLOADS = {"capture", "capture_health", "capture_records"}
 #: here for the same reason the capture process's are: this file's "every block
 #: belongs to a route" assertion accounts for every block in the document rather
 #: than being loosened to ignore whatever it does not recognise.
-AGENT_PAYLOADS = {"agent", "agent_health", "agent_events"}
+AGENT_PAYLOADS = {"agent", "agent_health", "agent_events", "calls"}
 
 
 def doc_payloads() -> dict[str, dict]:
@@ -151,6 +168,7 @@ def live(monitor) -> dict[str, dict]:
         "monitor": monitor.describe().to_dict(),
         "health": monitor.health().to_dict(),
         "events": monitor.events(0).to_dict(),
+        "messages": monitor.messages(RecordQuery()).to_dict(),
     }
 
 
@@ -181,6 +199,8 @@ def test_the_document_shows_exactly_the_payloads_the_code_builds(watched):
     # in it, so the nested comparison above was not against an empty list.
     assert served["health"]["targets"][0]["codes"]
     assert served["events"]["events"]
+    assert served["messages"]["messages"]
+    assert served["messages"]["messages"][0]["deliveries"][0]["attempts"]
 
 
 def test_the_documents_contract_version_is_the_codes(watched):
@@ -220,6 +240,17 @@ def test_every_closed_set_value_in_the_document_is_a_member_of_that_set():
         ("health", "targets", "codes", "source"): tuple(source.value for source in Source),
         ("events", "events", "transition"): tuple(one.value for one in Transition),
         ("events", "events", "source"): tuple(source.value for source in Source),
+        ("messages", "messages", "kind"): tuple(one.value for one in MessageKind),
+        ("messages", "messages", "target_kind"): RECORD_TARGET_KINDS,
+        ("messages", "messages", "origin"): RECORD_ORIGINS,
+        ("messages", "messages", "transition"): tuple(one.value for one in Transition),
+        ("messages", "messages", "deliveries", "state"): tuple(
+            one.value for one in DeliveryState
+        ),
+        ("messages", "messages", "deliveries", "attempts", "result"): tuple(
+            one.value for one in DeliveryResult
+        ),
+        ("messages", "messages", "deliveries", "acknowledgement"): ACKNOWLEDGEMENTS,
     }
     doc = doc_payloads()
     for (name, *path), allowed in closed.items():
@@ -327,7 +358,9 @@ def test_no_route_mutates_anything():
     for name, fn in others.items():
         assert fn is _Handler._method_not_allowed, f"{name} is not the shared refusal"
     assert ACT_ROUTES == ()
-    assert set(READ_ROUTES) == {"/v1/monitor", "/v1/monitor/health", "/v1/monitor/events"}
+    assert set(READ_ROUTES) == {
+        "/v1/monitor", "/v1/monitor/health", "/v1/monitor/events", "/v1/monitor/messages"
+    }
 
 
 def test_a_consumer_that_posts_to_this_surface_is_refused(watched):
@@ -538,8 +571,44 @@ PUBLISHED_SETS = {
     # in the round that stopped writing `lane_decided_again` for six outcomes
     # that were not a new decision.
     "void_reasons": lambda: list(_void_reasons()),
+    # THE RECORD ROUTES' sets and defaults, from the round that made what the
+    # monitor sent and what the agent's calls were a durable record. Same rule:
+    # a platform builds an exception from these and branches on every one.
+    "message_kinds": lambda: [one.value for one in MessageKind],
+    "message_origins": lambda: list(RECORD_ORIGINS),
+    "message_target_kinds": lambda: list(RECORD_TARGET_KINDS),
+    "delivery_states": lambda: [one.value for one in DeliveryState],
+    "delivery_results": lambda: [one.value for one in DeliveryResult],
+    "acknowledgements": lambda: list(ACKNOWLEDGEMENTS),
+    "call_dispositions": lambda: [one.value for one in CallDisposition],
+    "call_outcomes": lambda: [one.value for one in CallOutcome],
+    "record_query_keys": lambda: list(QUERY_KEYS),
+    "record_defaults": lambda: _record_defaults(),
     "shipped_languages": lambda: list(_shipped_languages()),
 }
+
+
+def _record_defaults():
+    from gate_agent.config import (
+        DEFAULT_RETRY_ATTEMPTS,
+        DEFAULT_RETRY_SECONDS,
+        RETRY_ATTEMPTS_BOUNDS,
+        RETRY_SECONDS_BOUNDS,
+    )
+    from gate_agent.records import DEFAULT_RECORD_DIRECTORY
+
+    return {
+        "directory": str(DEFAULT_RECORD_DIRECTORY),
+        "retention_days": DEFAULT_RECORD_RETENTION_DAYS,
+        "max_bytes": DEFAULT_RECORD_MAX_BYTES,
+        "max_bytes_bounds": list(RECORD_MAX_BYTES_BOUNDS),
+        "page_limit": DEFAULT_PAGE_LIMIT,
+        "page_limit_max": MAX_PAGE_LIMIT,
+        "retry_attempts": DEFAULT_RETRY_ATTEMPTS,
+        "retry_attempts_bounds": list(RETRY_ATTEMPTS_BOUNDS),
+        "retry_seconds": DEFAULT_RETRY_SECONDS,
+        "retry_seconds_bounds": list(RETRY_SECONDS_BOUNDS),
+    }
 
 
 def _void_reasons():
