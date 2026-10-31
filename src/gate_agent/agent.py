@@ -2192,7 +2192,14 @@ class Agent:
             self._menu(session)
             # NOTHING KEYED UNDER THE RE-PROMPT COUNTS -- see `Session`.
             session.ignoring_digits = True
-            session.state = State.WAITING_DIGIT
+            # AND THE BRIDGE STILL HAPPENS. Keyed during the FIRST menu, the
+            # two legs are not together yet; this used to move straight to
+            # waiting for a digit, and the bridge -- made only when the
+            # briefing has been said -- never was: the person and the driver
+            # were never connected, to the end of the call. So back to the
+            # briefing, which bridges once the re-prompt has been said, as
+            # after a refused open (`_person_refused`).
+            session.state = State.WAITING_DIGIT if session.bridged else State.BRIEFING
             session.deadline = self._clock() + self.config.nothing_usable_seconds
             return
         self._authorised(session, value)

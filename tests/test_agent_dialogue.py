@@ -499,6 +499,51 @@ def test_digits_keyed_over_a_re_prompt_are_dropped_and_counted(tmp_path, lane):
     assert "2125550100" not in str(record), "the dropped digits reached the record"
 
 
+def test_an_unknown_digit_during_the_first_menu_still_ends_in_the_bridge(tmp_path, lane):
+    """Keyed BEFORE the bridge -- a habit 6, say -- and the two are still put together.
+
+    The re-prompt plays, the briefing completes, and the bridge is made then:
+    it used to go straight to waiting for a digit, and the bridge, made only
+    when the briefing has been said, never was.
+    """
+    _served, url = lane
+    agent, ua, clock = running(tmp_path, url)
+    ua.incoming(INTERCOM, account_user=INTERCOM_ACCOUNT)
+    pump(agent, clock, lambda: any(verb == "dial" for verb, _ in ua.commands))
+    operator = [arg for verb, arg in ua.commands if verb == "dial"][0].split("-> ")[1]
+    ua.established(operator)
+    agent.poll()
+    assert agent.session.state.name == "BRIEFING" and ua.bridged_at is None
+    ua.dtmf(operator, "6")
+    agent.poll()
+    pump(agent, clock, lambda: ua.bridged_at is not None)
+    assert said(ua, "operator.menu_repeat"), "the re-prompt was not played before the bridge"
+    assert agent.session.bridged is True
+    assert agent.session.state.name == "WAITING_DIGIT"
+    ua.dtmf(operator, "1")
+    agent.poll()
+    assert [e["authorisation"] for e in agent.events(0).to_dict()["events"]
+            if e["kind"] == AgentEventKind.AUTHORISATION_RECEIVED.value] == ["open_now"]
+
+
+def test_a_digit_keyed_while_the_last_menu_line_is_still_playing_is_dropped(tmp_path, lane):
+    """The queue is empty but the last line is still sounding: not over yet."""
+    from gate_agent.ua import UaLeg
+
+    _served, url = lane
+    agent, ua, clock, operator = brief_and_bridge(tmp_path, url)
+    ua.dtmf(operator, "6")
+    agent.poll()
+    leg = UaLeg.OPERATOR
+    pump(agent, clock, lambda: not agent.session.speech[leg], step=0.05, limit=2000)
+    assert agent.session.free_at[leg] > clock(), "the last line is not playing; no measurement"
+    ua.dtmf(operator, "1")
+    agent.poll()
+    assert agent.session.digits_ignored == 1
+    assert not [e for e in agent.events(0).to_dict()["events"]
+                if e["kind"] == AgentEventKind.AUTHORISATION_RECEIVED.value]
+
+
 def test_a_site_that_still_enables_call_back_is_refused_by_name(tmp_path):
     from conftest import agent_raw_for
     from gate_agent.config import AgentConfig, ConfigError

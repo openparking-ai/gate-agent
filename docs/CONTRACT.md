@@ -3288,7 +3288,7 @@ refused before anybody knew which door they were.
 | `ticket_id` | The ticket this call confirmed, was told about, or whose vend it asked for. |
 | `ended_at` | When the call ended. `null` while it is live, and on `interrupted_by_restart`. |
 | `outcome` | `null` while live; then one of `authorisation_received`, `human_unreachable`, `nothing_usable`, `operator_hung_up`, `ticket_confirmed`, `told_ticket_on_screen`, `nothing_to_do`, `case_not_spoken`, `user_agent_lost`, `driver_hung_up`, `interrupted_by_restart` — set where the agent KNOWS it, never inferred afterwards. A refused call's outcome is its disposition. |
-| `digits_ignored` | How many digits the person keyed while a re-prompt was still playing, which were dropped unread — see the authorisation set. A **count, never the digits**. `0` on a record written before 2026-10-31, which did not count them. |
+| `digits_ignored` | How many digits the person keyed while a re-prompt was still playing, which were dropped unread — see the authorisation set. A **count, never the digits**. **Absent** on a record written before 2026-10-31, which did not count them: records are served as they were written, and a reader treats a missing `digits_ignored` as 0 (this package's own reader does). |
 | `recording` | **`null`. This version records no audio**: the user agent is not configured to record and nothing here asks it to. The field is here so the round that does fills it. |
 | `events[]` | Every agent event this call produced, exactly as `GET /v1/agent/events` serves it — vend asked for or refused, relay pulsed or not, with their codes. |
 

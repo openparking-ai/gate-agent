@@ -1840,6 +1840,27 @@ BREAKS = [
         "to": "        if session.ignoring_digits:\n"
               "            if False:",
     },
+    {
+        "name": "an_unknown_digit_in_the_first_menu_skips_the_bridge",
+        "why": "a person who keys a wrong digit before the bridge is never put through",
+        "file": "src/gate_agent/agent.py",
+        "from": "            session.ignoring_digits = True\n"
+                "            # AND THE BRIDGE STILL HAPPENS.",
+        "to": "            session.ignoring_digits = True\n"
+              "            session.state = State.WAITING_DIGIT\n"
+              "            session.deadline = self._clock() + self.config.nothing_usable_seconds\n"
+              "            return\n"
+              "            # AND THE BRIDGE STILL HAPPENS.",
+    },
+    {
+        "name": "the_last_menu_line_is_not_waited_for",
+        "why": "a digit keyed while the last menu line is still sounding is read",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if session.ignoring_digits:\n"
+                "            if not self._silent(session, UaLeg.OPERATOR, self._clock()):",
+        "to": "        if session.ignoring_digits:\n"
+              "            if session.speech[UaLeg.OPERATOR]:",
+    },
 ]
 
 

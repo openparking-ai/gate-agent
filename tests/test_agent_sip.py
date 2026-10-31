@@ -437,6 +437,57 @@ def test_six_then_a_number_over_real_sip_opens_nothing_and_a_later_one_does(worl
             ua.close()
 
 
+def test_a_wrong_digit_during_the_first_menu_still_puts_the_two_together(world, tmp_path):
+    """Measured on real SIP: a 6 keyed while the person is still being briefed.
+
+    The bridge is made when the briefing has been said. A wrong digit keyed
+    before then used to leave `bridged` false to the end of the call -- the
+    person and the driver never connected. Now the re-prompt plays, the
+    briefing completes, and the user agent is told to bridge.
+    """
+    _root, _registrar, ours, intercom, person, _stranger, _forger = world
+    agent, ua = agent_on(world, tmp_path)
+    caller = Ctrl(intercom.ctrl_port)
+    callee = Ctrl(person.ctrl_port)
+    try:
+        assert caller.command(
+            "dial", f"sip:{INTERCOM_ACCOUNT}@127.0.0.1:{ours.sip_port}"
+        )["ok"]
+        pump(agent, lambda: agent.session is not None, seconds=20)
+
+        def person_ringing() -> str | None:
+            for line in callee.command("listcalls")["data"].splitlines():
+                if "id " in line:
+                    return line.split("id ")[1].split("]")[0]
+            return None
+
+        pump(agent, lambda: person_ringing() is not None, seconds=40)
+        callee.command("accept", person_ringing())
+        pump(agent, lambda: agent.session.state.name == "BRIEFING", seconds=30)
+        callee.command("sndcode", "6")
+        pump(agent, lambda: agent.session.ignoring_digits, seconds=20)
+        assert agent.session.bridged is False, "bridged before the briefing; no measurement"
+        pump(agent, lambda: agent.session.bridged, seconds=60)
+        assert agent.session.state.name == "WAITING_DIGIT"
+        settle(agent, 1.0)
+        callee.command("sndcode", "1")
+        pump(
+            agent,
+            lambda: any(
+                event["kind"] == AgentEventKind.AUTHORISATION_RECEIVED.value
+                for event in agent.events(0).to_dict()["events"]
+            ),
+            seconds=20,
+        )
+    finally:
+        try:
+            ua.hangup_all()
+        finally:
+            caller.close()
+            callee.close()
+            ua.close()
+
+
 def test_a_call_to_an_address_that_is_not_an_account_is_refused_by_the_user_agent(
     world, tmp_path
 ):
