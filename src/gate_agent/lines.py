@@ -94,7 +94,6 @@ OPERATOR_LINES: tuple[str, ...] = (
     *(f"operator_case.{case.value}" for case in AgentCase),
     *(f"menu.{value.value}" for value in Authorisation),
     "operator.menu_repeat",
-    "operator.menu_callback_number",
     "operator.cannot_open",
     "operator.vend_commanded",
     #: SAID BEFORE THE CODE'S OWN SENTENCE, on every refused vend. A person
@@ -192,7 +191,7 @@ DISPLAY_TEXT: dict[str, dict[str, str]] = {
 #: configuration key in front of it.
 #:
 #: **`es-ES`, not `es-ES`.** The Spanish here is Castilian and says so in the key:
-#: `matrícula`, `aparcamiento`, `almohadilla`, `Pulse`. Shipped under a generic
+#: `matrícula`, `aparcamiento`, `Pulse`. Shipped under a generic
 #: `es-ES`, a garage in Texas or Bogotá would declare "Spanish", get this, and hear
 #: several words that are wrong for its drivers -- a register chosen for them by
 #: a package that never asked. A regional tag is the one thing that makes the
@@ -329,10 +328,6 @@ TEXT: dict[str, dict[str, str]] = {
         "en": "I am putting you through to somebody else.",
         "es-ES": "Le paso con otra persona.",
     },
-    "authorisation.call_back": {
-        "en": "A person will call you back.",
-        "es-ES": "Una persona le devolverá la llamada.",
-    },
     # --- what the driver is told when nothing worked ----------------------
     "driver.human_unreachable": {
         "en": "Nobody answered. Please try this intercom again, or use the help number at "
@@ -429,17 +424,9 @@ TEXT: dict[str, dict[str, str]] = {
     "menu.transfer": {
         "en": "Press 5 to transfer.", "es-ES": "Pulse 5 para transferir.",
     },
-    "menu.call_back": {
-        "en": "Press 6 to record a call-back number.",
-        "es-ES": "Pulse 6 para registrar un número de devolución de llamada.",
-    },
     "operator.menu_repeat": {
         "en": "I did not get that. Please try again.",
         "es-ES": "No lo he recogido. Inténtelo de nuevo.",
-    },
-    "operator.menu_callback_number": {
-        "en": "Key the call-back number, then hash.",
-        "es-ES": "Marque el número de devolución de llamada y luego almohadilla.",
     },
     # Played to the HUMAN when nothing at this door can act: no act token for
     # its lane, or a standalone intercom with no relay. It is one fixed sentence

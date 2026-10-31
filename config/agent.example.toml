@@ -201,7 +201,7 @@ directory = "/var/lib/openparking/gate-agent/tickets"
 # produced. Served on GET /v1/agent/calls. OPTIONAL: left out, the records go
 # to the published default, /var/lib/openparking/gate-agent/records (shared
 # safely with the monitor), with one warning at start. Declared and unusable,
-# startup refuses. A record holds the call-back number a person keyed, so the
+# startup refuses. A record holds who was rung and what they keyed, so the
 # directory is made 0700 and every file 0600.
 [records]
 directory = "/var/lib/openparking/gate-agent/records"
@@ -234,7 +234,7 @@ operator = "en"
 # called somebody who can authorise nothing.
 #
 # The DIGITS are fixed and published: 1 open now, 2 open and flag, 3 do not
-# open, 4 hold, 5 transfer, 6 call back. A site enables a subset; it does not
+# open, 4 hold, 5 transfer. A site enables a subset; it does not
 # renumber the set, because the person keying it is often the same person across
 # several garages at three in the morning.
 [authorisations]
@@ -243,7 +243,8 @@ open_and_flag = true
 do_not_open = true
 hold = true
 transfer = false
-call_back = true
+# Digit 6 (`call_back`) was removed on 2026-10-31. A line naming it is refused at
+# startup; a person who keys 6 is re-prompted like any digit not enabled here.
 
 # --- how old a lane decision may be and still be about THIS driver ----------
 # A SETTING AND AN ASSUMPTION, said plainly: nothing has measured how long a

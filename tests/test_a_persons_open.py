@@ -174,7 +174,7 @@ def test_a_refused_open_is_said_to_the_person_and_nobody_is_rung_again(tmp_path)
         assert agent.session is not None and agent.session.state.name == "WAITING_DIGIT"
         assert agent.session.operator_call == operator
         # AND THEIR TIME TO KEY STARTS WHEN THE MENU HAS BEEN READ, not under it.
-        assert heard[-1] == "menu.call_back.wav", heard
+        assert heard[-1] == "menu.hold.wav", heard
         assert agent.session.deadline is not None
         assert agent.session.deadline - agent._clock() >= 15.0
 
@@ -188,6 +188,43 @@ def test_a_refused_open_is_said_to_the_person_and_nobody_is_rung_again(tmp_path)
         # AND EVERY CALL OF THE CASE WAS ENDED WITH IT.
         assert agent.session is None
         assert ("hangup_all", "") in ua.commands
+
+
+def test_an_open_keyed_again_over_the_refusal_is_dropped_until_it_is_said(tmp_path):
+    """The other re-prompt: an open the lane refused, read back with the menu.
+
+    A person repeating `2` -- or keying `1` -- over the sentence saying why the
+    first did not work has not heard it. Dropped and counted until the menu has
+    finished; then a `1` is taken, and the lane is asked again.
+    """
+    server = our_server(lane := a_deny_lane(), act_token=ACT_TOKEN, arrive=False)
+    with serving(server) as url:
+        agent, ua, _screen = an_agent(tmp_path, url)
+        arrive(agent, lane)
+        press(agent, ua)
+        operator = to_the_person(agent, ua)
+        ua.dtmf(operator, "2")
+        agent.poll()
+        assert [one["code"] for one in events_of(agent, AgentEventKind.VEND_REFUSED)] == [
+            "not_completable"
+        ]
+        # Over the refusal and the menu: dropped.
+        ua.dtmf(operator, "1")
+        ua.dtmf(operator, "2")
+        agent.poll()
+        assert agent.session.digits_ignored == 2
+        assert len(events_of(agent, AgentEventKind.AUTHORISATION_RECEIVED)) == 1
+        # Once it has been said, a `1` counts.
+        for _ in range(30):
+            run(agent, 1)
+            if agent.session.deadline is not None:
+                break
+        ua.dtmf(operator, "1")
+        agent.poll()
+        assert [one["authorisation"] for one in
+                events_of(agent, AgentEventKind.AUTHORISATION_RECEIVED)] == [
+            "open_and_flag", "open_now",
+        ]
 
 
 def test_when_the_driver_leaves_after_a_refusal_the_persons_call_is_ended(tmp_path):

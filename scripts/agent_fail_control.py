@@ -292,9 +292,11 @@ BREAKS = [
         "name": "the_nothing_usable_timer_never_fires",
         "why": "no digit ever arrives and the driver waits for ever",
         "file": "src/gate_agent/agent.py",
-        "from": "        if session.state in (State.WAITING_DIGIT, State.COLLECTING_NUMBER):\n"
+        # Re-anchored 2026-10-31: `call_back` and its number-collecting state
+        # were removed, so the timer guards one state now. Same break.
+        "from": "        if session.state is State.WAITING_DIGIT:\n"
                 "            if session.deadline is not None and now >= session.deadline:",
-        "to": "        if session.state in (State.WAITING_DIGIT, State.COLLECTING_NUMBER):\n"
+        "to": "        if session.state is State.WAITING_DIGIT:\n"
               "            if False:",
     },
     {
@@ -1804,6 +1806,60 @@ BREAKS = [
         "file": "src/gate_agent/agent.py",
         "from": "        for call_id in self._calls.unfinished():",
         "to": "        for call_id in ():",
+    },
+    # ---- 6 IS NO LONGER call_back (2026-10-31, "no need for option 6"). ----
+    {
+        "name": "six_is_still_an_authorisation",
+        "why": "a person keying 6 from habit has a decision recorded they never made",
+        "file": "src/gate_agent/agent.py",
+        "from": "        value = AUTHORISATION_DIGITS.get(digit)\n"
+                "        if value is None or value not in self.config.authorisations:",
+        "to": "        value = AUTHORISATION_DIGITS.get(digit) or (\n"
+              "            Authorisation.HOLD if digit == \"6\" else None\n"
+              "        )\n"
+              "        if value is None or value not in self.config.authorisations:",
+    },
+    {
+        "name": "a_keyed_number_reaches_the_record",
+        "why": "a number is written beside an authorisation that no longer carries one",
+        "file": "src/gate_agent/agent.py",
+        "from": "            authorisation=value.value,\n"
+                "            human=self.config.human_sip_uri,\n"
+                "        )",
+        "to": "            authorisation=value.value,\n"
+              "            human=self.config.human_sip_uri,\n"
+              "            keyed=\"5551234\",\n"
+              "        )",
+    },
+    {
+        "name": "digits_over_a_re_prompt_are_read",
+        "why": "6 then a phone number keyed fast reads the number's 1 as open_now",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if session.ignoring_digits:\n"
+                "            if not self._silent(session, UaLeg.OPERATOR, self._clock()):",
+        "to": "        if session.ignoring_digits:\n"
+              "            if False:",
+    },
+    {
+        "name": "an_unknown_digit_in_the_first_menu_skips_the_bridge",
+        "why": "a person who keys a wrong digit before the bridge is never put through",
+        "file": "src/gate_agent/agent.py",
+        "from": "            session.ignoring_digits = True\n"
+                "            # AND THE BRIDGE STILL HAPPENS.",
+        "to": "            session.ignoring_digits = True\n"
+              "            session.state = State.WAITING_DIGIT\n"
+              "            session.deadline = self._clock() + self.config.nothing_usable_seconds\n"
+              "            return\n"
+              "            # AND THE BRIDGE STILL HAPPENS.",
+    },
+    {
+        "name": "the_last_menu_line_is_not_waited_for",
+        "why": "a digit keyed while the last menu line is still sounding is read",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if session.ignoring_digits:\n"
+                "            if not self._silent(session, UaLeg.OPERATOR, self._clock()):",
+        "to": "        if session.ignoring_digits:\n"
+              "            if session.speech[UaLeg.OPERATOR]:",
     },
 ]
 

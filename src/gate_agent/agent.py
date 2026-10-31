@@ -133,9 +133,6 @@ log = logging.getLogger(__name__)
 #: a property of how a person uses a keypad, not of a garage.
 REPROMPTS = 2
 
-#: The digit that ends a keyed number.
-END_OF_NUMBER = "#"
-
 #: The sample rate of every file this agent plays. What a narrowband SIP call
 #: carries, and what `scripts/build_audio.py` writes.
 NARROWBAND_RATE = 8000
@@ -154,8 +151,6 @@ class State(Enum):
     BRIEFING = auto()
     #: Bridged, and waiting for a digit this site accepts.
     WAITING_DIGIT = auto()
-    #: `CALL_BACK` was keyed and a number is being collected.
-    COLLECTING_NUMBER = auto()
     #: `HOLD` was keyed. The driver is re-prompted on an interval, because
     #: silence on a door station is indistinguishable from a dead intercom.
     HOLDING = auto()
@@ -271,8 +266,17 @@ class Session:
     state: State = State.SPEAKING_CASE
     bridged: bool = False
     authorisation: Authorisation | None = None
-    keyed: str = ""
     prompts_left: int = REPROMPTS
+    #: TRUE FROM A RE-PROMPT UNTIL IT HAS FINISHED PLAYING on the person's leg.
+    #: Every digit that arrives meanwhile is DROPPED: a person who keys 6 from
+    #: habit and then a phone number would otherwise have the number read as
+    #: menu choices, and a 1 in it is `open_now`. Only a digit keyed after the
+    #: menu has been read again counts.
+    ignoring_digits: bool = False
+    #: How many digits were dropped that way, for the record. The COUNT, never
+    #: the digits: they are whatever the person was keying, and that may be a
+    #: phone number.
+    digits_ignored: int = 0
     deadline: float | None = None
     #: WHICH LANGUAGES this call is being spoken in, and it is per call.
     #:
@@ -1551,8 +1555,7 @@ class Agent:
                 # the driver's own sentences.
                 session.speech[UaLeg.OPERATOR].clear()
                 session.line_due[UaLeg.OPERATOR] = None
-                if session.state in (State.BRIEFING, State.WAITING_DIGIT,
-                                     State.COLLECTING_NUMBER):
+                if session.state in (State.BRIEFING, State.WAITING_DIGIT):
                     self._nothing_usable(session, hung_up=True)
             return
         if event.kind is UaEventKind.DTMF and event.call_id == session.operator_call:
@@ -1948,6 +1951,10 @@ class Agent:
         for line in lines:
             self._say(session, UaLeg.OPERATOR, line, operator=True)
         self._menu(session)
+        # THE SAME RULE AS ANY RE-PROMPT: nothing keyed while the refusal and
+        # the menu are being read counts. A person repeating `1` over the
+        # sentence telling them why `1` did not work has not heard it.
+        session.ignoring_digits = True
         # Keyed during the briefing, the two legs are not put together yet, and
         # they are put together when this has been said -- as after a briefing.
         # Either way `nothing_usable_seconds` starts when the menu has been
@@ -2161,25 +2168,38 @@ class Agent:
                 self._say(session, UaLeg.OPERATOR, f"menu.{value.value}", operator=True)
 
     def _digit(self, session: Session, digit: str) -> None:
-        if session.state is State.COLLECTING_NUMBER:
-            if digit == END_OF_NUMBER:
-                self._finish_call_back(session)
-            elif digit.isdigit():
-                session.keyed += digit
-            return
         if session.state not in (State.BRIEFING, State.WAITING_DIGIT, State.HOLDING):
             return
+        if session.ignoring_digits:
+            if not self._silent(session, UaLeg.OPERATOR, self._clock()):
+                # Keyed over the re-prompt. Dropped, counted, and not held
+                # against the person's re-prompts either: it was never read.
+                session.digits_ignored += 1
+                return
+            session.ignoring_digits = False
         value = AUTHORISATION_DIGITS.get(digit)
         if value is None or value not in self.config.authorisations:
             # A digit for an authorisation this site has not enabled is NOT
             # accepted quietly and is not treated as the nearest enabled one.
+            # **6 lands here too**: it was `call_back` until 2026-10-31, and a
+            # person keying it from habit is re-prompted like any other unknown
+            # digit, with nothing recorded and no number collected after it.
             session.prompts_left -= 1
             if session.prompts_left < 0:
                 self._nothing_usable(session)
                 return
             self._say(session, UaLeg.OPERATOR, "operator.menu_repeat", operator=True)
             self._menu(session)
-            session.state = State.WAITING_DIGIT
+            # NOTHING KEYED UNDER THE RE-PROMPT COUNTS -- see `Session`.
+            session.ignoring_digits = True
+            # AND THE BRIDGE STILL HAPPENS. Keyed during the FIRST menu, the
+            # two legs are not together yet; this used to move straight to
+            # waiting for a digit, and the bridge -- made only when the
+            # briefing has been said -- never was: the person and the driver
+            # were never connected, to the end of the call. So back to the
+            # briefing, which bridges once the re-prompt has been said, as
+            # after a refused open (`_person_refused`).
+            session.state = State.WAITING_DIGIT if session.bridged else State.BRIEFING
             session.deadline = self._clock() + self.config.nothing_usable_seconds
             return
         self._authorised(session, value)
@@ -2192,13 +2212,7 @@ class Agent:
         that can, and `AgentConfig.act_surface` says where.
         """
         session.authorisation = value
-        if value is Authorisation.CALL_BACK:
-            session.state = State.COLLECTING_NUMBER
-            session.keyed = ""
-            session.deadline = self._clock() + self.config.nothing_usable_seconds
-            self._say(session, UaLeg.OPERATOR, "operator.menu_callback_number", operator=True)
-            return
-        self._record_authorisation(session, value, None)
+        self._record_authorisation(session, value)
         if value in OPENING_AUTHORISATIONS:
             # THE HUMAN'S WORD, ACTED ON. `OPEN_NOW` overrides a rule -- it is
             # the only authority the lane accepts on a `deny`, and the lane
@@ -2499,16 +2513,8 @@ class Agent:
         self._issue(lane, case, reading.decision_at, screen_required=False)
         return self._pending.pop(lane, None)
 
-    def _finish_call_back(self, session: Session) -> None:
-        keyed = session.keyed
-        if not keyed.isdigit() or not keyed:
-            self._nothing_usable(session)
-            return
-        self._record_authorisation(session, Authorisation.CALL_BACK, keyed)
-        self._say(session, UaLeg.DRIVER, f"authorisation.{Authorisation.CALL_BACK.value}")
-        session.state = State.CLOSING
-
-    def _record_authorisation(self, session, value: Authorisation, keyed: str | None) -> None:
+    def _record_authorisation(self, session, value: Authorisation) -> None:
+        """The authorisation, and nothing keyed with it: none carries a value now."""
         session.outcome = CallOutcome.AUTHORISATION_RECEIVED
         self._record(
             AgentEventKind.AUTHORISATION_RECEIVED,
@@ -2517,7 +2523,6 @@ class Agent:
             case=session.case.value if session.case else None,
             authorisation=value.value,
             human=self.config.human_sip_uri,
-            keyed=keyed,
         )
 
     def _human_unreachable(self, session: Session) -> None:
@@ -2607,7 +2612,7 @@ class Agent:
             # as it does after the briefing, not under the sentences.
             session.deadline = now + self.config.nothing_usable_seconds
             return
-        if session.state in (State.WAITING_DIGIT, State.COLLECTING_NUMBER):
+        if session.state is State.WAITING_DIGIT:
             if session.deadline is not None and now >= session.deadline:
                 self._nothing_usable(session)
             return
@@ -2906,7 +2911,10 @@ class Agent:
     def _note(self, session: Session, event: dict) -> None:
         """One event onto the live call's record, and the summary it moves."""
         call = session.call
-        changes: dict = {"events": call.events + (event,)}
+        changes: dict = {
+            "events": call.events + (event,),
+            "digits_ignored": session.digits_ignored,
+        }
         kind = event["kind"]
         if session.case is not None:
             changes["case"] = session.case.value
@@ -2918,7 +2926,6 @@ class Agent:
         elif kind == AgentEventKind.AUTHORISATION_RECEIVED:
             changes["authorisation"] = event["authorisation"]
             changes["authorisation_at"] = event["at"]
-            changes["keyed"] = event["keyed"]
         elif kind == AgentEventKind.CALL_ENDED:
             changes["ended_at"] = event["at"]
             changes["outcome"] = session.outcome.value if session.outcome else None
@@ -3137,7 +3144,6 @@ def _tested_versions(user_agent) -> tuple[str, ...]:
 
 __all__ = [
     "CONTRACT_VERSION",
-    "END_OF_NUMBER",
     "NARROWBAND_RATE",
     "KNOWN_LANE_VERSIONS",
     "REPROMPTS",

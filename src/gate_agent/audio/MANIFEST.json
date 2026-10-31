@@ -11,7 +11,7 @@
       "written_by": "The same session and the same commit as the English. It is a MACHINE TRANSLATION in the ordinary sense -- written by the model that wrote the English, not by a translator and not by a translation service.",
       "from": "The English line of the same key, in `gate_agent.lines.TEXT`.",
       "reviewed_by": "No native speaker and no professional translator. It was read line by line against its English source by an independent review session on 2026-08-30, which found every line a faithful rendering in a consistent `usted` register -- that is a check on FAITHFULNESS, not a sign-off on register or regional fit. THAT REVIEW DID NOT SEE the two `vehicle_too_close` lines: they were added 2026-09-20, are machine translations of their approved English in the same sense as the rest, and have had no review of any kind -- no native speaker, no professional translator, and no independent read against the English. Nor did it see the two `lane_closed` lines, added 2026-10-06 the same way and unreviewed in the same way.",
-      "register": "Castilian. `matrícula`, `aparcamiento`, `almohadilla`, `Pulse`. This is why the key is `es-ES` and not `es`: at a garage in Texas or Bogotá several of those words are wrong, and a generic tag would have chosen a register for that site's drivers without telling anybody."
+      "register": "Castilian. `matrícula`, `aparcamiento`, `Pulse`. This is why the key is `es-ES` and not `es`: at a garage in Texas or Bogotá several of those words are wrong, and a generic tag would have chosen a register for that site's drivers without telling anybody."
     }
   },
   "licences": {
@@ -25,18 +25,6 @@
     }
   },
   "files": {
-    "en/authorisation.call_back.wav": {
-      "line": "authorisation.call_back",
-      "language": "en",
-      "text": "A person will call you back.",
-      "text_provenance": "en",
-      "sha256": "1ea0bbcaf1a3672045fd67113d96a54ced0f3d8bb980197438a728e77f9e4f27",
-      "bytes": 32560,
-      "sample_rate": 8000,
-      "voice": "en-us",
-      "words_per_minute": 150,
-      "licence": "espeak-ng-formant"
-    },
     "en/authorisation.do_not_open.wav": {
       "line": "authorisation.do_not_open",
       "language": "en",
@@ -349,18 +337,6 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "en/menu.call_back.wav": {
-      "line": "menu.call_back",
-      "language": "en",
-      "text": "Press 6 to record a call-back number.",
-      "text_provenance": "en",
-      "sha256": "e05fdf7378ab1e391e5c68ca948a2d21b7d6c27c5569f8f1506b1a5890aa1184",
-      "bytes": 48022,
-      "sample_rate": 8000,
-      "voice": "en-us",
-      "words_per_minute": 150,
-      "licence": "espeak-ng-formant"
-    },
     "en/menu.do_not_open.wav": {
       "line": "menu.do_not_open",
       "language": "en",
@@ -440,18 +416,6 @@
       "text_provenance": "en",
       "sha256": "10a5fcb47d6ce0e5a449e724f0cc48b4ca36977faa1460ae6c89dc4b3002a4ea",
       "bytes": 71580,
-      "sample_rate": 8000,
-      "voice": "en-us",
-      "words_per_minute": 150,
-      "licence": "espeak-ng-formant"
-    },
-    "en/operator.menu_callback_number.wav": {
-      "line": "operator.menu_callback_number",
-      "language": "en",
-      "text": "Key the call-back number, then hash.",
-      "text_provenance": "en",
-      "sha256": "d766336612bd3ba6d7a290b3db91cc722647aed01705ad52e9e28d7c297455ee",
-      "bytes": 47006,
       "sample_rate": 8000,
       "voice": "en-us",
       "words_per_minute": 150,
@@ -865,18 +829,6 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es-ES/authorisation.call_back.wav": {
-      "line": "authorisation.call_back",
-      "language": "es-ES",
-      "text": "Una persona le devolverá la llamada.",
-      "text_provenance": "es-ES",
-      "sha256": "388f0f53b583be6c1eb9e6484119506ba091558364e8164ca1250f218794dbfd",
-      "bytes": 40878,
-      "sample_rate": 8000,
-      "voice": "es",
-      "words_per_minute": 150,
-      "licence": "espeak-ng-formant"
-    },
     "es-ES/authorisation.do_not_open.wav": {
       "line": "authorisation.do_not_open",
       "language": "es-ES",
@@ -1189,18 +1141,6 @@
       "words_per_minute": 150,
       "licence": "espeak-ng-formant"
     },
-    "es-ES/menu.call_back.wav": {
-      "line": "menu.call_back",
-      "language": "es-ES",
-      "text": "Pulse 6 para registrar un número de devolución de llamada.",
-      "text_provenance": "es-ES",
-      "sha256": "c3a996cccd697732cbb5dc67d476b2d36accdd48d0bdf6fbc82bf34575fa63fb",
-      "bytes": 67064,
-      "sample_rate": 8000,
-      "voice": "es",
-      "words_per_minute": 150,
-      "licence": "espeak-ng-formant"
-    },
     "es-ES/menu.do_not_open.wav": {
       "line": "menu.do_not_open",
       "language": "es-ES",
@@ -1280,18 +1220,6 @@
       "text_provenance": "es-ES",
       "sha256": "4061c750b44cc3cddcd0f45979607358c07e99bdd0910d6d20dbf083a3f6f2e9",
       "bytes": 80284,
-      "sample_rate": 8000,
-      "voice": "es",
-      "words_per_minute": 150,
-      "licence": "espeak-ng-formant"
-    },
-    "es-ES/operator.menu_callback_number.wav": {
-      "line": "operator.menu_callback_number",
-      "language": "es-ES",
-      "text": "Marque el número de devolución de llamada y luego almohadilla.",
-      "text_provenance": "es-ES",
-      "sha256": "8db217e8d8b11caa790a72e7cf0d9e72a5356edfc9ec78a7e9937b5fbc1f4d09",
-      "bytes": 65174,
       "sample_rate": 8000,
       "voice": "es",
       "words_per_minute": 150,

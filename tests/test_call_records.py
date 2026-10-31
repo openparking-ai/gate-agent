@@ -94,10 +94,7 @@ def test_a_call_says_who_was_rung_who_answered_and_what_they_keyed(tmp_path, lan
     ua.established(operator, peer_uri=f'"Duty desk" <{PERSON}:5060>;tag=a1')
     pump(agent, clock, utc, lambda: ua.bridged_at is not None)
     answered_at = calls(agent)[0]["person_answered_at"]
-    ua.dtmf(operator, "6")
-    agent.poll()
-    for digit in "5550100#":
-        ua.dtmf(operator, digit)
+    ua.dtmf(operator, "3")
     agent.poll()
     pump(agent, clock, utc, lambda: agent.session is None)
 
@@ -112,8 +109,10 @@ def test_a_call_says_who_was_rung_who_answered_and_what_they_keyed(tmp_path, lan
     assert record["rang_person_at"] == rang_at
     assert answered_at is not None and answered_at > rang_at
     assert record["person_answered_as"] == PERSON
-    assert record["authorisation"] == "call_back"
-    assert record["keyed"] == "5550100"
+    assert record["authorisation"] == "do_not_open"
+    # ALWAYS null from this build: no authorisation carries a value since
+    # `call_back` was removed. The field stays so readers of older records work.
+    assert record["keyed"] is None
     assert record["authorisation_at"] >= answered_at
     assert record["outcome"] == "authorisation_received"
     assert record["ended_at"] is not None
@@ -247,3 +246,34 @@ def test_off_loopback_the_agent_will_not_start_without_a_credential_file(tmp_pat
     assert main(["agent", "--config", str(tmp_path / "absent.toml"),
                  "--host", "0.0.0.0"]) == 2
     assert "no token" in capsys.readouterr().err
+
+
+def test_a_record_written_before_call_back_was_removed_is_still_read(tmp_path, lane):
+    """An older record may say `call_back` and carry a number. It is read, not refused.
+
+    Written as a build before 2026-10-31 wrote it, then found by a restart: the
+    restart closes a live one as interrupted, which means READING it back.
+    """
+    from gate_agent.contract import CallRecord
+
+    old = CallRecord(
+        call_id="c-" + "e" * 32, site_id="site-1", agent_id="agent-1",
+        disposition="answered", intercom=INTERCOM, lane="entry",
+        caller_stated_identity=INTERCOM, started_at="2026-10-29T22:16:40+00:00",
+        authorisation="call_back", keyed="5550100",
+    )
+    _served, url = lane
+    config = agent_config_for(tmp_path, lane_url=url)
+    from gate_agent.contract import call_record_unfinished
+    from gate_agent.records import RecordStore
+
+    store = RecordStore(config.records.directory, kind="c", time_key="started_at",
+                        lane_key="lane", unfinished=call_record_unfinished)
+    store.open()
+    store.put(old.call_id, old.to_dict())
+    store.close()
+    agent = agent_for(config, FakeUa(), clock=FakeClock(), now=FakeUtc())
+    [kept] = calls(agent)
+    assert kept["call_id"] == old.call_id
+    assert kept["authorisation"] == "call_back" and kept["keyed"] == "5550100"
+    assert kept["outcome"] == "interrupted_by_restart", "the old record was not read back"

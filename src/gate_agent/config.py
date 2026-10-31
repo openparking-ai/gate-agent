@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 from .camera import DEFAULT_MAX_SNAPSHOT_BYTES, DEFAULT_SNAPSHOT_TIMEOUT
 from .cases import DEFAULT_DECISION_MAX_AGE_SECONDS
 from .client import DEFAULT_TIMEOUT
-from .contract import Authorisation, SinkKind, TargetKind
+from .contract import RETIRED_AUTHORISATIONS, Authorisation, SinkKind, TargetKind
 from .display import DisplayUnavailable, open_display
 from .lines import (
     DRIVER_LINES,
@@ -2132,6 +2132,16 @@ def _refuse_undrawable_display_lines(driver_languages) -> None:
 def _authorisations(raw: dict, transfer_sip_uri) -> frozenset[Authorisation]:
     """`[authorisations]`, each a boolean, no default, at least one true."""
     known = {value.value for value in Authorisation}
+    retired = sorted(set(raw) & set(RETIRED_AUTHORISATIONS))
+    if retired:
+        # REFUSED BY NAME, with what happened to it: a site that still says
+        # `call_back = true` believes a person can key 6 for a call-back number,
+        # and nobody can. Said at startup rather than found at 3am.
+        raise ConfigError(
+            f"[authorisations] declares {', '.join(retired)}, which was removed on 2026-10-31: "
+            "keypad 6 no longer records a call-back number, and a 6 is now re-prompted like "
+            "any other digit this site has not enabled. Delete the line."
+        )
     unknown = sorted(set(raw) - known)
     if unknown:
         raise ConfigError(
