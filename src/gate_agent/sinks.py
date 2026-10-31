@@ -77,14 +77,36 @@ class DeliveryFailed(Exception):
     `<address>`, because this text is logged and the library it came from quotes
     recipients. `reply_code` and `http_status` are the far end's answer where
     there was one, for the record.
+
+    `transient` says whether trying again could help. True for what a moment
+    can mend -- the network, a timeout, SMTP 4xx, HTTP 5xx and 429 -- and false
+    for a refusal that would be refused again: SMTP 5xx, any other HTTP 4xx, a
+    redirect. A permanent refusal is recorded as failed and NOT retried: three
+    more 550s are three more lines in somebody's mail log and nobody told.
     """
 
     def __init__(
-        self, message: str, *, reply_code: int | None = None, http_status: int | None = None
+        self,
+        message: str,
+        *,
+        reply_code: int | None = None,
+        http_status: int | None = None,
+        transient: bool = True,
     ) -> None:
         super().__init__(redact_addresses(message))
         self.reply_code = reply_code
         self.http_status = http_status
+        self.transient = transient
+
+
+def smtp_transient(code: int | None) -> bool:
+    """SMTP's own rule: 4xx is "try again later", 5xx is "do not"."""
+    return code is not None and 400 <= code < 500
+
+
+def http_transient(status: int | None) -> bool:
+    """A server error or "slow down" may pass; any other refusal will not."""
+    return status is not None and (status >= 500 or status == 429)
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,12 +227,15 @@ class EmailSink:
             raise DeliveryFailed(
                 f"{self.name}: the server refused every recipient (SMTP {codes})",
                 reply_code=codes[0] if codes else None,
+                # Worth another try only if some recipient was told "later".
+                transient=any(smtp_transient(code) for code in codes),
             ) from exc
         except smtplib.SMTPResponseException as exc:
             raise DeliveryFailed(
                 f"{self.name}: the server answered SMTP {exc.smtp_code}: "
                 f"{_reply_text(exc.smtp_error)}",
                 reply_code=exc.smtp_code,
+                transient=smtp_transient(exc.smtp_code),
             ) from exc
         except (OSError, smtplib.SMTPException) as exc:
             raise DeliveryFailed(f"{self.name}: {exc}") from exc
@@ -296,7 +321,9 @@ class WebhookSink:
             # endpoint that answers `Location` has not been paged, and reporting
             # that as delivered is how a sink comes to tell nobody for a month.
             raise DeliveryFailed(
-                f"{self.name}: answered HTTP {exc.code}", http_status=exc.code
+                f"{self.name}: answered HTTP {exc.code}",
+                http_status=exc.code,
+                transient=http_transient(exc.code),
             ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise DeliveryFailed(f"{self.name}: {exc}") from exc
@@ -304,7 +331,11 @@ class WebhookSink:
             # A 4xx from a paging endpoint is a delivery that did not happen.
             # Treating a status nobody looked at as success is how a webhook
             # sink comes to page nobody for a month.
-            raise DeliveryFailed(f"{self.name}: answered HTTP {status}", http_status=status)
+            raise DeliveryFailed(
+                f"{self.name}: answered HTTP {status}",
+                http_status=status,
+                transient=http_transient(status),
+            )
         return Receipt(http_status=status)
 
 

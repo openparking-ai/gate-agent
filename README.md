@@ -230,10 +230,17 @@ the dialled account names, when it started, who was rung and when, who answered
 and when, what they keyed, how it ended, and every event the call produced. No
 audio is recorded.
 
+A failed delivery is retried only when a moment could mend it (the network,
+SMTP 4xx, HTTP 5xx or 429), never once it would say an old fact after a new one
+— a `raised` is not retried after its `recovered` has gone out — and a retry
+survives a restart. Every payload carries the message's `record_id`, so a
+receiver can drop a duplicate.
+
 Both stores survive a restart, cursor included; both are bounded by age and by
-size, oldest first, and the health routes count everything a bound removed. The
-directory is DECLARED, never defaulted — the files hold the addresses and numbers
-a site configured.
+size, oldest first, and the health routes count everything a bound removed.
+`[records] directory` has a published default, shared safely by both processes;
+it is made `0700` with `0600` files, and a second process of the same kind on it
+is refused.
 
 ## What it publishes
 

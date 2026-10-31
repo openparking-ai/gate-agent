@@ -324,11 +324,18 @@ BREAKS = [
         "name": "an_orphaned_operator_leg",
         "why": "a driver hangs up and the person is left live, to be bridged into the next case",
         "file": "src/gate_agent/agent.py",
+        # Re-anchored 2026-10-30: the call record put the driver-hung-up
+        # outcome between the hangup and `_end`. Same break: the person's leg
+        # is not hung up when the driver's closes.
         "from": "                if session.operator_call:\n"
                 "                    self.ua.hangup(session.operator_call)\n"
                 "                    session.operator_call = None\n"
+                "                if session.outcome is None:\n"
+                "                    session.outcome = CallOutcome.DRIVER_HUNG_UP\n"
                 "                self._end(session)",
-        "to": "                self._end(session)",
+        "to": "                if session.outcome is None:\n"
+              "                    session.outcome = CallOutcome.DRIVER_HUNG_UP\n"
+              "                self._end(session)",
     },
     {
         "name": "keyed_takes_anything",

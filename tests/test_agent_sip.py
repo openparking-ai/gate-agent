@@ -736,7 +736,9 @@ def test_a_restarted_agent_releases_the_calls_the_previous_one_left(world, tmp_p
         assert len(before) >= 2, before
 
         # THE AGENT DIES. Its socket goes; baresip does not, and it keeps both.
+        # So does its hold on the call records, which a dead process lets go.
         first_ua.close()
+        first.close_records()
         assert ours.process.poll() is None, "baresip died; this measures the wrong thing"
 
         # A SECOND AGENT PROCESS starts against the same user agent.

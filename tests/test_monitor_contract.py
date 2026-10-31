@@ -595,8 +595,10 @@ def _record_defaults():
         RETRY_ATTEMPTS_BOUNDS,
         RETRY_SECONDS_BOUNDS,
     )
+    from gate_agent.records import DEFAULT_RECORD_DIRECTORY
 
     return {
+        "directory": str(DEFAULT_RECORD_DIRECTORY),
         "retention_days": DEFAULT_RECORD_RETENTION_DAYS,
         "max_bytes": DEFAULT_RECORD_MAX_BYTES,
         "max_bytes_bounds": list(RECORD_MAX_BYTES_BOUNDS),

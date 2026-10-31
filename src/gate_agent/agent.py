@@ -104,7 +104,13 @@ from .contract import (
 from .display import DisplayUnavailable, Frame, frame_for, frame_wanted
 from .fee import FeeScreen, fee_frame_for, screen_for
 from .lines import DISPLAY_TEXT, UNKNOWN_REFUSAL, audio_name
-from .records import RecordQuery, RecordStore, RecordUnwritable, new_record_id
+from .records import (
+    RecordQuery,
+    RecordStore,
+    RecordStoreInUse,
+    RecordUnwritable,
+    new_record_id,
+)
 from .relay import RelayRefusedUs, RelayUnreachable
 from .relay import build as relay_build
 from .tickets import CONFIRMED, ISSUED, TicketStore, confirmed, mint, vended, voided
@@ -470,6 +476,7 @@ class Agent:
         #: THE DURABLE RECORD of every call, aged on the clock that stamps it.
         self._calls = RecordStore(
             config.records.directory,
+            kind="c",
             time_key="started_at",
             lane_key="lane",
             unfinished=call_record_unfinished,
@@ -490,12 +497,40 @@ class Agent:
         """
         self._measure_audio()
         # THE CALL RECORDS BEFORE THE USER AGENT, for the reason the tickets
-        # are: a directory that will not take a write is a configuration this
-        # process must not run on -- it would answer calls for a fortnight and
-        # keep no account of one -- and finding out costs a `mkdir`.
-        self._calls.open()
-        self._code(AgentCode.RECORD_STORE_UNWRITABLE, self.config.agent_id, HealthState.OK)
-        self._close_interrupted_calls()
+        # are: finding out costs a `mkdir`. A DECLARED directory that cannot be
+        # used refuses, and so does a store another process holds. The DEFAULT
+        # one does not: an agent that would not start for want of a line in its
+        # configuration answers nobody, so it starts, says where the records
+        # are once, and where even that cannot be used runs with
+        # `record_store_unwritable` active.
+        if not self.config.records.declared:
+            log.warning(
+                "[records] directory is not declared; every call is kept in %s",
+                self.config.records.directory,
+            )
+        try:
+            self._calls.open()
+        except RecordStoreInUse:
+            raise
+        except RecordUnwritable as exc:
+            if self.config.records.declared:
+                raise
+            log.error("%s", exc)
+            self._code(
+                AgentCode.RECORD_STORE_UNWRITABLE, self.config.agent_id, HealthState.ACTIVE
+            )
+        else:
+            self._code(AgentCode.RECORD_STORE_UNWRITABLE, self.config.agent_id, HealthState.OK)
+            self._close_interrupted_calls()
+        try:
+            self._start_the_rest()
+        except BaseException:
+            # A start that failed lets the lock go, as the process exiting on
+            # it would: the next start must not find its own corpse holding it.
+            self._calls.close()
+            raise
+
+    def _start_the_rest(self) -> None:
         self._code(AgentCode.AUDIO_MISSING, self.config.agent_id, HealthState.OK)
         for leg in UaLeg:
             self._code(AgentCode.AUDIO_PLAYBACK_FAILED, leg.value, HealthState.OK)
@@ -517,6 +552,10 @@ class Agent:
         self._ua_version = self.ua.version()
         self._code(AgentCode.UA_UNREACHABLE, self.config.agent_id, HealthState.OK)
         self._code(AgentCode.UA_UNSUPPORTED_VERSION, self.config.agent_id, HealthState.OK)
+
+    def close_records(self) -> None:
+        """Let the call store's lock go. What an exiting process does."""
+        self._calls.close()
 
     def _close_interrupted_calls(self) -> None:
         """A call the LAST run was on when it stopped: closed, and said so.

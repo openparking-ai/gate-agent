@@ -40,23 +40,31 @@ everything: a page whose `since` is behind a record that was removed before it
 was served says `reset`.
 
 **These files hold personal data** -- an email address a site configured, a
-call-back number a person keyed -- so the directory is created `0700` and every
-file `0600`, and the directory is DECLARED, never defaulted, for the reason the
-capture store's is: a default would put it somewhere nobody chose.
+call-back number a person keyed -- so the directory is made `0700` at every
+start, even when it already existed wider, and every file is written `0600`. A
+directory that cannot be made private is refused, in words.
 
-**One process per directory**, stated rather than locked, as the capture and
-ticket stores state it. Inside the process the store IS locked: the poller writes
-and the read surface's threads read.
+**One process per KIND per directory, and that one is LOCKED.** The monitor's
+messages and the agent's calls may share a directory -- the default does -- so
+everything a store touches carries its kind: its record files (`m-` or `c-`),
+its head file, its half-written files, and an exclusive lock file it holds for
+as long as it is open. A second process opening the same kind in the same
+directory is refused at start, naming the lock; it would otherwise share one
+counter and sweep away the other's writes. Inside the process the store is
+locked too: the poller writes and the read surface's threads read.
 """
 
 from __future__ import annotations
 
 import bisect
+import fcntl
 import json
 import logging
 import os
 import re
+import stat
 import threading
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -109,7 +117,18 @@ MAX_LANE_LENGTH = 128
 MAX_TIME_LENGTH = 64
 
 TEMP_PREFIX = ".tmp-"
-HEAD_FILE = "head.json"
+
+#: The two kinds of record, by the letter their ids start with. Every file a
+#: store touches is named for its kind, so two kinds can share one directory.
+KINDS = {"m": "messages", "c": "calls"}
+
+#: Where the records go when a site does not say: one directory under this
+#: package's state directory, shared by the monitor and the agent -- which is
+#: safe because every file in it is named for its kind and each kind is locked.
+#: A PUBLISHED DEFAULT. A site that declares nothing gets its records here and
+#: one warning at start saying so; a monitor that refused to start for want of
+#: this line would page nobody.
+DEFAULT_RECORD_DIRECTORY = Path("/var/lib/openparking/gate-agent/records")
 
 #: What a record id is: a one-letter kind, a dash, and 32 hex digits from
 #: `os.urandom`. It is a FILENAME, so it is checked against this before it is
@@ -147,6 +166,15 @@ class RecordUnwritable(Exception):
     the exact gap this exists to close -- and from `put()` while running, where
     the caller reports it as a code and carries on: the message still goes out,
     because a record store that could stop a page is worse than no record.
+    """
+
+
+class RecordStoreInUse(RecordUnwritable):
+    """Another process holds this kind's lock in this directory. Always refused.
+
+    Two monitors -- or two agents -- writing one directory would share a counter
+    and sweep away each other's half-written files, so the second is refused at
+    start, whatever else is true, and the message names the lock file.
     """
 
 
@@ -255,6 +283,7 @@ class _Entry:
     lane: str | None
     size: int
     unfinished: bool
+    key: str | None = None
 
 
 def _utc_now() -> datetime:
@@ -274,20 +303,37 @@ class RecordStore:
         self,
         directory: Path,
         *,
+        kind: str,
         time_key: str,
         lane_key: str,
         unfinished: Callable[[dict], bool],
+        key: Callable[[dict], str | None] | None = None,
         retention_days: int = DEFAULT_RECORD_RETENTION_DAYS,
         max_bytes: int = DEFAULT_RECORD_MAX_BYTES,
         now: Callable[[], datetime] = _utc_now,
     ) -> None:
+        if kind not in KINDS:
+            raise ValueError(f"no record kind {kind!r}")
         self.directory = Path(directory)
+        self.kind = kind
         self.retention_days = retention_days
         self.max_bytes = max_bytes
         self._time_key = time_key
         self._lane_key = lane_key
         self._unfinished = unfinished
+        self._key = key or (lambda body: None)
         self._now = now
+        self._file = re.compile(rf"^{kind}-[0-9a-f]{{32}}\.json$")
+        self._head_name = f"head.{KINDS[kind]}.json"
+        self._lock_name = f"lock.{KINDS[kind]}"
+        #: The lock file's descriptor while this store is open, closed by
+        #: `close()` or when the store is collected -- so a test that drops a
+        #: store, like a process that exits, lets the next one in.
+        self._lock_fd: int | None = None
+        self._release = None
+        #: key -> the ids of every record about it, for "has a LATER message
+        #: about the same thing been delivered?" without reading the directory.
+        self._by_key: dict[str, set[str]] = {}
         self._lock = threading.RLock()
         #: record id -> entry, IN REVISION ORDER. A write pops and re-inserts,
         #: and every write takes the highest revision, so iteration order is
@@ -315,22 +361,50 @@ class RecordStore:
     # -- opening ------------------------------------------------------------
 
     def open(self) -> None:
-        """Make the directory, sweep a crash's leftovers, rebuild, and purge."""
+        """Make the directory private, take the lock, sweep, rebuild, and purge."""
         with self._lock:
+            if self._opened:
+                return
             try:
                 self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            except OSError as exc:
+                self._writable = False
+                raise RecordUnwritable(
+                    f"the record directory {self.directory} could not be made: {exc}. Every "
+                    "message this process sends and every call it takes is meant to be kept "
+                    "there, and nothing would be."
+                ) from exc
+            try:
+                # TIGHTENED, not assumed: `mkdir`'s mode applies only to a
+                # directory it creates, and one that already existed `0755`
+                # would publish every record in it to every user on the box.
+                # Group and other lose everything; the owner's bits are left as
+                # they are, so a directory somebody made read-only stays so and
+                # is refused below for that, not quietly made writable.
+                mode = stat.S_IMODE(self.directory.stat().st_mode)
+                if mode & 0o077:
+                    os.chmod(self.directory, mode & 0o700)
+            except OSError as exc:
+                self._writable = False
+                raise RecordUnwritable(
+                    f"the record directory {self.directory} could not be made private (0700): "
+                    f"{exc}. Its files hold the addresses and numbers a site configured, so it "
+                    "is not used open. Give this process ownership of it, or name another."
+                ) from exc
+            self._take_lock()
+            try:
                 # PROBED, not assumed: a directory that exists and refuses a
                 # write is the case `mkdir` cannot see.
-                probe = self.directory / f"{TEMP_PREFIX}probe"
+                probe = self.directory / f"{TEMP_PREFIX}probe.{KINDS[self.kind]}"
                 self._write_bytes(probe, b"{}")
                 probe.unlink(missing_ok=True)
             except OSError as exc:
                 self._writable = False
+                self.close()
                 raise RecordUnwritable(
-                    f"the record directory {self.directory} will not take a write: {exc}. "
-                    "Refusing to start: every message this process sends and every call it "
-                    "takes is meant to be on this disk, and a process that ran without it would "
-                    "leave no account of either."
+                    f"the record directory {self.directory} will not take a write: {exc}. Every "
+                    "message this process sends and every call it takes is meant to be kept "
+                    "there, and nothing would be."
                 ) from exc
             self._writable = True
             self._sweep_temporary()
@@ -338,8 +412,47 @@ class RecordStore:
             self._opened = True
             self.purge()
 
+    def _take_lock(self) -> None:
+        path = self.directory / self._lock_name
+        try:
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as exc:
+            self._writable = False
+            raise RecordUnwritable(
+                f"the record directory {self.directory} will not take a write -- its lock "
+                f"file could not be made: {exc}. Every message this process sends and every "
+                "call it takes is meant to be kept there, and nothing would be."
+            ) from exc
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(descriptor)
+            raise RecordStoreInUse(
+                f"another process holds {path}: it is already keeping {KINDS[self.kind]} in "
+                f"{self.directory}. Refusing to start: two processes writing one store share one "
+                "counter and sweep away each other's writes. Stop the other one, or give this "
+                "one its own [records] directory."
+            ) from exc
+        self._lock_fd = descriptor
+        self._release = weakref.finalize(self, os.close, descriptor)
+
+    def close(self) -> None:
+        """Let the lock go. What an exiting process does by exiting."""
+        with self._lock:
+            if self._release is not None:
+                self._release()
+            self._release = None
+            self._lock_fd = None
+            self._opened = False
+
     def _sweep_temporary(self) -> None:
-        left = [one for one in self.directory.glob(f"{TEMP_PREFIX}*") if one.is_file()]
+        """What a crash left half-written -- THIS kind's, and nobody else's."""
+        mine = (
+            f"{TEMP_PREFIX}{self.kind}-*",
+            f"{TEMP_PREFIX}{self._head_name}",
+            f"{TEMP_PREFIX}probe.{KINDS[self.kind]}",
+        )
+        left = [one for pattern in mine for one in self.directory.glob(pattern) if one.is_file()]
         for one in left:
             one.unlink(missing_ok=True)
         if left:
@@ -348,15 +461,16 @@ class RecordStore:
     def _rebuild(self) -> None:
         self._index.clear()
         self._by_age.clear()
+        self._by_key.clear()
         self._bytes = 0
         self._unreadable = 0
         head = self._read_head()
         found: list[tuple[int, str, _Entry]] = []
-        for path in self.directory.glob("*.json"):
-            if path.name == HEAD_FILE:
+        for path in self.directory.glob(f"{self.kind}-*.json"):
+            if not self._file.match(path.name):
                 continue
             record_id = path.stem
-            body = self._read_path(path) if RECORD_ID.match(record_id) else None
+            body = self._read_path(path)
             entry = self._entry_of(body, path) if body is not None else None
             if entry is None:
                 # LEFT, and counted. A file this build cannot read the age of is
@@ -367,9 +481,7 @@ class RecordStore:
                 continue
             found.append((entry.revision, record_id, entry))
         for _revision, record_id, entry in sorted(found):
-            self._index[record_id] = entry
-            bisect.insort(self._by_age, (entry.moment, record_id))
-            self._bytes += entry.size
+            self._insert(record_id, entry)
         newest = max((entry.revision for entry in self._index.values()), default=0)
         self._revision = max(int(head.get("revision", 0)), newest)
         self._removed_through = int(head.get("removed_through", 0))
@@ -402,11 +514,19 @@ class RecordStore:
             lane=lane if isinstance(lane, str) else None,
             size=size,
             unfinished=bool(self._unfinished(body)),
+            key=self._key(body),
         )
+
+    def _insert(self, record_id: str, entry: _Entry) -> None:
+        self._index[record_id] = entry
+        bisect.insort(self._by_age, (entry.moment, record_id))
+        self._bytes += entry.size
+        if entry.key is not None:
+            self._by_key.setdefault(entry.key, set()).add(record_id)
 
     def _read_head(self) -> dict:
         try:
-            body = json.loads((self.directory / HEAD_FILE).read_text(encoding="utf-8"))
+            body = json.loads((self.directory / self._head_name).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         return body if isinstance(body, dict) else {}
@@ -420,7 +540,7 @@ class RecordStore:
         exactly as it was, so a write that failed is not served as one that
         happened.
         """
-        if not RECORD_ID.match(record_id):
+        if not RECORD_ID.match(record_id) or not record_id.startswith(f"{self.kind}-"):
             raise ValueError("a record id is a kind, a dash and 32 hex digits, and is not a path")
         with self._lock:
             if not self._opened:
@@ -437,13 +557,9 @@ class RecordStore:
                 self._writable = False
                 raise RecordUnwritable(f"a record could not be written: {exc}") from exc
             self._writable = True
-            previous = self._index.pop(record_id, None)
-            if previous is not None:
-                self._bytes -= previous.size
-                self._by_age.remove((previous.moment, record_id))
-            self._index[record_id] = entry
-            bisect.insort(self._by_age, (entry.moment, record_id))
-            self._bytes += entry.size
+            if record_id in self._index:
+                self._forget(record_id)
+            self._insert(record_id, entry)
             self._make_room(keep=record_id)
             self.purge()
             return revision
@@ -460,6 +576,7 @@ class RecordStore:
             lane=lane if isinstance(lane, str) else None,
             size=size,
             unfinished=bool(self._unfinished(body)),
+            key=self._key(body),
         )
 
     def _write_bytes(self, path: Path, data: bytes) -> None:
@@ -469,6 +586,9 @@ class RecordStore:
             descriptor = os.open(
                 temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
             )
+            # AND SET, not only asked for: `os.open`'s mode is filtered by the
+            # umask and ignored for a file that already exists.
+            os.fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)
                 handle.flush()
@@ -492,7 +612,7 @@ class RecordStore:
             "dropped_through": self._dropped_through,
         }
         self._write_bytes(
-            self.directory / HEAD_FILE,
+            self.directory / self._head_name,
             (json.dumps(head, sort_keys=True) + "\n").encode(),
         )
 
@@ -544,10 +664,20 @@ class RecordStore:
                 dropped, self.max_bytes,
             )
 
-    def _remove(self, record_id: str) -> None:
+    def _forget(self, record_id: str) -> _Entry:
         entry = self._index.pop(record_id)
         self._by_age.remove((entry.moment, record_id))
         self._bytes -= entry.size
+        if entry.key is not None:
+            same = self._by_key.get(entry.key)
+            if same is not None:
+                same.discard(record_id)
+                if not same:
+                    del self._by_key[entry.key]
+        return entry
+
+    def _remove(self, record_id: str) -> None:
+        entry = self._forget(record_id)
         self._removed_through = max(self._removed_through, entry.revision)
         (self.directory / f"{record_id}.json").unlink(missing_ok=True)
 
@@ -567,6 +697,26 @@ class RecordStore:
             if record_id not in self._index:
                 return None
             return self._read_path(self.directory / f"{record_id}.json")
+
+    def later(self, record_id: str) -> list[dict]:
+        """Every record about the SAME THING as this one, written for a later moment.
+
+        "The same thing" is the `key` this store was given -- for a message, its
+        origin, target, code and subject. Oldest first. Read for one question:
+        has something newer already been said, so that saying this again would
+        put an old fact after a new one?
+        """
+        with self._lock:
+            entry = self._index.get(record_id)
+            if entry is None or entry.key is None:
+                return []
+            later = sorted(
+                (self._index[other].moment, other)
+                for other in self._by_key.get(entry.key, ())
+                if other != record_id and self._index[other].moment > entry.moment
+            )
+            bodies = [self._read_path(self.directory / f"{other}.json") for _m, other in later]
+            return [body for body in bodies if body is not None]
 
     def unfinished(self) -> tuple[str, ...]:
         """The records the LAST run left in progress, oldest revision first."""
@@ -657,11 +807,14 @@ __all__ = [
     "DEFAULT_RECORD_MAX_BYTES",
     "DEFAULT_RECORD_RETENTION_DAYS",
     "MAX_PAGE_LIMIT",
+    "DEFAULT_RECORD_DIRECTORY",
+    "KINDS",
     "QUERY_KEYS",
     "RECORD_MAX_BYTES_BOUNDS",
     "BadQuery",
     "RecordQuery",
     "RecordStore",
+    "RecordStoreInUse",
     "RecordUnwritable",
     "new_record_id",
     "parse_query",

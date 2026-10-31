@@ -51,6 +51,7 @@ from .lines import (
     undrawable_display_text,
 )
 from .records import (
+    DEFAULT_RECORD_DIRECTORY,
     DEFAULT_RECORD_MAX_BYTES,
     DEFAULT_RECORD_RETENTION_DAYS,
     RECORD_MAX_BYTES_BOUNDS,
@@ -428,30 +429,26 @@ class WebhookSinkConfig:
 class RecordSettings:
     """`[records]`: where the durable account of what a process did is kept.
 
-    The DIRECTORY IS DECLARED, never defaulted, for the reason the capture
-    store's and the ticket store's are: these files hold personal data -- the
-    email address a site configured, the number a person keyed -- and a default
-    would put them somewhere nobody chose. `retention_days` and `max_bytes` have
-    published defaults; see `records.py` for what each is drawn against.
+    The directory has a PUBLISHED DEFAULT, `records.DEFAULT_RECORD_DIRECTORY`,
+    and that is a decision against this package's habit, made for one reason: a
+    monitor that refused to start for want of this line would page nobody. So
+    an undeclared directory starts, with one warning saying where the records
+    went; a DECLARED one that cannot be used refuses, because then somebody
+    chose it and it is wrong. The files hold personal data, so whichever it is
+    is made `0700` and every file `0600`.
     """
 
-    directory: Path
+    directory: Path = DEFAULT_RECORD_DIRECTORY
     retention_days: int = DEFAULT_RECORD_RETENTION_DAYS
     max_bytes: int = DEFAULT_RECORD_MAX_BYTES
+    #: Whether a site WROTE the directory. Decides what an unusable one does.
+    declared: bool = True
 
 
 def _records(raw: dict, relative_to: Path | None, process: str) -> RecordSettings:
-    if not raw:
-        raise ConfigError(
-            f"the {process} configuration has no [records] table. Declare [records] directory: "
-            "every message this process sends and every call it handles is kept there, so a "
-            "platform can read what happened after the fact -- and there is no default, "
-            "because the files hold the addresses and numbers a site configured and a default "
-            "would put them somewhere nobody chose."
-        )
     directory = raw.get("directory")
-    if not isinstance(directory, str) or not directory.strip():
-        raise ConfigError("[records] does not declare a directory")
+    if directory is not None and (not isinstance(directory, str) or not directory.strip()):
+        raise ConfigError("[records].directory must be a path")
     retention = _positive_int(
         raw.get("retention_days"), "[records].retention_days", DEFAULT_RECORD_RETENTION_DAYS
     )
@@ -471,9 +468,13 @@ def _records(raw: dict, relative_to: Path | None, process: str) -> RecordSetting
             "size rule would delete what the retention rule keeps."
         )
     return RecordSettings(
-        directory=_resolve(directory, relative_to),
+        directory=(
+            _resolve(directory, relative_to) if directory is not None
+            else DEFAULT_RECORD_DIRECTORY
+        ),
         retention_days=retention,
         max_bytes=max_bytes,
+        declared=directory is not None,
     )
 
 
@@ -503,7 +504,7 @@ class MonitorConfig:
     site_id: str
     targets: tuple[Target, ...]
     sinks: tuple[object, ...]
-    #: `[records]`, DECLARED. Where every message this monitor sends is kept.
+    #: `[records]`. Where every message this monitor sends is kept.
     records: RecordSettings
     #: How long a state must hold before it is reported AGAIN. `None` -- the
     #: default -- means never: a fault is announced once and its recovery is
@@ -1438,7 +1439,7 @@ class AgentConfig:
     authorisations: frozenset[Authorisation]
     human_sip_uri: str
     audio_directory: Path
-    #: `[records]`, DECLARED. Where every call this agent handles is kept.
+    #: `[records]`. Where every call this agent handles is kept.
     records: RecordSettings
     transfer_sip_uri: str | None = None
     no_answer_seconds: float = DEFAULT_NO_ANSWER_SECONDS

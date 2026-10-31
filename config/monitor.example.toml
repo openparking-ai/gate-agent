@@ -19,11 +19,14 @@ event_window_depth = 256
 
 # Every message this monitor sends is kept here, with who it was for and what
 # each sink answered, and served on GET /v1/monitor/messages so a platform can
-# build its account of an exception after the fact. DECLARED, no default: these
-# files hold the addresses configured below, and a default would put them
-# somewhere nobody chose. The directory is created 0700 and every file 0600.
+# build its account of an exception after the fact. OPTIONAL: left out, the
+# records go to the published default, /var/lib/openparking/gate-agent/records
+# (shared safely with the agent), with one warning at start -- a monitor that
+# refused to start for want of this line would page nobody. Declared and
+# unusable, startup refuses. These files hold the addresses configured below,
+# so the directory is made 0700 and every file 0600.
 [records]
-directory = "/var/lib/openparking/monitor-records"
+directory = "/var/lib/openparking/gate-agent/records"
 # How long a record is kept, in days. Published default 400, inside 1-3650.
 retention_days = 400
 # The most this store may hold, in bytes. A SETTING AND AN ASSUMPTION, published

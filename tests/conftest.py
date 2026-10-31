@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import weakref
 from itertools import count
 from pathlib import Path
 
@@ -77,6 +78,21 @@ def record_settings(directory=None, **over) -> RecordSettings:
         directory = tempfile.mkdtemp(prefix="gate-agent-records-")
         _RECORD_DIRECTORIES.append(directory)
     return RecordSettings(directory=Path(directory), **over)
+
+
+#: The store currently holding each (directory, kind), WEAKLY -- so a test that
+#: builds a second monitor or agent on the same directory is a RESTART: the
+#: first process is gone, and its lock with it. Without this, a test that means
+#: "start again" would measure the lock instead.
+_HOLDERS: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+
+def _restart_on(store) -> None:
+    key = (str(store.directory), store.kind)
+    previous = _HOLDERS.get(key)
+    if previous is not None and previous is not store:
+        previous.close()
+    _HOLDERS[key] = store
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -147,7 +163,9 @@ def config_for(
 
 
 def monitor_for(config: MonitorConfig, sinks, clock=None, now=None) -> Monitor:
-    return Monitor(config, sinks, clock=clock or FakeClock(), now=now or FakeUtc())
+    monitor = Monitor(config, sinks, clock=clock or FakeClock(), now=now or FakeUtc())
+    _restart_on(monitor._records)
+    return monitor
 
 
 @pytest.fixture
@@ -435,6 +453,7 @@ def agent_for(config, user_agent=None, clock=None, now=None):
         clock=clock or FakeClock(),
         now=now or FakeUtc(),
     )
+    _restart_on(agent._calls)
     agent.start()
     return agent
 

@@ -158,7 +158,13 @@ jobs:
       # record, the messages route needing no token, an unknown query parameter
       # ignored, a record id becoming a path, an unfinished delivery left
       # pending, a refused record store going unsaid, the monitor binding off
-      # loopback with no token, and a cleared fault forgetting when.
+      # loopback with no token, and a cleared fault forgetting when. Then, after
+      # the independent check: a late retry not superseded, a permanent refusal
+      # retried, a payload with no record id, a retry lost at a restart, the
+      # lane filter ignored, refused recipients dropped, the webhook recipient
+      # being the whole URL, record files or their directory left readable, a
+      # second process sharing the store, one head for every kind, a sweep
+      # taking the other kind's files, and an undeclared directory refusing.
       # Each break fails in the REASSURING direction, because that is the
       # direction this kind of software fails in when nobody is looking.
       #

@@ -66,7 +66,13 @@ def messages(monitor, **query) -> list[dict]:
 
 
 def transitions(monitor, code: str) -> list[dict]:
-    return [one for one in messages(monitor, limit=500) if one["code"] == code]
+    """Every record about `code`, in the order the messages were SENT.
+
+    Not the page's order: a page is in revision order, and a record that is
+    retried or superseded later moves to the end of it.
+    """
+    found = [one for one in messages(monitor, limit=500) if one["code"] == code]
+    return sorted(found, key=lambda one: (one["at"], one["transition"] != "raised"))
 
 
 class ScriptedSmtp:
@@ -163,7 +169,7 @@ def test_a_delivery_the_last_run_did_not_finish_is_closed_as_interrupted(lane):
     _served, url = lane
     records = record_settings()
     store = RecordStore(
-        records.directory, time_key="at", lane_key="lane_id",
+        records.directory, kind="m", time_key="at", lane_key="lane_id",
         unfinished=message_record_unfinished,
     )
     store.open()
@@ -180,6 +186,7 @@ def test_a_delivery_the_last_run_did_not_finish_is_closed_as_interrupted(lane):
         }],
     }
     store.put(left["record_id"], left)
+    store.close()  # the process that wrote it has gone
 
     monitor = monitor_for(config_for(lane=url, records=records), [RecordingSink()])
     monitor.start()
@@ -243,8 +250,9 @@ def test_a_failed_delivery_is_recorded_with_its_reason_and_every_retry(lane):
     """Refused, refused, refused: three attempts, three reasons, then `failed`."""
     served, url = lane
     clock, utc = FakeClock(), FakeUtc()
+    # 451: SMTP's "try again later". A refusal worth retrying.
     refusal = smtplib.SMTPRecipientsRefused(
-        {address: (550, b"5.1.1 mailbox unavailable") for address in ADDRESSES}
+        {address: (451, b"4.3.0 mailbox temporarily unavailable") for address in ADDRESSES}
     )
     smtp = ScriptedSmtp([None] + [refusal] * 5)  # the startup message is accepted
     monitor = monitor_for(
@@ -273,7 +281,8 @@ def test_a_failed_delivery_is_recorded_with_its_reason_and_every_retry(lane):
     attempts = delivery["attempts"]
     assert len(attempts) == 3, "one attempt and two retries, each on the record"
     assert all(one["result"] == "failed" for one in attempts)
-    assert all(one["reply_code"] == 550 for one in attempts)
+    assert all(one["reply_code"] == 451 for one in attempts)
+    assert all(one["transient"] is True for one in attempts)
     assert all("refused every recipient" in one["reason"] for one in attempts)
     times = [datetime.fromisoformat(one["at"]) for one in attempts]
     assert times == sorted(times) and len(set(times)) == 3
@@ -522,7 +531,7 @@ def test_the_size_rule_drops_the_oldest_by_time_and_says_up_to_when(tmp_path):
     """
     moment = datetime.fromisoformat("2026-10-30T22:00:00+00:00")
     store = RecordStore(
-        tmp_path, time_key="at", lane_key="lane_id", unfinished=lambda body: False,
+        tmp_path, kind="m", time_key="at", lane_key="lane_id", unfinished=lambda body: False,
         max_bytes=2000, now=lambda: moment,
     )
     store.open()
@@ -551,7 +560,7 @@ def test_the_size_rule_drops_the_oldest_by_time_and_says_up_to_when(tmp_path):
 
 def test_paging_serves_every_record_once_in_order_and_resumes_after_a_restart(tmp_path):
     def store():
-        opened = RecordStore(tmp_path, time_key="at", lane_key="lane_id",
+        opened = RecordStore(tmp_path, kind="m", time_key="at", lane_key="lane_id",
                              unfinished=lambda body: False)
         opened.open()
         return opened
@@ -587,6 +596,7 @@ def test_paging_serves_every_record_once_in_order_and_resumes_after_a_restart(tm
     assert changed == [26]
 
     # A RESTART: the cursor means the same thing to a process that never issued it.
+    first.close()
     second = store()
     assert everything(second, since=26)[0] == []
     second.put("m-" + "f" * 32, {"at": base.isoformat(), "lane_id": None})
@@ -605,7 +615,7 @@ def test_paging_serves_every_record_once_in_order_and_resumes_after_a_restart(tm
 
 
 def test_a_record_id_is_never_a_path(tmp_path):
-    store = RecordStore(tmp_path / "records", time_key="at", lane_key="lane_id",
+    store = RecordStore(tmp_path / "records", kind="m", time_key="at", lane_key="lane_id",
                         unfinished=lambda body: False)
     store.open()
     (tmp_path / "secret.json").write_text('{"revision": 1, "at": "x"}')
@@ -674,7 +684,7 @@ def test_a_directory_that_will_not_take_a_write_refuses_startup(tmp_path, lane):
     try:
         monitor = monitor_for(config_for(lane=url, records=record_settings(blocked)),
                               [RecordingSink()])
-        with pytest.raises(RecordUnwritable, match="Refusing to start"):
+        with pytest.raises(RecordUnwritable, match="will not take a write"):
             monitor.start()
     finally:
         blocked.chmod(0o700)
@@ -752,3 +762,306 @@ def test_the_control_a_whole_query_is_accepted_and_echoed(watched):
         "to": "2026-08-30T15:00:00+00:00", "limit": 5,
     }
     assert body["messages"]
+
+
+# ---------------------------------------------------------------------------
+# GUARANTEE 9 -- a retry never says an old fact after a new one
+# ---------------------------------------------------------------------------
+
+
+class ScriptedHook:
+    """A paging endpoint: answers each POST by a rule, and keeps every body."""
+
+    def __init__(self, rule) -> None:
+        self.rule = rule
+        self.posted: list[dict] = []
+
+    def __call__(self, request, timeout=None):
+        body = json.loads(request.data.decode("utf-8"))
+        self.posted.append(body)
+        status = self.rule(body)
+        if status >= 300:
+            raise urllib.error.HTTPError(request.full_url, status, "no", {}, None)
+
+        class _Answer:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+        _Answer.status = status
+        return _Answer()
+
+    def about(self, code: str) -> list[dict]:
+        return [body for body in self.posted if body.get("code") == code]
+
+
+def hook_sink(hook) -> WebhookSink:
+    return WebhookSink(
+        WebhookSinkConfig(url="https://paging.example.com/hooks/openparking", token="t"),
+        opener=hook,
+    )
+
+
+def _fail_raised_once(status_raised=503, status_recovered=204):
+    seen = {"raised": 0}
+
+    def rule(body):
+        if body.get("code") != ORDINARY_CODE:
+            return 204
+        if body["transition"] == "raised":
+            seen["raised"] += 1
+            return status_raised if seen["raised"] == 1 else 204
+        return status_recovered
+
+    return rule
+
+
+def test_a_late_retry_after_the_recovery_is_superseded_and_never_sent(lane):
+    """Raised gets a 503; the fault clears; recovered is delivered; the retry is due.
+
+    Sent, the old `raised` would reach the pager after its `recovered` and
+    reopen the incident. It is not sent: the delivery is `superseded`, by the
+    record of the recovery that already reached that sink.
+    """
+    served, url = lane
+    clock, utc = FakeClock(), FakeUtc()
+    hook = ScriptedHook(_fail_raised_once())
+    monitor = monitor_for(config_for(lane=url, poll_seconds=1.0, retry_seconds=60.0),
+                          [hook_sink(hook)], clock=clock, now=utc)
+    monitor.start()
+    raise_on(served)
+    clock.advance(10)
+    utc.advance(10)
+    monitor.poll()
+    raise_on(served, state="ok")
+    clock.advance(10)
+    utc.advance(10)
+    monitor.poll()
+    clock.advance(61)
+    utc.advance(61)
+    monitor.poll()
+
+    raised, recovered = transitions(monitor, ORDINARY_CODE)
+    delivery = raised["deliveries"][0]
+    assert delivery["state"] == "superseded"
+    assert delivery["superseded_by"] == recovered["record_id"]
+    assert delivery["next_attempt_at"] is None
+    assert len(delivery["attempts"]) == 1, "the superseded retry was attempted anyway"
+    assert [body["transition"] for body in hook.about(ORDINARY_CODE)] == ["raised", "recovered"]
+
+
+def test_a_retry_for_a_code_that_cleared_unheard_is_superseded_by_the_state(lane):
+    """The recovery was refused for good, so nothing later reached the sink.
+
+    The code is `ok` now, and a `raised` sent now is false: superseded, by the
+    code's own state, with nothing named.
+    """
+    served, url = lane
+    clock, utc = FakeClock(), FakeUtc()
+    hook = ScriptedHook(_fail_raised_once(status_recovered=400))
+    monitor = monitor_for(config_for(lane=url, poll_seconds=1.0, retry_seconds=60.0),
+                          [hook_sink(hook)], clock=clock, now=utc)
+    monitor.start()
+    raise_on(served)
+    clock.advance(10)
+    utc.advance(10)
+    monitor.poll()
+    raise_on(served, state="ok")
+    clock.advance(10)
+    utc.advance(10)
+    monitor.poll()
+    clock.advance(61)
+    utc.advance(61)
+    monitor.poll()
+
+    raised, recovered = transitions(monitor, ORDINARY_CODE)
+    assert recovered["deliveries"][0]["state"] == "failed"
+    assert raised["deliveries"][0]["state"] == "superseded"
+    assert raised["deliveries"][0]["superseded_by"] is None
+    assert [body["transition"] for body in hook.about(ORDINARY_CODE)] == ["raised", "recovered"]
+
+
+@pytest.mark.parametrize(
+    ("failure", "retried"),
+    [
+        (smtplib.SMTPRecipientsRefused({ADDRESSES[0]: (550, b"5.1.1 no such user")}), False),
+        (smtplib.SMTPDataError(554, b"5.7.1 rejected"), False),
+        (smtplib.SMTPDataError(452, b"4.3.1 insufficient storage"), True),
+        (smtplib.SMTPServerDisconnected("closed"), True),
+        (OSError("network is unreachable"), True),
+    ],
+)
+def test_only_a_failure_a_moment_can_mend_is_retried_by_email(lane, failure, retried):
+    served, url = lane
+    clock = FakeClock()
+    smtp = ScriptedSmtp([None, failure, failure])
+    monitor = monitor_for(config_for(lane=url, poll_seconds=1.0),
+                          [RecordingSink(), email_sink(smtp)], clock=clock)
+    monitor.start()
+    raise_on(served)
+    clock.advance(10)
+    monitor.poll()
+    delivery = transitions(monitor, ORDINARY_CODE)[0]["deliveries"][1]
+    assert delivery["attempts"][0]["transient"] is retried
+    assert delivery["state"] == ("retrying" if retried else "failed")
+
+
+@pytest.mark.parametrize(("status", "retried"), [(404, False), (401, False), (302, False),
+                                                 (429, True), (503, True)])
+def test_only_a_failure_a_moment_can_mend_is_retried_by_webhook(lane, status, retried):
+    served, url = lane
+    clock = FakeClock()
+    hook = ScriptedHook(lambda body: status if body.get("code") == ORDINARY_CODE else 204)
+    monitor = monitor_for(config_for(lane=url, poll_seconds=1.0), [hook_sink(hook)],
+                          clock=clock)
+    monitor.start()
+    raise_on(served)
+    clock.advance(10)
+    monitor.poll()
+    delivery = transitions(monitor, ORDINARY_CODE)[0]["deliveries"][0]
+    assert delivery["attempts"][0]["http_status"] == status
+    assert delivery["attempts"][0]["transient"] is retried
+    assert delivery["state"] == ("retrying" if retried else "failed")
+
+
+def test_a_retry_interrupted_by_a_restart_is_resumed_after_it(lane):
+    """The recovery got a 503; the monitor restarted; the recovery still arrives.
+
+    The fault is still `ok` when the new run comes up -- which the new run says
+    nothing about, `unknown -> ok` being silent -- so the retry the last run
+    left is the only way the pager ever hears the incident ended.
+    """
+    served, url = lane
+    records = record_settings()
+    utc = FakeUtc()
+    first_hook = ScriptedHook(
+        lambda body: 503 if body.get("transition") == "recovered" else 204
+    )
+    clock = FakeClock()
+    first = monitor_for(config_for(lane=url, poll_seconds=1.0, records=records),
+                        [hook_sink(first_hook)], clock=clock, now=utc)
+    first.start()
+    raise_on(served)
+    clock.advance(10)
+    utc.advance(10)
+    first.poll()
+    raise_on(served, state="ok")
+    clock.advance(10)
+    utc.advance(10)
+    first.poll()
+    recovered = transitions(first, ORDINARY_CODE)[1]
+    assert recovered["deliveries"][0]["state"] == "retrying"
+
+    # THE PROCESS DIES, and a new one starts 30 seconds later.
+    first.close()
+    utc.advance(30)
+    second_hook = ScriptedHook(lambda body: 204)
+    clock = FakeClock()
+    second = monitor_for(config_for(lane=url, poll_seconds=1.0, records=records),
+                         [hook_sink(second_hook)], clock=clock, now=utc)
+    second.start()
+    assert not second_hook.about(ORDINARY_CODE), "resumed before it was due"
+    clock.advance(31)
+    utc.advance(31)
+    second.poll()
+
+    delivered = [body for body in second_hook.about(ORDINARY_CODE)]
+    assert [body["transition"] for body in delivered] == ["recovered"]
+    assert delivered[0]["record_id"] == recovered["record_id"]
+    resumed = next(one for one in messages(second, limit=500)
+                   if one["record_id"] == recovered["record_id"])
+    assert resumed["deliveries"][0]["state"] == "delivered"
+    assert [one["result"] for one in resumed["deliveries"][0]["attempts"]] == [
+        "failed", "accepted",
+    ]
+
+
+def test_every_payload_carries_the_record_id_and_a_retry_carries_the_same_one(lane, capsys):
+    served, url = lane
+    clock, utc = FakeClock(), FakeUtc()
+    hook = ScriptedHook(_fail_raised_once())
+    smtp = ScriptedSmtp([])
+    monitor = monitor_for(config_for(lane=url, poll_seconds=1.0, retry_seconds=60.0),
+                          [LogSink(LogSinkConfig()), email_sink(smtp), hook_sink(hook)],
+                          clock=clock, now=utc)
+    monitor.start()
+    raise_on(served)
+    clock.advance(10)
+    utc.advance(10)
+    monitor.poll()
+    clock.advance(61)
+    utc.advance(61)
+    monitor.poll()
+
+    startup = next(one for one in messages(monitor, limit=500) if one["kind"] == "unmeasured")
+    raised = transitions(monitor, ORDINARY_CODE)[0]
+    assert hook.posted[0]["kind"] == "unmeasured"
+    assert hook.posted[0]["record_id"] == startup["record_id"]
+    tries = hook.about(ORDINARY_CODE)
+    assert len(tries) == 2, "the retry did not happen"
+    assert {body["record_id"] for body in tries} == {raised["record_id"]}
+    logged = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    assert raised["record_id"] in {line.get("record_id") for line in logged}
+    assert startup["record_id"] in {line.get("record_id") for line in logged}
+    mailed = [str(message) for message in smtp.sent]
+    assert any(f"record_id: {raised['record_id']}" in body for body in mailed)
+    # And the events route carries it too, so the two can be joined.
+    events = monitor.events(0).to_dict()["events"]
+    assert raised["record_id"] in {event["record_id"] for event in events}
+
+
+# ---------------------------------------------------------------------------
+# GUARANTEE 10 -- the lane filter, a partial acceptance, and the webhook's host
+# ---------------------------------------------------------------------------
+
+
+def test_the_lane_filter_leaves_out_every_other_lane(tmp_path):
+    store = RecordStore(tmp_path, kind="m", time_key="at", lane_key="lane_id",
+                        unfinished=lambda body: False)
+    store.open()
+    at = "2026-10-30T21:00:00+00:00"
+    for index, lane_id in enumerate(("lane-1", "lane-2", None, "lane-2", "lane-1")):
+        store.put(f"m-{index:032x}", {"at": at, "lane_id": lane_id})
+    served = [body["lane_id"] for body in store.page(RecordQuery(lane="lane-1"))[0]]
+    assert sorted(served, key=str) == sorted(["lane-1", "lane-1", None], key=str)
+    # The control: unfiltered, the other lane IS there to be left out.
+    assert "lane-2" in [body["lane_id"] for body in store.page(RecordQuery())[0]]
+
+
+class _PartlyAccepting(ScriptedSmtp):
+    def send_message(self, message):
+        self.sent.append(message)
+        self.data_reply = (250, b"2.0.0 Ok: queued as 9B00C2")
+        return {ADDRESSES[1]: (550, b"5.1.1 mailbox unavailable")}
+
+
+def test_a_partly_accepted_email_records_who_was_refused(lane):
+    """`send_message` returns the refused instead of raising. Told is not everyone."""
+    served, url = lane
+    clock = FakeClock()
+    monitor = monitor_for(config_for(lane=url, poll_seconds=1.0),
+                          [email_sink(_PartlyAccepting([]))], clock=clock)
+    monitor.start()
+    raise_on(served)
+    clock.advance(10)
+    monitor.poll()
+    attempt = transitions(monitor, ORDINARY_CODE)[0]["deliveries"][0]["attempts"][0]
+    assert attempt["result"] == "accepted"
+    assert attempt["refused_recipients"] == [ADDRESSES[1]]
+
+
+def test_the_webhook_recipient_is_its_host_and_never_its_token(lane):
+    _served, url = lane
+    sink = WebhookSink(
+        WebhookSinkConfig(url="https://paging.example.com/hooks/T0KEN-ABC123?key=SECRET-42",
+                          token="t"),
+        opener=ScriptedHook(lambda body: 204),
+    )
+    assert sink.recipients == ("paging.example.com",)
+    monitor = monitor_for(config_for(lane=url), [sink])
+    monitor.start()
+    recorded = json.dumps(messages(monitor, limit=500))
+    assert "paging.example.com" in recorded
+    assert "T0KEN-ABC123" not in recorded and "SECRET-42" not in recorded

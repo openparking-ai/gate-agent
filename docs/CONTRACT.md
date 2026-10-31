@@ -570,7 +570,8 @@ without adding it here.
     "delivered",
     "retrying",
     "failed",
-    "interrupted"
+    "interrupted",
+    "superseded"
   ],
   "delivery_results": [
     "accepted",
@@ -605,6 +606,7 @@ without adding it here.
     "limit"
   ],
   "record_defaults": {
+    "directory": "/var/lib/openparking/gate-agent/records",
     "retention_days": 400,
     "max_bytes": 268435456,
     "max_bytes_bounds": [
@@ -725,11 +727,18 @@ up, which is exactly what is worth knowing at an installation.
       "source": "measured",
       "caveat": null,
       "at": "2026-08-30T14:00:00+00:00",
-      "status": null
+      "status": null,
+      "record_id": "m-6c0e2b9f4a1d4e7f8a9b0c1d2e3f4a5b"
     }
   ]
 }
 ```
+
+`record_id` is the id of this message's durable record on
+`GET /v1/monitor/messages`, and it is on **every copy of the message every sink
+is handed** — the webhook body, the log line, the email — the same on every
+attempt. A receiver handed a retry of something it already has drops it by this
+field. It is an additive field.
 
 Deliberately the same shape and the same semantics as the lane contract's
 `GET /v1/lane/events` and the Vehicle ID service's `GET /v1/reads?since=N`, field
@@ -777,7 +786,25 @@ record, and its state is on the health route as it always was.
 
 **It survives a restart, and its cursor does.** The store is one JSON file per
 record in `[records] directory`, written atomically and synced; its index is
-rebuilt from the disk at every start. Every write — a new record, or a record
+rebuilt from the disk at every start.
+
+**Where it lives.** `[records] directory` has a published default,
+**`/var/lib/openparking/gate-agent/records`**, shared by the monitor and the
+agent. It is a default against this package's habit, for one reason: a monitor
+that refused to start for want of this line would page nobody. An undeclared
+directory therefore starts, with **one warning** naming where the records are;
+if even the default cannot be used the process still starts, with
+`record_store_unwritable` active, and tries again at every message. A
+**declared** directory that cannot be used refuses to start — somebody chose it,
+and it is wrong. Either way the directory is made **`0700`** at every start —
+tightened if it already existed wider, refused in words if it cannot be — and
+every file in it is **`0600`**. The monitor's and the agent's records may share
+it: every file is named for its kind (`m-…`/`c-…`, `head.messages.json`,
+`head.calls.json`), a start sweeps away only its own kind's half-written files,
+and each kind holds an exclusive lock file (`lock.messages`, `lock.calls`) for
+as long as its process runs. **A second process of the same kind on the same
+directory is refused at start**, naming the lock, on a declared directory and on
+the default alike. Every write — a new record, or a record
 that changed because a delivery was retried — takes the next **revision** from
 one counter persisted beside the records, so `since` means the same thing after
 a restart as before it, and a record that changed comes back under its new
@@ -794,17 +821,37 @@ produces is not known): past it the **oldest go first**. Both are counted on
 dropped for space (`dropped_through`) — before that moment the account is not
 whole, and it says so rather than leaving it to be found.
 
-**A delivery that fails is tried again.** `[notify] retry_attempts` (published
-default **3**, bounds 0–10) more times, `[notify] retry_seconds` (default
-**60**, bounds 1–86400) apart. Every attempt is on the record with its time and
-the far end's answer. This is not `renotify_seconds`, which repeats a message
-somebody received and has no default; this repeats one nobody received. The
-cost, stated: a sink that took a message and failed to say so — a webhook that
-took the POST and timed out answering — is told twice. A retry that succeeds is
-the sink coming back, and `sink_delivery_failed` for it recovers by the
-ordinary rule. A delivery still in progress when the process stopped is closed
-as `interrupted` at the next start, not retried: nothing knows whether that
-attempt reached anybody, and everything still active is raised again anyway.
+**A delivery that fails for a reason a moment can mend is tried again.**
+`[notify] retry_attempts` (published default **3**, bounds 0–10) more times,
+`[notify] retry_seconds` (default **60**, bounds 1–86400) apart. Transient is
+the network, a timeout, SMTP **4xx**, HTTP **5xx** and **429**. A refusal that
+would only be refused again — SMTP **5xx**, any other HTTP **4xx**, a redirect,
+an exception the sink did not name — is recorded `failed` at once and **not**
+retried. Every attempt is on the record with its time, the far end's answer and
+`transient`. This is not `renotify_seconds`, which repeats a message somebody
+received and has no default; this repeats one nobody received. The cost, stated:
+a sink that took a message and failed to say so — a webhook that took the POST
+and timed out answering — is told twice, and `record_id` on every payload is
+how its receiver drops the copy. A retry that succeeds is the sink coming back,
+and `sink_delivery_failed` for it recovers by the ordinary rule.
+
+**A retry never says an old fact after a new one.** When a retry falls due it is
+weighed first, and NOT sent — the delivery becomes **`superseded`** — when a
+later message about the same code (same origin, target, code and subject) has
+already reached that sink (`superseded_by` names its record), or when the code
+is no longer in the state the message announced: a `raised` while the code is
+`ok`, a `recovered` while it is `active` again (`superseded_by` is `null`). A
+`raised` delivered after its `recovered` reopens an incident on a pager; this is
+what stops it.
+
+**A retry survives a restart.** A delivery still `retrying` when the process
+stopped is resumed on its own schedule by the next run, after that run's first
+poll — so it is weighed against the state found then, and a `raised` for a fault
+that cleared while nothing was running is superseded rather than sent. A
+delivery still `pending` (the process died between writing the record and trying
+the sink, or in the attempt) is closed `interrupted`: nothing knows whether it
+reached anybody. So is the last run's startup message, if it was still being
+retried: this run's own says what is unmeasured now.
 
 **No acknowledgement exists in any sink this version, and the record says so.**
 SMTP carries none back, a webhook's 2xx is its receiver taking the request and
@@ -896,12 +943,14 @@ down has not, and its records about that lane say `null` until it restarts.
               "reply": null,
               "http_status": null,
               "reason": null,
-              "refused_recipients": []
+              "refused_recipients": [],
+              "transient": null
             }
           ],
           "acknowledgement": "not_acknowledged",
           "acknowledged_at": null,
-          "acknowledged_by": null
+          "acknowledged_by": null,
+          "superseded_by": null
         },
         {
           "sink": "email",
@@ -920,7 +969,8 @@ down has not, and its records about that lane say `null` until it restarts.
               "reply": null,
               "http_status": null,
               "reason": "email: Connection unexpectedly closed",
-              "refused_recipients": []
+              "refused_recipients": [],
+              "transient": true
             },
             {
               "at": "2026-10-30T22:15:05+00:00",
@@ -929,12 +979,14 @@ down has not, and its records about that lane say `null` until it restarts.
               "reply": "2.0.0 Ok: queued as 4F2A9C01",
               "http_status": null,
               "reason": null,
-              "refused_recipients": []
+              "refused_recipients": [],
+              "transient": null
             }
           ],
           "acknowledgement": "not_acknowledged",
           "acknowledged_at": null,
-          "acknowledged_by": null
+          "acknowledged_by": null,
+          "superseded_by": null
         },
         {
           "sink": "webhook",
@@ -953,12 +1005,14 @@ down has not, and its records about that lane say `null` until it restarts.
               "reply": null,
               "http_status": 204,
               "reason": null,
-              "refused_recipients": []
+              "refused_recipients": [],
+              "transient": null
             }
           ],
           "acknowledgement": "not_acknowledged",
           "acknowledged_at": null,
-          "acknowledged_by": null
+          "acknowledged_by": null,
+          "superseded_by": null
         }
       ]
     }
@@ -1003,7 +1057,8 @@ down has not, and its records about that lane say `null` until it restarts.
 | `sink`, `kind` | The sink's name and kind. |
 | `recipients` | As configured: email addresses, the webhook's host, nothing for `log`. |
 | `recipient_configured` | `false` exactly when `recipients` is empty. |
-| `state` | `pending` (written, not yet tried), `delivered`, `retrying` (failed; another attempt at `next_attempt_at`), `failed` (no attempt left), `interrupted` (the process stopped first). |
+| `state` | `pending` (written, not yet tried), `delivered`, `retrying` (failed for a transient reason; another attempt at `next_attempt_at`), `failed` (refused for good, or no attempt left), `interrupted` (the process stopped first), `superseded` (a retry not sent because it would have said an old fact after a new one). |
+| `superseded_by` | On `superseded`: the record of the later message that had already reached this sink, or `null` when what superseded it was the code's own state. `null` otherwise. |
 | `sent_at` | The first attempt. |
 | `delivered_at` | The attempt that was accepted. |
 | `next_attempt_at` | While `retrying`. |
@@ -1011,6 +1066,7 @@ down has not, and its records about that lane say `null` until it restarts.
 | `attempts[].reply_code`, `reply` | The SMTP server's answer to the message — the one the library raises on unless it is 250 — and its text, which is where a mail server puts the queue id somebody can find the message by. A refusal's code is here too. `null` where there was no SMTP answer. |
 | `attempts[].http_status` | The webhook receiver's status, accepted or not. |
 | `attempts[].reason` | A failure's plain reason, **never carrying an email address**. |
+| `attempts[].transient` | On a failure, whether it was one worth trying again (see above). `null` on an accepted attempt. |
 | `attempts[].refused_recipients` | Recipients an SMTP server refused while accepting the message for the rest — a partial acceptance is still somebody who was not told. |
 | `acknowledgement`, `acknowledged_at`, `acknowledged_by` | `not_acknowledged`, `null`, `null` — see above. |
 
@@ -1065,11 +1121,11 @@ gate-agent monitor --config monitor.toml
 Binds `127.0.0.1:8092`. **Local by design** — this is meant to run beside the
 lane it watches.
 
-**`[records] directory` is declared and refused at startup if absent**, and so is
-a directory that will not take a write: a monitor that paged people for a
-fortnight and kept no account of it is the gap the message record exists to
-close. The directory is created `0700` and every record file `0600` — they hold
-the addresses a site pages.
+**`[records] directory` may be declared, and has a published default** — see
+`GET /v1/monitor/messages`. A declared directory that cannot be used refuses to
+start; an undeclared one never stops the monitor, because a monitor that does
+not start pages nobody. The directory is made `0700` and every record file
+`0600` — they hold the addresses a site pages.
 
 **Off loopback it refuses to start without a credential.** `--host` anything but
 loopback requires `--auth-token-file`, and with a token every route requires
@@ -3210,7 +3266,7 @@ refused before anybody knew which door they were.
 | `started_at` | When the call was answered, or refused. |
 | `case`, `case_spoken_at` | What the driver was told, and when the last file of it FINISHED. `null` where the driver was told something else — a ticket on the screen. |
 | `person_called`, `rang_person_at` | The `[escalation] human_sip_uri` that was dialled, and when. An ADDRESS, not a person. |
-| `person_answered_at`, `person_answered_as` | When that leg was answered, and the address the user agent reported for it. A rota that rings three handsets answers as the rota; nothing here can see which handset. |
+| `person_answered_at`, `person_answered_as` | When that leg was answered, and the address the user agent reported for it — **the leg's address, not a person**. A rota that rings three handsets answers as the rota; nothing here can see which handset, or who held it. Whoever needs a name asks the rota for who was on shift at `person_answered_at`. |
 | `authorisation`, `authorisation_at`, `keyed` | What the person keyed, when, and the call-back number keyed with `call_back` — digits only, as the events route carries it. |
 | `ticket_id` | The ticket this call confirmed, was told about, or whose vend it asked for. |
 | `ended_at` | When the call ended. `null` while it is live, and on `interrupted_by_restart`. |
@@ -3227,8 +3283,9 @@ measured against a real baresip in `tests/test_agent_sip.py`.
 gate-agent agent --config agent.toml
 ```
 
-Binds `127.0.0.1:8094`. **Local by design.** `[records] directory` is declared
-and refused at startup if absent or unwritable, for the reason the monitor's is. Off loopback it refuses to start
+Binds `127.0.0.1:8094`. **Local by design.** `[records] directory` follows the
+monitor's rule: a published default, one warning when it is used, a refusal only
+for a declared directory that cannot be used or a store another agent holds. Off loopback it refuses to start
 without a credential — the same rule and the same words as the other two
 surfaces, imported rather than restated. The exposure here is its own kind: this
 publishes which intercoms a site has, which of its lanes cannot be read, and when

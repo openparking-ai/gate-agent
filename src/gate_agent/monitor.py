@@ -40,8 +40,12 @@ written again with what each sink answered -- so a crash between the two leaves
 a record saying the delivery was never finished, rather than no record. It
 exists whatever the sinks are: a site with only `log` gets a record whose every
 delivery says nobody was configured to receive it. A delivery that fails is
-tried again on `[notify] retry_attempts`, each attempt on the record with its
-time. See `records.py` for the store and `docs/CONTRACT.md` for the route.
+tried again on `[notify] retry_attempts` when the failure is one a moment can
+mend, each attempt on the record with its time -- and NOT tried again once that
+would put an old fact after a new one: a retry is `superseded` when a later
+message about the same code has reached that sink, or when the code is no
+longer in the state the message announced. Retries survive a restart. See
+`records.py` for the store and `docs/CONTRACT.md` for the route.
 """
 
 from __future__ import annotations
@@ -58,6 +62,7 @@ from .contract import (
     CONTRACT_VERSION,
     KNOWN_LANE_VERSIONS,
     REFUSED_CODE,
+    TRANSITION_STATE,
     UNREACHABLE_CODE,
     Delivery,
     DeliveryAttempt,
@@ -79,12 +84,14 @@ from .contract import (
     TargetHealth,
     TargetKind,
     Transition,
+    message_record_key,
     message_record_unfinished,
     published_url,
 )
 from .records import (
     RecordQuery,
     RecordStore,
+    RecordStoreInUse,
     RecordUnwritable,
     new_record_id,
     redact_addresses,
@@ -194,6 +201,8 @@ class Monitor:
         #: clock that wrote it.
         self._records = records or RecordStore(
             config.records.directory,
+            kind="m",
+            key=message_record_key,
             time_key="at",
             lane_key="lane_id",
             unfinished=message_record_unfinished,
@@ -270,32 +279,70 @@ class Monitor:
         a startup failure with a name rather than a monitor quietly watching
         something it cannot interpret.
         """
-        # THE RECORD STORE FIRST, and it refuses to start on a directory that
-        # will not take a write: a monitor that paged people for a fortnight and
-        # kept no account of it is the gap the store exists to close.
-        self._records.open()
-        self._monitor_code(
-            MonitorCode.RECORD_STORE_UNWRITABLE,
-            self.config.monitor_id,
-            HealthState.OK,
-            self.config.monitor_id,
-        )
-        self._close_interrupted()
-        for target in self.config.targets:
-            self._read_identity(target)
-        self.poll(force=True)
-        self._announce_unmeasured()
+        self._open_records_store()
+        try:
+            for target in self.config.targets:
+                self._read_identity(target)
+            self.poll(force=True)
+            # AFTER the first poll, so every code's state is known before a
+            # retry the last run left is weighed against it: a `raised` for a
+            # fault that cleared while nothing was running must not reach a
+            # pager now.
+            self._resume_unfinished()
+            self._announce_unmeasured()
+        except BaseException:
+            # A start that failed lets the lock go, as the process exiting on
+            # it would.
+            self._records.close()
+            raise
 
-    def _close_interrupted(self) -> None:
-        """A delivery the LAST run left in progress is closed as `interrupted`.
+    def _open_records_store(self) -> None:
+        """The store first. A DECLARED directory that cannot be used refuses.
 
-        Not retried: nothing here knows whether the attempt the process died in
-        reached anybody, and every fault still active is raised again by this
-        run anyway -- so a fresh message carries it. Left `pending` or
-        `retrying`, the record would look like a delivery somebody is still
-        working on, for as long as it is kept.
+        So does a store another process holds, always. The DEFAULT directory
+        does not refuse: a monitor that would not start for want of a line in
+        its configuration pages nobody, so it starts, says where the records
+        are once, and -- where even the default cannot be used -- runs with
+        `record_store_unwritable` active and tries again at every message.
+        """
+        settings = self.config.records
+        if not settings.declared:
+            log.warning(
+                "[records] directory is not declared; every message is kept in %s",
+                settings.directory,
+            )
+        try:
+            self._records.open()
+        except RecordStoreInUse:
+            raise
+        except RecordUnwritable as exc:
+            if settings.declared:
+                raise
+            log.error("%s", exc)
+            self._record_failed = True
+        else:
+            self._record_failed = False
+        self._record_store_state()
+
+    def close(self) -> None:
+        """Let the record store's lock go. What an exiting process does."""
+        self._records.close()
+
+    def _resume_unfinished(self) -> None:
+        """What the LAST run left in progress: resumed where it can be, said where not.
+
+        A delivery still `retrying` resumes on its own schedule -- weighed, when
+        it falls due, against what has been said since and the state found now,
+        like any retry. A `pending` one is closed `interrupted`: the process died
+        between writing the record and trying the sink, or in the attempt, and
+        nothing here knows which. So is any startup message the last run was
+        still retrying: this run's own says what is unmeasured now.
         """
         for record_id in self._records.unfinished():
+            if record_id in self._open_records:
+                # This run's own, from the poll that has just run: already
+                # scheduled, and not the last run's to resume.
+                continue
             body = self._records.get(record_id)
             if body is None:
                 continue
@@ -304,13 +351,28 @@ class Monitor:
             except (KeyError, TypeError, ValueError) as exc:
                 log.warning("%s: a message record this build cannot read: %s", record_id, exc)
                 continue
-            closed = tuple(
-                replace(delivery, state=DeliveryState.INTERRUPTED.value, next_attempt_at=None)
-                if delivery.state in (DeliveryState.PENDING, DeliveryState.RETRYING)
-                else delivery
-                for delivery in record.deliveries
-            )
-            self._keep(replace(record, deliveries=closed))
+            resumable = record.kind == MessageKind.TRANSITION
+            deliveries = []
+            for delivery in record.deliveries:
+                if delivery.state == DeliveryState.RETRYING and resumable:
+                    self._retry_due[(record_id, delivery.sink)] = self._clock() + max(
+                        0.0, _seconds_until(delivery.next_attempt_at, self._now())
+                    )
+                    deliveries.append(delivery)
+                elif delivery.state in (DeliveryState.PENDING, DeliveryState.RETRYING):
+                    deliveries.append(
+                        replace(
+                            delivery, state=DeliveryState.INTERRUPTED.value, next_attempt_at=None
+                        )
+                    )
+                else:
+                    deliveries.append(delivery)
+            record = self._keep(replace(record, deliveries=tuple(deliveries)))
+            if record.unfinished:
+                notification = _notification_of(record)
+                self._open_records[record_id] = (
+                    record, lambda sink, notification=notification: sink.deliver(notification)
+                )
 
     def _read_identity(self, target: Target) -> None:
         """`GET /v1/lane` once, for who this lane is and what version it speaks.
@@ -703,6 +765,7 @@ class Monitor:
         self._notified_at[key] = self._clock()
         self._send(
             Notification(
+                record_id=new_record_id("m"),
                 site_id=self.config.site_id,
                 lane_id=self._lane_id_of(target),
                 target=target,
@@ -817,7 +880,7 @@ class Monitor:
         """
         self._record(notification)
         record = MessageRecord(
-            record_id=new_record_id("m"),
+            record_id=notification.record_id or new_record_id("m"),
             kind=MessageKind.TRANSITION.value,
             site_id=self.config.site_id,
             monitor_id=self.config.monitor_id,
@@ -893,19 +956,25 @@ class Monitor:
             receipt = send(sink)
         except DeliveryFailed as exc:
             reason = str(exc)
+            transient = bool(exc.transient)
             attempt = DeliveryAttempt(
                 at=at,
                 result=DeliveryResult.FAILED.value,
                 reason=reason,
                 reply_code=_status_or_none(exc.reply_code, 200, 599),
                 http_status=_status_or_none(exc.http_status, 100, 599),
+                transient=transient,
             )
         except Exception as exc:  # noqa: BLE001
             # A sink that raises something else is still a sink that did not
             # deliver. Letting it escape would take the monitor down with the
-            # endpoint it was trying to reach.
+            # endpoint it was trying to reach. NOT transient: an exception
+            # nobody named is a fault in the sink, and a minute will not mend it.
             reason = redact_addresses(f"{sink.name}: {type(exc).__name__}: {exc}")
-            attempt = DeliveryAttempt(at=at, result=DeliveryResult.FAILED.value, reason=reason)
+            transient = False
+            attempt = DeliveryAttempt(
+                at=at, result=DeliveryResult.FAILED.value, reason=reason, transient=False
+            )
         else:
             # A sink that returns nothing has said nothing beyond "taken", and
             # the record says exactly that: accepted, with no evidence fields.
@@ -931,7 +1000,7 @@ class Monitor:
                 None,
             )
         attempts = delivery.attempts + (attempt,)
-        if len(attempts) <= self.config.retry_attempts:
+        if transient and len(attempts) <= self.config.retry_attempts:
             due = datetime.fromisoformat(at) + timedelta(seconds=self.config.retry_seconds)
             self._retry_due[(record_id, delivery.sink)] = (
                 self._clock() + self.config.retry_seconds
@@ -973,6 +1042,19 @@ class Monitor:
                 if now < self._retry_due.get(key, now):
                     continue
                 changed = True
+                superseded, by = self._superseded(record, delivery)
+                if superseded:
+                    # NOT SENT. It would put an old fact after a new one -- a
+                    # `raised` after its `recovered` reopens an incident on a
+                    # pager -- and the record says so, and by what.
+                    self._retry_due.pop(key, None)
+                    deliveries[index] = replace(
+                        delivery,
+                        state=DeliveryState.SUPERSEDED.value,
+                        next_attempt_at=None,
+                        superseded_by=by,
+                    )
+                    continue
                 sink = by_name.get(delivery.sink)
                 if sink is None:
                     self._retry_due.pop(key, None)
@@ -1007,6 +1089,31 @@ class Monitor:
                 MonitorCode.SINK_DELIVERY_FAILED, name, HealthState.OK, self.config.monitor_id
             )
         self._record_store_state()
+
+    def _superseded(self, record: MessageRecord, delivery: Delivery) -> tuple[bool, str | None]:
+        """Whether sending this retry now would say an old fact after a new one.
+
+        Two ways, and they are checked in this order. A LATER message about the
+        same code has already reached this sink: superseded by that record. Or
+        the code is no longer in the state this message announced -- it cleared
+        while the retry waited, and the `recovered` never reached this sink, or
+        the monitor restarted and found it gone: superseded by the state itself.
+        """
+        for body in self._records.later(record.record_id):
+            for other in body.get("deliveries") or ():
+                if (
+                    isinstance(other, dict)
+                    and other.get("sink") == delivery.sink
+                    and other.get("state") == DeliveryState.DELIVERED.value
+                ):
+                    return True, body.get("record_id")
+        if record.kind == MessageKind.TRANSITION and record.transition in TRANSITION_STATE:
+            key = (record.origin, record.target, record.code, record.subject or record.target)
+            if self._states.get(key, HealthState.UNKNOWN.value) != TRANSITION_STATE[
+                record.transition
+            ]:
+                return True, None
+        return False, None
 
     def _keep(self, record: MessageRecord) -> MessageRecord:
         """Write the record. A store that refuses is a CODE, never a lost page."""
@@ -1110,7 +1217,10 @@ class Monitor:
             for entry in target.codes
             if isinstance(entry, dict) and entry.get("state") == HealthState.UNKNOWN.value
         ]
+        record_id = new_record_id("m")
         payload = {
+            # On every copy of it, so a receiver handed a retry can drop it.
+            "record_id": record_id,
             "site_id": self.config.site_id,
             "monitor_id": self.config.monitor_id,
             "at": self._now(),
@@ -1123,7 +1233,7 @@ class Monitor:
         # is a fact about a site, and the platform's account of an exception
         # should show the monitor going away and coming back.
         record = MessageRecord(
-            record_id=new_record_id("m"),
+            record_id=record_id,
             kind=MessageKind.UNMEASURED.value,
             site_id=self.config.site_id,
             monitor_id=self.config.monitor_id,
@@ -1238,6 +1348,37 @@ class Monitor:
                 if seq > since
             ),
         )
+
+
+def _seconds_until(stamp: str | None, now: str) -> float:
+    """How long until `stamp`, from `now`. Zero for a time already past or unreadable."""
+    if not stamp:
+        return 0.0
+    try:
+        return (datetime.fromisoformat(stamp) - datetime.fromisoformat(now)).total_seconds()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _notification_of(record: MessageRecord) -> Notification:
+    """The notification a TRANSITION record was made from, rebuilt from the record.
+
+    Every field the notification carries is on the record, so a retry resumed
+    after a restart sends what the first attempt sent -- `record_id` included.
+    """
+    return Notification(
+        site_id=record.site_id,
+        lane_id=record.lane_id,
+        target=record.target,
+        code=record.code,
+        subject=record.subject,
+        transition=record.transition,
+        source=record.source or "",
+        caveat=record.caveat,
+        at=record.at,
+        status=record.status,
+        record_id=record.record_id,
+    )
 
 
 def _status_or_none(value, low: int, high: int) -> int | None:

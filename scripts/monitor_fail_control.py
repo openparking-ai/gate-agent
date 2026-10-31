@@ -824,7 +824,7 @@ BREAKS = [
         "name": "records_forgotten_at_a_restart",
         "why": "the index is not rebuilt from the disk, so a restart serves no record",
         "file": "src/gate_agent/records.py",
-        "from": '        for path in self.directory.glob("*.json"):',
+        "from": '        for path in self.directory.glob(f"{self.kind}-*.json"):',
         "to": "        for path in ():",
     },
     {
@@ -856,7 +856,7 @@ BREAKS = [
         "name": "a_failed_delivery_is_never_retried",
         "why": "a message nobody received is given up on at the first refusal",
         "file": "src/gate_agent/monitor.py",
-        "from": "        if len(attempts) <= self.config.retry_attempts:",
+        "from": "        if transient and len(attempts) <= self.config.retry_attempts:",
         "to": "        if False:",
     },
     {
@@ -954,6 +954,99 @@ BREAKS = [
         "from": "        if transition is Transition.RECOVERED:\n"
                 "            return first, self._now()",
         "to": "        if transition is Transition.RECOVERED:\n            return first, None",
+    },
+    # ---- THE MESSAGE RECORD, ROUND 2 (the independent check of #22). ----
+    {
+        "name": "a_late_retry_is_not_superseded",
+        "why": "a raised retried after its recovered reopens the incident on a pager",
+        "file": "src/gate_agent/monitor.py",
+        "from": "                superseded, by = self._superseded(record, delivery)",
+        "to": "                superseded, by = False, None",
+    },
+    {
+        "name": "a_permanent_refusal_is_retried",
+        "why": "an SMTP 550 or an HTTP 404 is sent again, and refused again",
+        "file": "src/gate_agent/monitor.py",
+        "from": "        if transient and len(attempts) <= self.config.retry_attempts:",
+        "to": "        if len(attempts) <= self.config.retry_attempts:",
+    },
+    {
+        "name": "a_payload_carries_no_record_id",
+        "why": "a receiver handed a retry cannot tell it from a new message",
+        "file": "src/gate_agent/monitor.py",
+        "from": "            Notification(\n                record_id=new_record_id(\"m\"),",
+        "to": "            Notification(\n                record_id=None,",
+    },
+    {
+        "name": "a_retry_is_lost_at_a_restart",
+        "why": "a delivery that was retrying is abandoned by the next run",
+        "file": "src/gate_agent/monitor.py",
+        "from": "                if delivery.state == DeliveryState.RETRYING and resumable:",
+        "to": "                if False:",
+    },
+    {
+        "name": "the_lane_filter_is_ignored",
+        "why": "`?lane=` serves every lane's records as that lane's",
+        "file": "src/gate_agent/records.py",
+        "from": "                if query.lane is not None and entry.lane not in "
+                "(query.lane, None):",
+        "to": "                if False:",
+    },
+    {
+        "name": "refused_recipients_are_dropped",
+        "why": "a partly accepted email is recorded as everybody told",
+        "file": "src/gate_agent/sinks.py",
+        "from": "            refused_recipients=tuple(sorted(str(one) for one in refused)),",
+        "to": "            refused_recipients=(),",
+    },
+    {
+        "name": "the_webhook_recipient_is_the_whole_url",
+        "why": "a hook URL's path token is published as the recipient",
+        "file": "src/gate_agent/sinks.py",
+        "from": "        host = urlsplit(self.config.url).hostname",
+        "to": "        host = self.config.url",
+    },
+    {
+        "name": "record_files_are_not_private",
+        "why": "every user on the box can read the addresses a site pages",
+        "file": "src/gate_agent/records.py",
+        "from": "            os.fchmod(descriptor, 0o600)",
+        "to": "            os.fchmod(descriptor, 0o644)",
+    },
+    {
+        "name": "the_records_directory_is_left_open",
+        "why": "a records directory that existed 0755 stays 0755",
+        "file": "src/gate_agent/records.py",
+        "from": "                if mode & 0o077:",
+        "to": "                if False:",
+    },
+    {
+        "name": "a_second_process_shares_the_store",
+        "why": "two monitors write one store, one counter, and sweep each other's writes",
+        "file": "src/gate_agent/records.py",
+        "from": "            self._take_lock()",
+        "to": "            pass",
+    },
+    {
+        "name": "one_head_for_every_kind",
+        "why": "the monitor and the agent share one counter file in a shared directory",
+        "file": "src/gate_agent/records.py",
+        "from": '        self._head_name = f"head.{KINDS[kind]}.json"',
+        "to": '        self._head_name = "head.json"',
+    },
+    {
+        "name": "the_sweep_takes_the_other_kinds_files",
+        "why": "a monitor starting deletes the agent's half-written call record",
+        "file": "src/gate_agent/records.py",
+        "from": '            f"{TEMP_PREFIX}{self.kind}-*",',
+        "to": '            f"{TEMP_PREFIX}*",',
+    },
+    {
+        "name": "an_undeclared_directory_refuses_startup",
+        "why": "a monitor with no [records] line and no usable default pages nobody",
+        "file": "src/gate_agent/monitor.py",
+        "from": "            if settings.declared:\n                raise",
+        "to": "            if True:\n                raise",
     },
 ]
 

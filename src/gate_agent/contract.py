@@ -664,6 +664,11 @@ class Notification:
     #: "the platform is refusing us" sends them to the platform when the fault
     #: is a token in a file beside this process.
     status: int | None = None
+    #: The id of the durable record of THIS message on `GET /v1/monitor/messages`
+    #: -- the same on every attempt, so a receiver that is handed a retry of
+    #: something it already has can tell, and drop it. `null` only on a
+    #: notification built outside the monitor.
+    record_id: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.site_id, "site_id")
@@ -769,6 +774,12 @@ class DeliveryState(StrEnum):
     #: The process stopped before this delivery finished. Nothing here can say
     #: whether the last attempt reached anybody, so it says that.
     INTERRUPTED = "interrupted"
+    #: It was due to be tried again, and was NOT, because by then it would have
+    #: said an old fact after a new one: a later message about the same code
+    #: had already reached this sink (`superseded_by` names it), or the code is
+    #: no longer in the state this message announced (`superseded_by` is null).
+    #: A `raised` retried after its `recovered` reopens an incident on a pager.
+    SUPERSEDED = "superseded"
 
 
 class DeliveryResult(StrEnum):
@@ -822,6 +833,11 @@ class DeliveryAttempt:
     #: The recipients an SMTP server REFUSED while accepting the message for
     #: the rest. A partial acceptance is still a message somebody did not get.
     refused_recipients: tuple[str, ...] = ()
+    #: On a failure: whether it was one worth trying again -- the network, a
+    #: timeout, SMTP 4xx, HTTP 5xx or 429 -- or a refusal that would only be
+    #: refused again: SMTP 5xx, any other HTTP 4xx, a redirect. `null` on an
+    #: accepted attempt.
+    transient: bool | None = None
 
     def __post_init__(self) -> None:
         _iso_utc(self.at, "attempt.at")
@@ -841,6 +857,7 @@ class DeliveryAttempt:
             "http_status": self.http_status,
             "reason": self.reason,
             "refused_recipients": list(self.refused_recipients),
+            "transient": self.transient,
         }
 
     @classmethod
@@ -853,6 +870,7 @@ class DeliveryAttempt:
             http_status=body.get("http_status"),
             reason=body.get("reason"),
             refused_recipients=tuple(body.get("refused_recipients") or ()),
+            transient=body.get("transient"),
         )
 
 
@@ -883,6 +901,10 @@ class Delivery:
     acknowledgement: str = ACKNOWLEDGEMENTS[0]
     acknowledged_at: str | None = None
     acknowledged_by: str | None = None
+    #: On a `superseded` delivery: the record of the later message about the
+    #: same code that had already reached this sink, or `null` where what
+    #: superseded it was the code's own state.
+    superseded_by: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.sink, "delivery.sink")
@@ -915,6 +937,7 @@ class Delivery:
             "acknowledgement": self.acknowledgement,
             "acknowledged_at": self.acknowledged_at,
             "acknowledged_by": self.acknowledged_by,
+            "superseded_by": self.superseded_by,
         }
 
     @classmethod
@@ -932,6 +955,7 @@ class Delivery:
             acknowledgement=body.get("acknowledgement", ACKNOWLEDGEMENTS[0]),
             acknowledged_at=body.get("acknowledged_at"),
             acknowledged_by=body.get("acknowledged_by"),
+            superseded_by=body.get("superseded_by"),
         )
 
 
@@ -1059,6 +1083,31 @@ class MessageRecord:
             deliveries=tuple(Delivery.from_dict(one) for one in body.get("deliveries") or ()),
             revision=int(body.get("revision") or 0),
         )
+
+
+#: The state a code is IN after each transition. What a retry is checked
+#: against: a `raised` is worth sending again only while the code is still
+#: `active`, a `recovered` only while it is `ok`.
+TRANSITION_STATE: dict[str, str] = {
+    Transition.RAISED.value: HealthState.ACTIVE.value,
+    Transition.STILL_ACTIVE.value: HealthState.ACTIVE.value,
+    Transition.RECOVERED.value: HealthState.OK.value,
+    Transition.NO_LONGER_MEASURED.value: HealthState.UNKNOWN.value,
+}
+
+
+def message_record_key(body: dict) -> str | None:
+    """What a message is ABOUT, as one string: origin, target, code, subject.
+
+    Two messages with the same key are about the same thing, and the later one
+    supersedes a retry of the earlier. The startup message's key is the
+    monitor's, so a new run's startup message supersedes the last run's.
+    """
+    if body.get("kind") == MessageKind.UNMEASURED.value:
+        return f"unmeasured|{body.get('monitor_id')}"
+    return "|".join(
+        str(body.get(name) or "") for name in ("origin", "target", "code", "subject")
+    )
 
 
 def message_record_unfinished(body: dict) -> bool:
