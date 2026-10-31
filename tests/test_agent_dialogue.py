@@ -27,6 +27,7 @@ from gate_agent.contract import (
     Authorisation,
 )
 from gate_agent.lines import TEXT
+from gate_agent.records import RecordQuery
 from serving import serving
 
 INTERCOM = "sip:door1@10.0.0.9"
@@ -260,6 +261,13 @@ def test_the_claimed_identity_is_recorded_by_shape(tmp_path, lane):
 # ---------------------------------------------------------------------------
 
 
+def menu_said(agent, clock) -> bool:
+    """The person's leg has nothing left to play: any re-prompt is over."""
+    from gate_agent.ua import UaLeg
+
+    return agent.session is None or agent._silent(agent.session, UaLeg.OPERATOR, clock())
+
+
 def brief_and_bridge(tmp_path, url, clock=None, **kwargs):
     """Answer, speak the case, call the human, brief them, and bridge."""
     agent, ua, clock = running(tmp_path, url, clock=clock, **kwargs)
@@ -339,9 +347,11 @@ def test_a_digit_for_a_disabled_authorisation_is_never_accepted(tmp_path, lane):
         tmp_path, url, authorisations=("open_now",)
     )
     for _ in range(REPROMPTS + 1):
+        # Each keyed AFTER the re-prompt before it has finished: a digit keyed
+        # over one is dropped unread and is not a re-prompt of its own.
+        pump(agent, clock, lambda: menu_said(agent, clock))
         ua.dtmf(operator, "5")
         agent.poll()
-        clock.advance(1)
     assert AgentEventKind.AUTHORISATION_RECEIVED.value not in kinds(agent)
     assert AgentEventKind.NOTHING_USABLE.value in kinds(agent)
     # The control: the ENABLED digit at the same site does record one.
@@ -417,12 +427,14 @@ def test_six_is_an_unknown_digit_now_and_records_no_number(tmp_path, lane):
     about a call-back is played to anybody. Then the menu still works.
     """
     _served, url = lane
-    agent, ua, _clock, operator = brief_and_bridge(tmp_path, url)
+    agent, ua, clock, operator = brief_and_bridge(tmp_path, url)
     played = len(ua.played)
     ua.dtmf(operator, "6")
     agent.poll()
     assert said(ua, "operator.menu_repeat"), "a 6 was not treated as an unknown digit"
-    # And the key that used to END the number, which is unknown too.
+    # And the key that used to END the number, which is unknown too -- keyed
+    # once the re-prompt has been said, so it is read, and re-prompted.
+    pump(agent, clock, lambda: menu_said(agent, clock))
     ua.dtmf(operator, "#")
     agent.poll()
     events = agent.events(0).to_dict()["events"]
@@ -434,12 +446,57 @@ def test_six_is_an_unknown_digit_now_and_records_no_number(tmp_path, lane):
     assert "call_back" not in {value.value for value in Authorisation}
 
     # THE CONTROL: a digit this site enabled, keyed next, is still taken.
+    pump(agent, clock, lambda: menu_said(agent, clock))
     ua.dtmf(operator, "3")
     agent.poll()
     recorded = [e for e in agent.events(0).to_dict()["events"]
                 if e["kind"] == AgentEventKind.AUTHORISATION_RECEIVED.value]
     assert [e["authorisation"] for e in recorded] == [Authorisation.DO_NOT_OPEN.value]
     assert recorded[0]["keyed"] is None
+
+
+#: What a person keying from the old call-back habit would key after the 6: a
+#: fictional number, and its old terminator. A 1 in it is `open_now`.
+HABIT = "12125550100#"
+
+
+def test_digits_keyed_over_a_re_prompt_are_dropped_and_counted(tmp_path, lane):
+    """6, then a phone number, keyed fast: nothing opens and the menu repeats.
+
+    From the unknown digit until "I did not get that" and the menu have
+    FINISHED on the person's leg, every digit is dropped unread -- the 1 at the
+    front of the number would otherwise be `open_now`. A 1 keyed after the menu
+    has been read again is taken, as it always was.
+    """
+    from gate_agent.ua import UaLeg
+
+    _served, url = lane
+    agent, ua, clock, operator = brief_and_bridge(tmp_path, url)
+    ua.dtmf(operator, "6")
+    for digit in HABIT:
+        ua.dtmf(operator, digit)
+    agent.poll()
+
+    events = agent.events(0).to_dict()["events"]
+    assert not [e for e in events if e["kind"] == AgentEventKind.AUTHORISATION_RECEIVED.value], (
+        "a digit keyed over the re-prompt was read as a decision"
+    )
+    assert said(ua, "operator.menu_repeat")
+    assert agent.session.digits_ignored == len(HABIT)
+    # Not held against the person's re-prompts: they keyed one unknown digit.
+    assert agent.session.prompts_left == REPROMPTS - 1
+
+    pump(agent, clock, lambda: agent._silent(agent.session, UaLeg.OPERATOR, clock()))
+    ua.dtmf(operator, "1")
+    agent.poll()
+    recorded = [e for e in agent.events(0).to_dict()["events"]
+                if e["kind"] == AgentEventKind.AUTHORISATION_RECEIVED.value]
+    assert [e["authorisation"] for e in recorded] == [Authorisation.OPEN_NOW.value]
+
+    pump(agent, clock, lambda: agent.session is None)
+    [record] = agent.calls(RecordQuery()).to_dict()["calls"]
+    assert record["digits_ignored"] == len(HABIT)
+    assert "2125550100" not in str(record), "the dropped digits reached the record"
 
 
 def test_a_site_that_still_enables_call_back_is_refused_by_name(tmp_path):

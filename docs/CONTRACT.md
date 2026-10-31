@@ -2949,6 +2949,15 @@ for nothing. **Only what is enabled is offered**, and a digit outside the enable
 set is re-prompted twice and then treated as nothing usable — never mapped onto
 the nearest enabled thing.
 
+**Nothing keyed while a re-prompt is playing counts.** From an unknown digit
+until "I did not get that" and the menu have finished playing on the person's
+leg, every digit that arrives is dropped unread — and so after an open the lane
+refused, while the refusal and the menu are read again. Only a digit keyed after
+that is acted on. Without it, a person who keys 6 from habit and then a phone
+number would have the number read as menu choices, and a 1 in it is `open_now`.
+Dropped digits are not held against the person's two re-prompts, and the call
+record counts them (`digits_ignored`) — the count, never the digits.
+
 **Two timers, both per-site settings with published defaults, and both
 assumptions** — nothing here measures how long a person takes to reach a phone:
 
@@ -3229,6 +3238,7 @@ refused before anybody knew which door they were.
       "ended_at": "2026-10-30T22:17:38+00:00",
       "outcome": "authorisation_received",
       "recording": null,
+      "digits_ignored": 0,
       "events": [
         {
           "kind": "call_answered",
@@ -3278,6 +3288,7 @@ refused before anybody knew which door they were.
 | `ticket_id` | The ticket this call confirmed, was told about, or whose vend it asked for. |
 | `ended_at` | When the call ended. `null` while it is live, and on `interrupted_by_restart`. |
 | `outcome` | `null` while live; then one of `authorisation_received`, `human_unreachable`, `nothing_usable`, `operator_hung_up`, `ticket_confirmed`, `told_ticket_on_screen`, `nothing_to_do`, `case_not_spoken`, `user_agent_lost`, `driver_hung_up`, `interrupted_by_restart` — set where the agent KNOWS it, never inferred afterwards. A refused call's outcome is its disposition. |
+| `digits_ignored` | How many digits the person keyed while a re-prompt was still playing, which were dropped unread — see the authorisation set. A **count, never the digits**. `0` on a record written before 2026-10-31, which did not count them. |
 | `recording` | **`null`. This version records no audio**: the user agent is not configured to record and nothing here asks it to. The field is here so the round that does fills it. |
 | `events[]` | Every agent event this call produced, exactly as `GET /v1/agent/events` serves it — vend asked for or refused, relay pulsed or not, with their codes. |
 

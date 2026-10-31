@@ -2725,6 +2725,9 @@ class CallRecord:
     outcome: str | None = None
     recording: str | None = None
     events: tuple[dict, ...] = ()
+    #: How many digits the person keyed while a re-prompt was still playing,
+    #: which were dropped unread. A COUNT and never the digits.
+    digits_ignored: int = 0
     revision: int = 0
 
     def __post_init__(self) -> None:
@@ -2754,6 +2757,10 @@ class CallRecord:
             one.value for one in CallOutcome
         ) + tuple(one.value for one in CallDisposition):
             raise ValueError(f"{self.outcome!r} is not a call outcome in this contract")
+        if isinstance(self.digits_ignored, bool) or not isinstance(
+            self.digits_ignored, int
+        ) or self.digits_ignored < 0:
+            raise ValueError("digits_ignored is a count")
         if self.disposition != CallDisposition.ANSWERED and self.lane is not None:
             raise ValueError("a refused call was never placed at a door, so it has no lane")
         for event in self.events:
@@ -2784,6 +2791,7 @@ class CallRecord:
             "ended_at": self.ended_at,
             "outcome": self.outcome,
             "recording": self.recording,
+            "digits_ignored": self.digits_ignored,
             "events": [dict(event) for event in self.events],
         }
 

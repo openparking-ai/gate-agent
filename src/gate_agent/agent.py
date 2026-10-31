@@ -267,6 +267,16 @@ class Session:
     bridged: bool = False
     authorisation: Authorisation | None = None
     prompts_left: int = REPROMPTS
+    #: TRUE FROM A RE-PROMPT UNTIL IT HAS FINISHED PLAYING on the person's leg.
+    #: Every digit that arrives meanwhile is DROPPED: a person who keys 6 from
+    #: habit and then a phone number would otherwise have the number read as
+    #: menu choices, and a 1 in it is `open_now`. Only a digit keyed after the
+    #: menu has been read again counts.
+    ignoring_digits: bool = False
+    #: How many digits were dropped that way, for the record. The COUNT, never
+    #: the digits: they are whatever the person was keying, and that may be a
+    #: phone number.
+    digits_ignored: int = 0
     deadline: float | None = None
     #: WHICH LANGUAGES this call is being spoken in, and it is per call.
     #:
@@ -1941,6 +1951,10 @@ class Agent:
         for line in lines:
             self._say(session, UaLeg.OPERATOR, line, operator=True)
         self._menu(session)
+        # THE SAME RULE AS ANY RE-PROMPT: nothing keyed while the refusal and
+        # the menu are being read counts. A person repeating `1` over the
+        # sentence telling them why `1` did not work has not heard it.
+        session.ignoring_digits = True
         # Keyed during the briefing, the two legs are not put together yet, and
         # they are put together when this has been said -- as after a briefing.
         # Either way `nothing_usable_seconds` starts when the menu has been
@@ -2156,6 +2170,13 @@ class Agent:
     def _digit(self, session: Session, digit: str) -> None:
         if session.state not in (State.BRIEFING, State.WAITING_DIGIT, State.HOLDING):
             return
+        if session.ignoring_digits:
+            if not self._silent(session, UaLeg.OPERATOR, self._clock()):
+                # Keyed over the re-prompt. Dropped, counted, and not held
+                # against the person's re-prompts either: it was never read.
+                session.digits_ignored += 1
+                return
+            session.ignoring_digits = False
         value = AUTHORISATION_DIGITS.get(digit)
         if value is None or value not in self.config.authorisations:
             # A digit for an authorisation this site has not enabled is NOT
@@ -2169,6 +2190,8 @@ class Agent:
                 return
             self._say(session, UaLeg.OPERATOR, "operator.menu_repeat", operator=True)
             self._menu(session)
+            # NOTHING KEYED UNDER THE RE-PROMPT COUNTS -- see `Session`.
+            session.ignoring_digits = True
             session.state = State.WAITING_DIGIT
             session.deadline = self._clock() + self.config.nothing_usable_seconds
             return
@@ -2881,7 +2904,10 @@ class Agent:
     def _note(self, session: Session, event: dict) -> None:
         """One event onto the live call's record, and the summary it moves."""
         call = session.call
-        changes: dict = {"events": call.events + (event,)}
+        changes: dict = {
+            "events": call.events + (event,),
+            "digits_ignored": session.digits_ignored,
+        }
         kind = event["kind"]
         if session.case is not None:
             changes["case"] = session.case.value

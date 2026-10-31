@@ -1831,6 +1831,15 @@ BREAKS = [
               "            keyed=\"5551234\",\n"
               "        )",
     },
+    {
+        "name": "digits_over_a_re_prompt_are_read",
+        "why": "6 then a phone number keyed fast reads the number's 1 as open_now",
+        "file": "src/gate_agent/agent.py",
+        "from": "        if session.ignoring_digits:\n"
+                "            if not self._silent(session, UaLeg.OPERATOR, self._clock()):",
+        "to": "        if session.ignoring_digits:\n"
+              "            if False:",
+    },
 ]
 
 
