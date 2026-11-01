@@ -155,7 +155,13 @@ class _Handler(BaseHTTPRequestHandler):
         so a caller who can reach a `405` here can already read them. No
         credential, no `ticket_ref` and no act token is in it, which is the
         round-6 rule and is swept.
+
+        **The token is checked FIRST**, as `do_GET` checks it: where a site
+        gave this surface a token, a caller without it is told `401` and
+        nothing about what this process can do.
         """
+        if not self._authorised():
+            return self._unauthorised()
         self.send_response(405)
         self.send_header("Allow", "GET")
         surface = self.service.act_surface()

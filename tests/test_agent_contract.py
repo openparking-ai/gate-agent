@@ -264,6 +264,31 @@ def test_the_routes_answer_and_the_other_methods_are_405(busy):
                 assert exc.headers["Allow"] == "GET"
 
 
+def test_a_non_get_without_the_token_is_401_and_says_nothing_about_acting(busy):
+    """OP-4-13. The 405 body describes what this process can ask a barrier to do,
+    so it is behind the same token as every route beside it."""
+    import urllib.error
+    import urllib.request
+
+    with serving(make_server(AgentService(busy), token="the-token")) as url:
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            request = urllib.request.Request(f"{url}/v1/agent", method=method, data=b"{}")
+            with pytest.raises(urllib.error.HTTPError) as refused:
+                urllib.request.urlopen(request, timeout=5)
+            assert refused.value.code == 401
+            body = refused.value.read().decode()
+            assert "barrier" not in body and "Allow" not in refused.value.headers, body
+        # The control: with the token, it is the 405 and its derived body.
+        request = urllib.request.Request(
+            f"{url}/v1/agent", method="POST", data=b"{}",
+            headers={"Authorization": "Bearer the-token"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(request, timeout=5)
+        assert refused.value.code == 405
+        assert "barrier" in refused.value.read().decode()
+
+
 def test_off_loopback_it_refuses_to_start_without_a_token(busy):
     """One rule for all three surfaces on one device, imported and not restated."""
     with pytest.raises(InsecureBind):
