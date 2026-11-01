@@ -43,11 +43,12 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from .redirects import open_url
+from .redirects import open_url, read_before
 
 log = logging.getLogger(__name__)
 
@@ -172,13 +173,21 @@ class LaneActClient:
         # side: a key this agent invented per attempt would be unique per
         # request, which is the same as having none.
         request.add_header("Idempotency-Key", idempotency_key)
+        # A DEADLINE ON THE WHOLE ANSWER, not only on each socket read: one
+        # slow lane must not hold the agent's single loop (`read_before`).
+        deadline = time.monotonic() + self.timeout
         try:
             with open_url(request, timeout=self.timeout) as response:
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                raw = read_before(response, MAX_RESPONSE_BYTES, deadline)
                 status = response.status
         except urllib.error.HTTPError as exc:
-            raw = exc.read(MAX_RESPONSE_BYTES + 1)
             status = exc.code
+            try:
+                raw = read_before(exc, MAX_RESPONSE_BYTES, deadline)
+            except (OSError, http.client.HTTPException, ValueError):
+                # The STATUS is the answer for every refusal but a 409, and a
+                # 409 with no readable body names no code: unreachable, below.
+                raw = b""
             if status >= 500:
                 raise LaneUnreachable(f"the lane answered HTTP {status}") from exc
             if status != 409:

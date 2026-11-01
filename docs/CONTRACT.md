@@ -284,7 +284,11 @@ target or sink URL is now refused at startup, by name** — *credentials come fr
 files* — and this route rebuilds the address anyway, because one check is a
 check and two is a boundary.
 
-`timeout_seconds` is how long this monitor waits for that target's answer. A
+`timeout_seconds` is how long this monitor waits for that target's answer — and
+in the agent, for a lane's read or vend answer. The BODY is read against that
+deadline, as a camera's is, so a target dripping bytes is abandoned at it rather
+than holding the one loop; the wait for the status line and headers is still
+bounded per socket read only. A
 per-site **setting** with a published default of **10 seconds**, and an
 **assumption** — nothing here measures how long a loaded Jetson takes to answer
 its own health route. What it is drawn against is the other side of the seam: a

@@ -36,10 +36,11 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 
-from .redirects import open_url
+from .redirects import open_url, read_before
 
 log = logging.getLogger(__name__)
 
@@ -138,9 +139,12 @@ class ReadOnlyClient:
         request = urllib.request.Request(url, method="GET")
         if self.token:
             request.add_header("Authorization", f"Bearer {self.token}")
+        # A DEADLINE ON THE WHOLE BODY, not only on each socket read: see
+        # `redirects.read_before`.
+        deadline = time.monotonic() + self.timeout
         try:
             with open_url(request, timeout=self.timeout) as response:
-                body = response.read(MAX_RESPONSE_BYTES + 1)
+                body = read_before(response, MAX_RESPONSE_BYTES, deadline)
         except urllib.error.HTTPError as exc:
             # It ANSWERED. Which half of the fault that is depends on the
             # status, and the status is carried so a human can tell them apart.
