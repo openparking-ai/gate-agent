@@ -478,7 +478,8 @@ without adding it here.
     "lane_act_refused",
     "relay_unreachable",
     "relay_refused_us",
-    "record_store_unwritable"
+    "record_store_unwritable",
+    "ticket_store_unwritable"
   ],
   "agent_cases": [
     "malfunction_active",
@@ -3133,6 +3134,7 @@ has been taken at it.
 | `audio_missing` | the line, or the file | a file the agent reaches for is not there. Startup refuses on this, so on a running agent it is a file that has gone missing since |
 | `lane_unavailable` | the lane's name | per declared lane |
 | `record_store_unwritable` | this agent | the durable record of a call could not be written. The call goes on; the gap in the account is said here |
+| `ticket_store_unwritable` | this agent | a ticket record could not be written. A ticket whose issue could not be recorded is not shown or offered, and the call goes on to a person; a later write that fails is said here and the call goes on |
 
 Nothing here is `never_alarm`: every member is a reason somebody at a barrier
 cannot be helped.

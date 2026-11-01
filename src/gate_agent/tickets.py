@@ -451,6 +451,11 @@ class TicketRecord:
         return asdict(self)
 
 
+class TicketStoreUnwritable(OSError):
+    """A ticket record could not be written. Named, so the agent can say so
+    and carry on with the call rather than raise out of it."""
+
+
 class TicketStore:
     """One JSON file per ticket, in a declared directory, purged by DELETION.
 
@@ -511,6 +516,8 @@ class TicketStore:
                 (json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n").encode("utf-8"),
             )
             os.replace(temporary, path)
+        except OSError as exc:
+            raise TicketStoreUnwritable(f"a ticket record could not be written: {exc}") from exc
         finally:
             temporary.unlink(missing_ok=True)
 

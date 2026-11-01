@@ -2003,6 +2003,10 @@ class AgentCode(StrEnum):
     #: account a platform reads of it is missing from this box, and that is
     #: said rather than discovered at the exception.
     RECORD_STORE_UNWRITABLE = "record_store_unwritable"
+    #: A ticket record could not be written. A ticket whose ISSUE could not be
+    #: recorded is not offered -- the record has to exist before a screen shows
+    #: a code or a barrier moves -- and the call goes on to a person.
+    TICKET_STORE_UNWRITABLE = "ticket_store_unwritable"
 
 
 #: WHERE each of the agent's codes gets its answer in this build. One copy, and

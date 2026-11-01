@@ -114,7 +114,16 @@ from .records import (
 )
 from .relay import RelayRefusedUs, RelayUnreachable
 from .relay import build as relay_build
-from .tickets import CONFIRMED, ISSUED, TicketStore, confirmed, mint, vended, voided
+from .tickets import (
+    CONFIRMED,
+    ISSUED,
+    TicketStore,
+    TicketStoreUnwritable,
+    confirmed,
+    mint,
+    vended,
+    voided,
+)
 from .tickets import TicketRecord as _TicketRecord
 from .tickets import told as _told
 from .ua import (
@@ -565,6 +574,7 @@ class Agent:
             # about: a store that cannot be opened is a configuration this
             # process must not run on, and finding out costs a `mkdir`.
             self._store.open(datetime.fromisoformat(self._now()))
+            self._code(AgentCode.TICKET_STORE_UNWRITABLE, self.config.agent_id, HealthState.OK)
             self._reconcile()
         self.ua.start()
         self._release_leftover_calls()
@@ -631,7 +641,7 @@ class Agent:
             if record is None or record.state not in (ISSUED, CONFIRMED):
                 continue
             if record.state == ISSUED:
-                self._store.write(voided(record, self._now(), "restarted"))
+                self._write_ticket(voided(record, self._now(), "restarted"))
                 self._record(
                     AgentEventKind.TICKET_VOIDED,
                     lane=record.lane,
@@ -673,7 +683,7 @@ class Agent:
         if not answer.commanded:
             return self._unknown_outcome(record, answer.code)
         cursor = None if answer.event_cursor is None else str(answer.event_cursor)
-        self._store.write(vended(record, self._now(), cursor))
+        self._write_ticket(vended(record, self._now(), cursor))
         log.warning("a confirmed ticket left by a previous process settled as vended")
         self._record(
             AgentEventKind.VEND_COMMANDED,
@@ -684,7 +694,7 @@ class Agent:
         )
 
     def _unknown_outcome(self, record, answer: str | None) -> None:
-        self._store.write(voided(record, self._now(), "outcome_unknown", answer))
+        self._write_ticket(voided(record, self._now(), "outcome_unknown", answer))
         self._record(
             AgentEventKind.TICKET_VOIDED,
             lane=record.lane,
@@ -1321,7 +1331,11 @@ class Agent:
             # as well as the same idempotency key.
             decision_at=decision_at,
         )
-        self._store.write(record)
+        if not self._write_ticket(record):
+            # NOT ISSUED. The record exists before the screen does and before a
+            # barrier moves, so a ticket that could not be recorded is not shown
+            # and not offered; the call goes to a person as with no ticket.
+            return
         pending = Pending(
             ticket=ticket,
             payload=payload,
@@ -1334,7 +1348,7 @@ class Agent:
             told_at=told_at,
         )
         if show and not self._show(pending) and screen_required:
-            self._store.write(
+            self._write_ticket(
                 voided(record, self._now(), "display_unavailable")
             )
             self._record(
@@ -1355,6 +1369,18 @@ class Agent:
             case=case.value,
             ticket_id=ticket.ticket_id,
         )
+
+    def _write_ticket(self, record) -> bool:
+        """One ticket record. A store that refuses is a CODE, not an exception
+        out of the middle of a call; `False` says it was not written."""
+        try:
+            self._store.write(record)
+        except TicketStoreUnwritable as exc:
+            log.error("ticket %s could not be recorded: %s", record.ticket_id, exc)
+            self._code(AgentCode.TICKET_STORE_UNWRITABLE, self.config.agent_id, HealthState.ACTIVE)
+            return False
+        self._code(AgentCode.TICKET_STORE_UNWRITABLE, self.config.agent_id, HealthState.OK)
+        return True
 
     def _call_being_spoken_at(self, door: str | None) -> Session | None:
         """A live call at this door that has not reached a person yet.
@@ -1537,7 +1563,7 @@ class Agent:
             return
         record = self._store.read(pending.ticket.ticket_id)
         if record is not None:
-            self._store.write(voided(record, self._now(), reason, answer))
+            self._write_ticket(voided(record, self._now(), reason, answer))
         self._record(
             AgentEventKind.TICKET_VOIDED,
             lane=lane,
@@ -1803,7 +1829,7 @@ class Agent:
         at = self._now()
         record = self._store.read(pending.ticket.ticket_id) if self._store else None
         if record is not None:
-            self._store.write(_told(record, at))
+            self._write_ticket(_told(record, at))
         self._pending[pending.lane] = replace(still, told_at=at)
 
     def _confirm_ticket(self, session: Session, intercom: Intercom) -> None:
@@ -1832,7 +1858,7 @@ class Agent:
         )
         record = self._store.read(pending.ticket.ticket_id)
         if record is not None:
-            self._store.write(confirmed(record, self._now()))
+            self._write_ticket(confirmed(record, self._now()))
         self._record(
             AgentEventKind.TICKET_CONFIRMED,
             intercom=intercom.sip_uri,
@@ -1911,7 +1937,7 @@ class Agent:
         if answer.commanded:
             record = self._store.read(pending.ticket.ticket_id)
             if record is not None:
-                self._store.write(
+                self._write_ticket(
                     vended(
                         record,
                         self._now(),
@@ -2047,7 +2073,7 @@ class Agent:
         """A confirmed ticket that did not vend. The record says so."""
         record = self._store.read(pending.ticket.ticket_id) if self._store else None
         if record is not None:
-            self._store.write(voided(record, self._now(), reason, answer))
+            self._write_ticket(voided(record, self._now(), reason, answer))
 
     def _durations_for_lines(self) -> frozenset[str]:
         """Which operator lines this build has words for, for the ONE language
@@ -2479,7 +2505,7 @@ class Agent:
                 # VENDED, and `lane_answer` is `None`: there is no lane here and
                 # nothing answered but the relay. A record left `issued` would
                 # be one a restart voids `restarted` over a barrier that moved.
-                self._store.write(vended(record, self._now(), None))
+                self._write_ticket(vended(record, self._now(), None))
             self._record(
                 AgentEventKind.RELAY_PULSED,
                 for_call=pulse.call_id,
@@ -2498,7 +2524,7 @@ class Agent:
         else:
             log.error("the relay at %s did not pulse: %s", pulse.intercom, pulse.outcome)
             if record is not None:
-                self._store.write(voided(record, self._now(), "relay_failed"))
+                self._write_ticket(voided(record, self._now(), "relay_failed"))
             self._record(
                 AgentEventKind.RELAY_PULSE_FAILED,
                 for_call=pulse.call_id,
