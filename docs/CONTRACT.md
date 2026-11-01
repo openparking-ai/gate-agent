@@ -1090,7 +1090,7 @@ quietly already works.
 | | |
 |---|---|
 | `log` | Structured JSON to stdout, one line per notification. **Always on**, and the one sink that needs no provider, no credential and no network. |
-| `email` | SMTP, per-site host, port, from and to, **TLS by default**. |
+| `email` | SMTP, per-site host, port, from and to, **TLS by default**, and that TLS verifies the server's certificate and host name against the system trust store: a server that does not verify is a failed delivery, not retried. |
 | `webhook` | A `POST` of the notification object to a per-site URL with a bearer token from a file. This is how a third party's paging system takes the seat. |
 
 **Every sink is per-site declared and none has a default recipient.** A default
