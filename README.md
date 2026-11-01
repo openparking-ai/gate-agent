@@ -181,7 +181,7 @@ spans this process's clock and the lane's — the contract says what it can and
 cannot be read as.
 
 **One camera implementation this version: an HTTP JPEG snapshot with standard
-HTTP authentication.** No RTSP — a stream needs a decoder and this package has no
+HTTP authentication** — Digest, or Basic over https only. No RTSP — a stream needs a decoder and this package has no
 dependencies. **A camera whose only documented snapshot route takes the password
 as a query parameter is named unsupported in the contract**, with the reason,
 rather than made to work by putting a password in a URL. Of the two default-tier

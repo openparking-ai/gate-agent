@@ -1300,9 +1300,10 @@ consumer ignores what it does not recognise.
 **One real implementation this version: an HTTP JPEG snapshot.** A `GET` of a URL
 that answers `image/jpeg`, with the credential presented through **standard HTTP
 authentication** — the challenge-response the camera itself asks for when it
-answers `401`. Both Basic and Digest are answered; which one is used is the
-camera's choice, because a client that decided for itself would need a per-camera
-setting nobody can answer correctly.
+answers `401`. **Digest is answered always, Basic over https only**: Basic is
+base64 of `user:password` in a header, so over plain http it is the password on
+the wire. A camera challenging Basic over http is `camera_refused_us`, and the
+reason names the scheme.
 
 **There is no RTSP**, and that is a decision rather than a gap: reading a stream
 needs a decoder, and this package has no dependencies at all — it runs on a box
@@ -1345,7 +1346,7 @@ Of the two default-tier cameras the lane's reference-hardware note names:
 
 | | |
 |---|---|
-| **AXIS P1465-LE** | **Supported.** Its snapshot route is `GET /axis-cgi/jpg/image.cgi`, and VAPIX authenticates with HTTP Basic or Digest — headers, never a query string. |
+| **AXIS P1465-LE** | **Supported.** Its snapshot route is `GET /axis-cgi/jpg/image.cgi`, and VAPIX authenticates with HTTP Basic or Digest — headers, never a query string. Configure it for Digest, or serve it over https for Basic. |
 | **Reolink RLC-810A** | **NOT SUPPORTED by this build.** Reolink's own support documentation gives the snapshot route as `/cgi-bin/api.cgi?cmd=Snap&…&user=…&password=…` — the credential is a query parameter, and its token alternative is a query parameter too. There is no documented header-authenticated snapshot route to use instead. A site with these cameras needs either a camera that authenticates in a header, or a later round that decides deliberately to accept a credential in a URL. This build does not decide that quietly. |
 
 **Neither claim is a measurement.** Nobody here has one of these devices. Each is
