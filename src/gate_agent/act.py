@@ -40,6 +40,7 @@ disagree with the one the barrier actually obeys.
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import urllib.error
@@ -187,6 +188,8 @@ class LaneActClient:
                 ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise LaneUnreachable(f"the lane could not be reached: {exc}") from exc
+        except (http.client.HTTPException, ValueError) as exc:
+            raise LaneUnreachable(f"the lane answered something that is not HTTP: {exc}") from exc
 
         if len(raw) > MAX_RESPONSE_BYTES:
             raise LaneUnreachable("the lane answered more than a vend answer can be")

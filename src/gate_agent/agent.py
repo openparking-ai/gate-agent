@@ -632,7 +632,14 @@ class Agent:
                     reason="restarted",
                 )
                 continue
-            self._replay_vend(record)
+            try:
+                self._replay_vend(record)
+            except Exception:  # noqa: BLE001
+                # ONE RECORD, settled on its own. Whatever a replay raised, this
+                # build does not know whether that barrier opened, and the next
+                # record -- and the agent starting at all -- must not wait on it.
+                log.exception("a confirmed ticket could not be settled; outcome unknown")
+                self._unknown_outcome(record, None)
 
     def _replay_vend(self, record) -> None:
         """One `confirmed` record, settled against the lane that holds the stay."""

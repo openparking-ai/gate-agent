@@ -33,6 +33,7 @@ cross-compile, patch and have go wrong somewhere with no keyboard attached.
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import urllib.error
@@ -148,6 +149,11 @@ class ReadOnlyClient:
             raise TargetRefusedUs(f"{url}: HTTP {exc.code}", exc.code) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise TargetUnreachable(f"{url}: {exc}") from exc
+        except (http.client.HTTPException, ValueError) as exc:
+            # A reply urllib could not PARSE -- a garbage status line, a header
+            # it refuses -- is neither `URLError` nor `OSError`, and it used to
+            # escape: the caller's last `ok` stood. It is no answer.
+            raise TargetUnreachable(f"{url}: answered something that is not HTTP: {exc}") from exc
         if len(body) > MAX_RESPONSE_BYTES:
             raise TargetUnreachable(f"{url}: answered more than {MAX_RESPONSE_BYTES} bytes")
         try:
