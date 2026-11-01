@@ -92,7 +92,7 @@ def test_standalone_is_a_mode_and_any_single_target_is_one(token_file):
             "platform": {
                 "url": "http://platform.example/api/v1",
                 "garage_id": "g-1",
-                "token_file": token_file,
+                "garage_token_file": token_file,
             }
         }
     )
@@ -153,7 +153,7 @@ def test_a_token_file_that_holds_nothing_is_refused(tmp_path):
                     "platform": {
                         "url": "http://x",
                         "garage_id": "g",
-                        "token_file": str(empty),
+                        "garage_token_file": str(empty),
                     }
                 },
             }
@@ -168,12 +168,42 @@ def test_a_token_file_that_holds_nothing_is_refused(tmp_path):
         {
             **BASE,
             "targets": {
-                "platform": {"url": "http://x", "garage_id": "g", "token_file": str(real)}
+                "platform": {"url": "http://x", "garage_id": "g", "garage_token_file": str(real)}
             },
         }
     )
     assert parsed.targets[0].token == "operator-token"
     assert parsed.targets[0].authenticated is True
+
+
+def test_a_tenant_wide_platform_token_is_refused_unless_chosen(token_file):
+    """OP-4-1. A token taken off one garage's box must not run another garage.
+
+    `token_file` on the platform is an operator token and the tenant comes from
+    it. It is refused unless `allow_tenant_wide_token = true` names the choice;
+    the garage-scoped `garage_token_file` is preferred and needs nothing else.
+    """
+    platform = {"url": "http://x", "garage_id": "g", "token_file": token_file}
+    with pytest.raises(ConfigError, match="tenant-wide") as refused:
+        config(targets={"platform": platform})
+    assert "garage_token_file" in str(refused.value)
+
+    with pytest.raises(ConfigError, match="allow_tenant_wide_token"):
+        config(targets={"platform": {**platform, "allow_tenant_wide_token": "yes"}})
+
+    with pytest.raises(ConfigError, match="both"):
+        config(targets={"platform": {**platform, "garage_token_file": token_file}})
+
+    # The controls: the override accepts it and says so on the target; the
+    # scoped credential is accepted and is not tenant-wide.
+    chosen = config(targets={"platform": {**platform, "allow_tenant_wide_token": True}})
+    assert chosen.targets[0].token == "operator-token"
+    assert chosen.targets[0].tenant_wide_token is True
+    scoped = config(
+        targets={"platform": {"url": "http://x", "garage_id": "g", "garage_token_file": token_file}}
+    )
+    assert scoped.targets[0].token == "operator-token"
+    assert scoped.targets[0].tenant_wide_token is False
 
 
 # ---------------------------------------------------------------------------
@@ -193,15 +223,15 @@ def test_a_platform_target_declares_its_garage_and_its_token(tmp_path):
     token.write_text("operator-token")
     token.chmod(0o600)
 
-    with pytest.raises(ConfigError, match="token_file"):
+    with pytest.raises(ConfigError, match="garage_token_file"):
         config(targets={"platform": {"url": "http://x", "garage_id": "g"}})
 
     with pytest.raises(ConfigError, match="garage_id"):
-        config(targets={"platform": {"url": "http://x", "token_file": str(token)}})
+        config(targets={"platform": {"url": "http://x", "garage_token_file": str(token)}})
 
     # The control: with both, it is accepted.
     parsed = config(
-        targets={"platform": {"url": "http://x", "garage_id": "g", "token_file": str(token)}}
+        targets={"platform": {"url": "http://x", "garage_id": "g", "garage_token_file": str(token)}}
     )
     assert parsed.targets[0].garage_id == "g"
 
@@ -219,7 +249,7 @@ def test_the_settings_have_published_defaults_and_they_are_the_published_ones(to
 
     with_platform = config(
         targets={
-            "platform": {"url": "http://x", "garage_id": "g", "token_file": token_file},
+            "platform": {"url": "http://x", "garage_id": "g", "garage_token_file": token_file},
         }
     )
     assert with_platform.targets[0].lane_quiet_seconds == DEFAULT_LANE_QUIET_SECONDS
@@ -316,7 +346,8 @@ def test_a_token_file_path_resolves_against_the_configuration_file(tmp_path):
     config_file = tmp_path / "monitor.toml"
     config_file.write_text(
         '[monitor]\nid = "m"\nsite_id = "s"\n\n[records]\ndirectory = "records"\n\n'
-        '[targets.platform]\nurl = "http://x"\ngarage_id = "g"\ntoken_file = "platform.token"\n'
+        '[targets.platform]\nurl = "http://x"\ngarage_id = "g"\n'
+        'garage_token_file = "platform.token"\n'
     )
     parsed = MonitorConfig.from_file(config_file)
     assert parsed.targets[0].token == "operator-token"

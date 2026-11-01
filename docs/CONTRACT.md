@@ -109,7 +109,7 @@ reports "all fine", which is the lie this module exists to prevent.
 |---|---|
 | `lane` | A URL implementing the lane contract. The monitor reads `GET /v1/lane` once for identity and version, then polls `GET /v1/lane/health`. Ours or a third party's — there is no branch on which. |
 | `identity_service` | A Vehicle ID `GET /v1/health` URL. Unauthenticated by that contract's own decision: it carries no plate and no image, and a monitor holding the read credential in order to ask whether a process is alive is that credential in one more place. |
-| `platform` | The operator surface. Read with an **operator token from a file**, and its garage declared. |
+| `platform` | The operator surface, its garage declared. Read with **`garage_token_file`**: a read-only credential scoped to that garage, from a file. A tenant-wide operator token (`token_file`) is refused at startup unless `allow_tenant_wide_token = true`, because a token taken from one garage's box would control every garage of the tenant; the monitor warns at startup when it runs on one. |
 | `capture` | A capture process — this package's own second process, or anything implementing the capture half of this contract. The monitor reads `GET /v1/capture/health`, whose entries are in the **lane's shape on purpose**, so the same code reads both. This is how *"camera disconnected is a malfunction"* gets from a camera nobody can reach to a human who can go and look at it. |
 
 **Standalone is a MODE.** With no lane declared, the monitor watches whatever IS

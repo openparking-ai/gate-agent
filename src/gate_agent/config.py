@@ -236,6 +236,9 @@ SECRET_FILE_IS: dict[str, str] = {
         "the credential this monitor presents to that target. The platform's is an OPERATOR "
         "token: it reads every garage's devices."
     ),
+    "[targets.*].garage_token_file": (
+        "the read-only credential this monitor presents to the platform for this one garage."
+    ),
     "[sinks.webhook].token_file": (
         "the credential this monitor presents to the paging system it POSTs to."
     ),
@@ -356,6 +359,9 @@ class Target:
     #: PLATFORM ONLY: how long a device may go unheard-from. Setting, default
     #: published above, and an assumption.
     lane_quiet_seconds: float = DEFAULT_LANE_QUIET_SECONDS
+    #: PLATFORM ONLY: the credential is a tenant-wide operator token, accepted
+    #: because the site set `allow_tenant_wide_token`. Said once at startup.
+    tenant_wide_token: bool = False
     #: How long this target has to answer. Setting, default published above,
     #: and an assumption -- see `client.DEFAULT_TIMEOUT` for what it is drawn
     #: against, which is the lane's own bound on the machine BEHIND it.
@@ -831,25 +837,20 @@ def _targets(
             raise ConfigError(f"[targets.{kind.value}] does not declare a url")
         _refuse_userinfo(url, f"[targets.{kind.value}].url")
         token = None
-        if "token_file" in table:
+        tenant_wide = False
+        if kind is TargetKind.PLATFORM:
+            token, tenant_wide = _platform_token(table, relative_to)
+        elif "token_file" in table:
             token = read_secret_file(
                 table["token_file"], f"[targets.{kind.value}].token_file", relative_to
             )
         garage_id = None
         quiet = DEFAULT_LANE_QUIET_SECONDS
         if kind is TargetKind.PLATFORM:
-            # Both DECLARED. The platform's devices route is tenant-scoped from
-            # the token and garage-scoped from the path, and neither has a safe
-            # default: a monitor with no token reads nothing, and a monitor
-            # pointed at a garage nobody chose reports no devices and therefore
-            # nothing wrong.
-            if token is None:
-                raise ConfigError(
-                    "[targets.platform] does not declare token_file. The platform's operator "
-                    "surface is authenticated and the tenant comes from the token, so there is "
-                    "nothing to read without one -- and a monitor that read nothing would "
-                    "report nothing wrong."
-                )
+            # Both DECLARED. The platform's devices route is garage-scoped from
+            # the path, and neither has a safe default: a monitor with no token
+            # reads nothing, and a monitor pointed at a garage nobody chose
+            # reports no devices and therefore nothing wrong.
             garage_id = table.get("garage_id")
             if not isinstance(garage_id, str) or not garage_id.strip():
                 raise ConfigError(
@@ -875,6 +876,7 @@ def _targets(
                 token=token,
                 garage_id=garage_id,
                 lane_quiet_seconds=quiet,
+                tenant_wide_token=tenant_wide,
                 timeout_seconds=_positive(
                     table.get("timeout_seconds"),
                     f"[targets.{kind.value}].timeout_seconds",
@@ -883,6 +885,44 @@ def _targets(
             )
         )
     return tuple(targets)
+
+
+def _platform_token(table: dict, relative_to: Path | None) -> tuple[str, bool]:
+    """The platform credential, and whether it reaches past this garage.
+
+    `garage_token_file` is preferred: a read-only credential scoped to the one
+    garage this monitor watches. `token_file` is an OPERATOR token, and the
+    tenant comes from it -- so a token copied off one garage's box reads, and
+    acts on, every other garage of that tenant. That box sits in a gate housing.
+    It is refused unless `allow_tenant_wide_token = true` says somebody chose it.
+    """
+    scoped = "garage_token_file" in table
+    tenant = "token_file" in table
+    if scoped and tenant:
+        raise ConfigError(
+            "[targets.platform] declares both garage_token_file and token_file. Declare the "
+            "garage-scoped one only: a tenant-wide token kept beside it is still on this box."
+        )
+    if scoped:
+        where = "[targets.platform].garage_token_file"
+        return read_secret_file(table["garage_token_file"], where, relative_to), False
+    if not tenant:
+        raise ConfigError(
+            "[targets.platform] does not declare garage_token_file. The platform's surface is "
+            "authenticated, so there is nothing to read without one -- and a monitor that read "
+            "nothing would report nothing wrong."
+        )
+    allow = table.get("allow_tenant_wide_token", False)
+    if not isinstance(allow, bool):
+        raise ConfigError("[targets.platform].allow_tenant_wide_token must be true or false")
+    if not allow:
+        raise ConfigError(
+            "[targets.platform] declares token_file, a tenant-wide operator token: whoever "
+            "takes it from this box controls every garage of the tenant. Declare "
+            "garage_token_file with a read-only credential for this garage, or set "
+            "allow_tenant_wide_token = true to accept that risk on purpose."
+        )
+    return read_secret_file(table["token_file"], "[targets.platform].token_file", relative_to), True
 
 
 def _sinks(raw: dict, relative_to: Path | None) -> tuple[object, ...]:

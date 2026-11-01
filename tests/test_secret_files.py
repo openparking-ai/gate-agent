@@ -78,6 +78,24 @@ def _targets_token_file(tmp_path, mode):
                     "url": "http://127.0.0.1:8080",
                     "garage_id": "garage-1",
                     "token_file": str(token),
+                    "allow_tenant_wide_token": True,
+                }
+            },
+        }
+    )
+
+
+def _targets_garage_token_file(tmp_path, mode):
+    token = written(tmp_path, "garage.token", "garage-token", mode)
+    return lambda: MonitorConfig.from_dict(
+        {
+            "monitor": {"id": "monitor-1", "site_id": "site-1"},
+            "records": {"directory": str(tmp_path / "records")},
+            "targets": {
+                "platform": {
+                    "url": "http://127.0.0.1:8080",
+                    "garage_id": "garage-1",
+                    "garage_token_file": str(token),
                 }
             },
         }
@@ -169,6 +187,7 @@ def _act_token_file(tmp_path, mode):
 #: `config.SECRET_FILE_IS` is keyed on. The last test compares the two sets.
 CASES = {
     "[targets.*].token_file": _targets_token_file,
+    "[targets.*].garage_token_file": _targets_garage_token_file,
     "[sinks.webhook].token_file": _webhook_token_file,
     "[cameras.*].auth_file": _camera_auth_file,
     "[lanes.*].token_file": _lanes_token_file,

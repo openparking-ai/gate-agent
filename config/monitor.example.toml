@@ -78,14 +78,18 @@ poll_seconds = 30
 # Only when that process is bound off loopback and therefore demands one. A FILE.
 # token_file = "/etc/openparking/capture-read.token"
 
-# The platform. Read with an OPERATOR token; the tenant comes from the token.
+# The platform. Read with a credential scoped to THIS garage, read-only.
 [targets.platform]
 url = "https://platform.example.com/api/v1"
 # DECLARED, no default. A monitor pointed at a garage nobody chose lists no
 # devices, and no devices reads exactly like no faults.
 garage_id = "00000000-0000-0000-0000-000000000000"
 # DECLARED, no default, and a FILE.
-token_file = "/etc/openparking/platform-operator.token"
+garage_token_file = "/etc/openparking/platform-garage.token"
+# A tenant-wide OPERATOR token instead is refused unless chosen on purpose:
+# whoever takes it from this box controls every garage of the tenant.
+# token_file = "/etc/openparking/platform-operator.token"
+# allow_tenant_wide_token = true
 poll_seconds = 60
 # How long a lane device may go unheard-from before `lane_gone_quiet` is active.
 # A SETTING AND AN ASSUMPTION, and the more consequential of the two: nothing
