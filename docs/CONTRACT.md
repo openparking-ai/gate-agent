@@ -1985,7 +1985,8 @@ document is a format the exit will guess at.**
 
 The `[tickets]` directory is made **`0700`** at every start and every record is
 written **`0600`**; a directory still readable by others after tightening is
-refused.
+refused. The retention purge below runs at every start and **every hour** while
+the agent is up.
 
 `[tickets] retention_days`, **published default 30** — the platform's own
 default for the stay this ticket identifies, so a site that has both does not

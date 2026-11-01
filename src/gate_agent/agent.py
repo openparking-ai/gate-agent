@@ -134,6 +134,11 @@ log = logging.getLogger(__name__)
 #: a property of how a person uses a keypad, not of a garage.
 REPROMPTS = 2
 
+#: How often the ticket store's retention purge runs while the agent is up, in
+#: seconds of the agent's own clock. It also runs at every start. An hour: the
+#: rule is counted in days, and an agent that runs for months must still apply it.
+TICKET_PURGE_SECONDS = 3600.0
+
 #: The longest `caller_stated_identity` kept, in characters. The `From` is the
 #: caller's own string; a declared door's is a short SIP URI.
 MAX_CALLER_IDENTITY_CHARS = 128
@@ -473,6 +478,8 @@ class Agent:
             if config.tickets is not None
             else None
         )
+        #: When the retention purge is next due. `open` runs it at start.
+        self._ticket_purge_due = self._clock() + TICKET_PURGE_SECONDS
         #: Keyed on the account a call ARRIVES AT, which is what identifies the
         #: intercom. Never on the `From`: that is a string the caller writes.
         self._by_account = {
@@ -862,6 +869,21 @@ class Agent:
         self._follow_lanes()
         self._turn_boards()
         self._advance()
+        self._purge_tickets()
+
+    def _purge_tickets(self) -> None:
+        """The ticket retention rule, applied while running and not only at start.
+
+        It used to run in `open` alone, so an agent up for months kept every
+        ticket record it wrote for months, whatever `retention_days` said.
+        """
+        if self._store is None or self._clock() < self._ticket_purge_due:
+            return
+        self._ticket_purge_due = self._clock() + TICKET_PURGE_SECONDS
+        try:
+            self._store.purge(datetime.fromisoformat(self._now()))
+        except OSError as exc:
+            log.error("the ticket retention purge could not run: %s", exc)
 
     def _reconnect(self) -> None:
         """Try to get the control socket back, and deal with what was missed.
