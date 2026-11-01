@@ -1861,6 +1861,11 @@ behaviour.
 on its side: off loopback it refuses to serve the vend route without a second
 token.
 
+**No bearer token in the clear.** A lane, target or webhook URL that carries a
+token must be `https`, or plain `http` to a loopback address (`127.0.0.0/8`,
+`::1`, `localhost`); anything else is refused at startup. Every lane, target,
+sink, camera and relay URL must be `http` or `https`.
+
 **`can_vend` is PER LANE and it is about this AGENT.** It is `true` where this
 agent holds an act token for that lane AND a key to sign a ticket with — a
 completion names an identity, and there has to be one to name. The LANE's own

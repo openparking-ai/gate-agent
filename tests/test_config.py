@@ -90,7 +90,7 @@ def test_standalone_is_a_mode_and_any_single_target_is_one(token_file):
     only_platform = config(
         targets={
             "platform": {
-                "url": "http://platform.example/api/v1",
+                "url": "https://platform.example/api/v1",
                 "garage_id": "g-1",
                 "garage_token_file": token_file,
             }
@@ -113,9 +113,9 @@ def test_a_target_kind_this_monitor_cannot_read_is_refused():
 @pytest.mark.parametrize(
     "raw",
     [
-        {"targets": {"lane": {"url": "http://x", "token": "s3cret"}}},
-        {"targets": {"platform": {"url": "http://x", "garage_id": "g", "auth_token": "s3cret"}}},
-        {"sinks": {"webhook": {"url": "http://x", "bearer_token": "s3cret"}}},
+        {"targets": {"lane": {"url": "https://x", "token": "s3cret"}}},
+        {"targets": {"platform": {"url": "https://x", "garage_id": "g", "auth_token": "s3cret"}}},
+        {"sinks": {"webhook": {"url": "https://x", "bearer_token": "s3cret"}}},
         {"sinks": {"email": {"host": "h", "port": 25, "from": "a", "to": ["b"], "password": "p"}}},
         {"monitor": {"id": "m", "site_id": "s", "api_key": "k"}},
     ],
@@ -151,7 +151,7 @@ def test_a_token_file_that_holds_nothing_is_refused(tmp_path):
                 **BASE,
                 "targets": {
                     "platform": {
-                        "url": "http://x",
+                        "url": "https://x",
                         "garage_id": "g",
                         "garage_token_file": str(empty),
                     }
@@ -168,7 +168,7 @@ def test_a_token_file_that_holds_nothing_is_refused(tmp_path):
         {
             **BASE,
             "targets": {
-                "platform": {"url": "http://x", "garage_id": "g", "garage_token_file": str(real)}
+                "platform": {"url": "https://x", "garage_id": "g", "garage_token_file": str(real)}
             },
         }
     )
@@ -183,7 +183,7 @@ def test_a_tenant_wide_platform_token_is_refused_unless_chosen(token_file):
     it. It is refused unless `allow_tenant_wide_token = true` names the choice;
     the garage-scoped `garage_token_file` is preferred and needs nothing else.
     """
-    platform = {"url": "http://x", "garage_id": "g", "token_file": token_file}
+    platform = {"url": "https://x", "garage_id": "g", "token_file": token_file}
     with pytest.raises(ConfigError, match="tenant-wide") as refused:
         config(targets={"platform": platform})
     assert "garage_token_file" in str(refused.value)
@@ -200,7 +200,9 @@ def test_a_tenant_wide_platform_token_is_refused_unless_chosen(token_file):
     assert chosen.targets[0].token == "operator-token"
     assert chosen.targets[0].tenant_wide_token is True
     scoped = config(
-        targets={"platform": {"url": "http://x", "garage_id": "g", "garage_token_file": token_file}}
+        targets={
+            "platform": {"url": "https://x", "garage_id": "g", "garage_token_file": token_file}
+        }
     )
     assert scoped.targets[0].token == "operator-token"
     assert scoped.targets[0].tenant_wide_token is False
@@ -224,14 +226,16 @@ def test_a_platform_target_declares_its_garage_and_its_token(tmp_path):
     token.chmod(0o600)
 
     with pytest.raises(ConfigError, match="garage_token_file"):
-        config(targets={"platform": {"url": "http://x", "garage_id": "g"}})
+        config(targets={"platform": {"url": "https://x", "garage_id": "g"}})
 
     with pytest.raises(ConfigError, match="garage_id"):
-        config(targets={"platform": {"url": "http://x", "garage_token_file": str(token)}})
+        config(targets={"platform": {"url": "https://x", "garage_token_file": str(token)}})
 
     # The control: with both, it is accepted.
     parsed = config(
-        targets={"platform": {"url": "http://x", "garage_id": "g", "garage_token_file": str(token)}}
+        targets={
+            "platform": {"url": "https://x", "garage_id": "g", "garage_token_file": str(token)}
+        }
     )
     assert parsed.targets[0].garage_id == "g"
 
@@ -249,7 +253,7 @@ def test_the_settings_have_published_defaults_and_they_are_the_published_ones(to
 
     with_platform = config(
         targets={
-            "platform": {"url": "http://x", "garage_id": "g", "garage_token_file": token_file},
+            "platform": {"url": "https://x", "garage_id": "g", "garage_token_file": token_file},
         }
     )
     assert with_platform.targets[0].lane_quiet_seconds == DEFAULT_LANE_QUIET_SECONDS
@@ -346,7 +350,7 @@ def test_a_token_file_path_resolves_against_the_configuration_file(tmp_path):
     config_file = tmp_path / "monitor.toml"
     config_file.write_text(
         '[monitor]\nid = "m"\nsite_id = "s"\n\n[records]\ndirectory = "records"\n\n'
-        '[targets.platform]\nurl = "http://x"\ngarage_id = "g"\n'
+        '[targets.platform]\nurl = "https://x"\ngarage_id = "g"\n'
         'garage_token_file = "platform.token"\n'
     )
     parsed = MonitorConfig.from_file(config_file)

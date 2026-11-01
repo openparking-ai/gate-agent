@@ -30,6 +30,7 @@ gets used.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -783,6 +784,36 @@ def _refuse_userinfo(url: str, where: str) -> None:
         )
 
 
+def _refuse_cleartext(url: str, where: str, credential: bool) -> None:
+    """Only `http` or `https`, and a credential never in the clear off this box.
+
+    A bearer token sent over plain `http` is readable by everything on the path
+    to the host, and replayable. Loopback is the one exception: the bytes never
+    leave the machine. Any other scheme is refused outright -- urllib would open
+    `file:` and `ftp:` URLs as readily as `https:`.
+    """
+    parsed = urlsplit(url.strip())
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ConfigError(f"{where} must be an http or https URL, got scheme {scheme!r}")
+    if not parsed.hostname:
+        raise ConfigError(f"{where} names no host")
+    if credential and scheme == "http" and not _is_loopback(parsed.hostname):
+        raise ConfigError(
+            f"{where} is plain http to {parsed.hostname}, and this process would send a "
+            "credential to it in the clear. Use https, or a loopback address."
+        )
+
+
+def _is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _positive(value, where: str, default: float) -> float:
     if value is None:
         return default
@@ -844,6 +875,7 @@ def _targets(
             token = read_secret_file(
                 table["token_file"], f"[targets.{kind.value}].token_file", relative_to
             )
+        _refuse_cleartext(url, f"[targets.{kind.value}].url", token is not None)
         garage_id = None
         quiet = DEFAULT_LANE_QUIET_SECONDS
         if kind is TargetKind.PLATFORM:
@@ -982,6 +1014,7 @@ def _sinks(raw: dict, relative_to: Path | None) -> tuple[object, ...]:
         if not isinstance(url, str) or not url.strip():
             raise ConfigError("[sinks.webhook] does not declare a url")
         _refuse_userinfo(url, "[sinks.webhook].url")
+        _refuse_cleartext(url, "[sinks.webhook].url", credential=True)
         if "token_file" not in webhook:
             raise ConfigError(
                 "[sinks.webhook] does not declare token_file. This sink POSTs a site's "
@@ -1035,6 +1068,9 @@ def _cameras(
                 "this module."
             )
         _refuse_userinfo(url, f"[cameras.{camera_id}].snapshot_url")
+        # The camera's credential travels under Digest, which never sends the
+        # password itself; Basic is answered only over https (camera.py).
+        _refuse_cleartext(url, f"[cameras.{camera_id}].snapshot_url", credential=False)
         if "auth_file" not in table:
             raise ConfigError(
                 f"[cameras.{camera_id}] does not declare auth_file. A snapshot route with no "
@@ -1721,6 +1757,9 @@ def _agent_lanes(raw: dict, relative_to: Path | None) -> tuple[Target, ...]:
             act_token = read_secret_file(
                 table["act_token_file"], f"[lanes.{name}].act_token_file", relative_to
             )
+        _refuse_cleartext(
+            url, f"[lanes.{name}].url", token is not None or act_token is not None
+        )
         lanes.append(
             Target(
                 name=name,
@@ -1972,6 +2011,7 @@ def _relay(raw, sip_uri: str, lane: str, relative_to: Path | None):
     if not isinstance(url, str) or not url.strip():
         raise ConfigError(f"[intercoms.{sip_uri!r}.relay] does not declare a url")
     _refuse_userinfo(url, f"[intercoms.{sip_uri!r}.relay].url")
+    _refuse_cleartext(url, f"[intercoms.{sip_uri!r}.relay].url", credential=False)
     port = raw.get("port")
     if port not in PORTS:
         raise ConfigError(
