@@ -969,15 +969,18 @@ class Agent:
     def _read_fee(self, lane) -> None:
         """The lane's `exit_fee`, as the screen it becomes. GET only.
 
-        A lane that cannot be read has said NOTHING, so what this agent last
-        read stands: the fee stays up until the lane says it came down. A lane
-        on a version this build does not read has its fee dropped -- a payload
+        A lane that cannot be read has its FEE taken down. A fee is about the
+        car at the barrier, and the last one read may be the car that has left:
+        a fee left up is shown to whoever pulls up next. The closing and the
+        board are the owner's and stand until the lane is read again. A lane on
+        a version this build does not read has its fee dropped too -- a payload
         this cannot interpret is not drawn from.
         """
         try:
             state = self._clients[lane.name].get("/v1/lane/state")
         except (TargetUnreachable, TargetRefusedUs) as exc:
             log.warning("lane %s: the fee could not be read: %s", lane.name, exc)
+            self._fees[lane.name] = None
             return
         if state.get("contract_version") not in KNOWN_LANE_VERSIONS:
             self._fees[lane.name] = None

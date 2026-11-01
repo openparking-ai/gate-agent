@@ -2094,6 +2094,9 @@ publishes neither is open with an empty board.
   message that cannot be drawn whole and legible on a screen — a character the
   font lacks, or a screen too small — is never drawn with a letter missing: the
   frame says `THIS LANE IS CLOSED` in every declared driver language instead.
+- **A lane that cannot be read has its fee taken down** on that poll: the last
+  fee read may be the car that has left. Its closing and board stand until the
+  lane is read again.
 - **A ticket or a fee wins over it and gives the screen BACK to it** when it
   ends — never to black on the way. Reopening the lane gives black (or the
   board).
