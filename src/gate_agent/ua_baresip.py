@@ -68,6 +68,7 @@ webhook sink from being able to reach one.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import re
@@ -196,8 +197,14 @@ class BaresipUa:
         connect=socket.create_connection,
         reconnect_seconds: float = DEFAULT_RECONNECT_SECONDS,
         clock=None,
+        probe=socket.create_connection,
+        local_addresses=None,
     ) -> None:
         self._address = (host, port)
+        #: How the control port is tried on this box's OTHER addresses before
+        #: the real connection is opened, and which addresses those are.
+        self._probe = probe
+        self._local_addresses = local_addresses or _local_addresses
         #: The ONE account this process dials OUT from. There is no driver
         #: account here any more: the driver's leg is always inbound, and the
         #: account it arrived at is whichever intercom's it was addressed to.
@@ -242,6 +249,7 @@ class BaresipUa:
 
     def start(self) -> None:
         """Connect, learn the version, CHECK THE CONFIGURATION, and refuse."""
+        self._refuse_control_off_loopback()
         self._open()
         self._read_registration()
         self._check_configuration()
@@ -253,6 +261,38 @@ class BaresipUa:
                 "versioned contract, so a command that has been renamed or has grown a "
                 "parameter would be a call answered and then handled wrongly, with a "
                 "driver at the barrier."
+            )
+
+    def _refuse_control_off_loopback(self) -> None:
+        """The control socket must listen on loopback only, and is TRIED.
+
+        It can place a call, bridge two and play audio at whoever is on the
+        line, and baresip's own default for `ctrl_tcp_listen` is every
+        interface. `config` does not report that key, so the port is tried on
+        this box's own non-loopback addresses BEFORE the real connection is
+        opened -- `ctrl_tcp` takes one client, and a probe after it would take
+        the agent's away. Anything that answers there is refused by name.
+        """
+        host, port = self._address
+        if not _is_loopback(host):
+            raise UaMisconfigured(
+                f"the user agent's control socket is configured at {host}, which is not "
+                "loopback. That socket can place calls and bridge them; set "
+                "`ctrl_tcp_listen 127.0.0.1:<port>` and point [user_agent] host at it."
+            )
+        for address in self._local_addresses():
+            try:
+                probe = self._probe((address, port), timeout=PROBE_TIMEOUT)
+            except OSError:
+                continue
+            try:
+                probe.close()
+            except OSError:
+                pass
+            raise UaMisconfigured(
+                f"the user agent's control socket answers on {address}:{port}, not only on "
+                "loopback. Anybody who can reach that address can place calls and bridge "
+                "them. Set `ctrl_tcp_listen 127.0.0.1:<port>`. Refusing to start."
             )
 
     def _check_configuration(self) -> None:
@@ -283,6 +323,12 @@ class BaresipUa:
                     "the driver before `conference` is ever sent, and on this build every "
                     "playback is refused for ever besides. Refusing to start."
                 )
+        listen = settings.get("ctrl_tcp_listen", "")
+        if listen and not _is_loopback(_listen_host(listen)):
+            raise UaMisconfigured(
+                f"the user agent's ctrl_tcp_listen is `{listen}`, which is not loopback. "
+                "That socket can place calls and bridge them. Refusing to start."
+            )
         hold = settings.get("call_hold_other_calls", "")
         if hold and hold.lower() not in ("no", "false", "0"):
             raise UaMisconfigured(
@@ -741,6 +787,45 @@ def _user_part(aor) -> str | None:
     user = aor.split("@", 1)[0]
     _scheme, _, rest = user.partition(":")
     return (rest or user).strip() or None
+
+
+#: How long the control port is tried on each non-loopback address at start.
+PROBE_TIMEOUT = 0.5
+
+
+def _is_loopback(host: str) -> bool:
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip().strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _listen_host(listen: str) -> str:
+    """`127.0.0.1:4444`, `[::1]:4444` or `0.0.0.0:4444` -> the host part."""
+    text = listen.strip()
+    if text.startswith("["):
+        return text[1 : text.find("]")] if "]" in text else text
+    return text.rsplit(":", 1)[0] if text.count(":") == 1 else text
+
+
+def _local_addresses() -> tuple[str, ...]:
+    """This box's own non-loopback IPv4 addresses, as far as can be learnt
+    without a dependency: the host name's, and the one a route out would use
+    (a UDP `connect` sends nothing)."""
+    found: set[str] = set()
+    try:
+        found.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            udp.connect(("192.0.2.1", 9))
+            found.add(udp.getsockname()[0])
+    except OSError:
+        pass
+    return tuple(sorted(one for one in found if not _is_loopback(one) and one != "0.0.0.0"))
 
 
 def _settings(text: str) -> dict[str, str]:
