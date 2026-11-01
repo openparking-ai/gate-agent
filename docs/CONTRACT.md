@@ -2646,7 +2646,14 @@ the record; and **nothing is routed on it.** It is recorded as
 `caller_stated_identity`, reduced by shape rather than character for character —
 a door station sends `"Door 1" <sip:door1@10.0.0.9:5060>;tag=…` on one call and
 the bare URI on the next, and two spellings of one claim would read as two
-callers.
+callers. It is capped at 128 characters.
+
+**A refused call is expendable.** Anybody who can reach the SIP port can make
+one, so refused calls (`refused_busy`, `refused_undeclared`) hold at most an
+eighth of `[records] max_bytes` and an eighth of the events window. A refusal
+only ever pushes out an older refusal, counted in `dropped_for_space` or the
+window's `dropped`; it never evicts the record or the events of an answered
+call.
 
 A call at an account no `[intercoms.*]` owns is **refused without being
 answered**. So is one the user agent refused itself. Both are an event

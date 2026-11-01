@@ -105,6 +105,7 @@ from .display import DisplayUnavailable, Frame, frame_for, frame_wanted
 from .fee import FeeScreen, fee_frame_for, screen_for
 from .lines import DISPLAY_TEXT, UNKNOWN_REFUSAL, audio_name
 from .records import (
+    EXPENDABLE_SHARE_DIVISOR,
     RecordQuery,
     RecordStore,
     RecordStoreInUse,
@@ -132,6 +133,16 @@ log = logging.getLogger(__name__)
 #: attempt is `nothing usable`. Two, and it is fixed rather than per-site: it is
 #: a property of how a person uses a keypad, not of a garage.
 REPROMPTS = 2
+
+#: The longest `caller_stated_identity` kept, in characters. The `From` is the
+#: caller's own string; a declared door's is a short SIP URI.
+MAX_CALLER_IDENTITY_CHARS = 128
+
+#: The events a call REFUSED unanswered writes. Anybody who can reach the SIP
+#: port can make them, so they hold a bounded share of the event window.
+REFUSED_CALL_KINDS = frozenset(
+    {AgentEventKind.CALL_REFUSED_BUSY.value, AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM.value}
+)
 
 #: The sample rate of every file this agent plays. What a narrowband SIP call
 #: carries, and what `scripts/build_audio.py` writes.
@@ -484,6 +495,10 @@ class Agent:
             time_key="started_at",
             lane_key="lane",
             unfinished=call_record_unfinished,
+            # A call REFUSED unanswered is expendable: anybody who can reach
+            # the SIP port can make one, so refusals are bounded as a share of
+            # the store and never evict the record of a call that was answered.
+            expendable=lambda body: body.get("disposition") != CallDisposition.ANSWERED.value,
             retention_days=config.records.retention_days,
             max_bytes=config.records.max_bytes,
             now=lambda: datetime.fromisoformat(self._now()),
@@ -2884,6 +2899,15 @@ class Agent:
             display=fields.get("display"),
             geometry=fields.get("geometry"),
         )
+        if event.kind in REFUSED_CALL_KINDS:
+            # A refusal pushes out another refusal once refusals hold their
+            # share of the window, never the events of an answered call: an
+            # INVITE flood must not erase the audit trail of a real one.
+            refused = [i for i, (_seq, one) in enumerate(self._log)
+                       if one.kind in REFUSED_CALL_KINDS]
+            if len(refused) >= max(1, (self._log.maxlen or 1) // EXPENDABLE_SHARE_DIVISOR):
+                del self._log[refused[0]]
+                self._dropped += 1
         if len(self._log) == self._log.maxlen:
             self._dropped += 1
         self._cursor += 1
@@ -3099,7 +3123,15 @@ def _bare_uri(peer: str | None) -> str:
     unit sends `"Door 1" <sip:door1@10.0.0.9:5060>;tag=…` on one call and
     `sip:door1@10.0.0.9` on the next, and two spellings of one claim would read
     as two callers. Reduced by SHAPE, once, here.
+
+    And CAPPED at `MAX_CALLER_IDENTITY_CHARS`: the `From` is the caller's own
+    string, and an unbounded one is a record anybody can make as large as a
+    SIP packet allows.
     """
+    return _reduced(peer)[:MAX_CALLER_IDENTITY_CHARS]
+
+
+def _reduced(peer: str | None) -> str:
     if not peer:
         return ""
     text = peer.strip()
