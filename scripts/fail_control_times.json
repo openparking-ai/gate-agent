@@ -32,7 +32,7 @@
    "a_frame_with_no_line_is_drawn_empty": 173,
    "a_handler_thread_may_outlive_its_test": 172,
    "a_held_driver_hears_nothing": 148,
-   "a_lane_that_cannot_be_read_takes_the_fee_down": 141,
+   "a_lane_that_cannot_be_read_leaves_the_fee_up": 141,
    "a_lane_without_tickets_is_not_followed_for_its_fee": 132,
    "a_language_is_skipped": 141,
    "a_language_switch_is_ignored": 180,

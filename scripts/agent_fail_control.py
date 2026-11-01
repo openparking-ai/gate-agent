@@ -780,11 +780,12 @@ BREAKS = [
         "file": "src/gate_agent/agent.py",
         # RE-ANCHORED 2026-09-01 (Z16.1): Z2 added `_call_being_spoken_at`
         # after this emission, so the trailing `def _show` stopped matching.
+        # RE-ANCHORED 2026-11-01 (OP-4-14): `_write_ticket` now follows it.
         "from": "            ticket_id=ticket.ticket_id,\n        )\n\n"
-                "    def _call_being_spoken_at",
+                "    def _write_ticket",
         "to": "            ticket_id=ticket.ticket_id,\n"
               "            keyed=ticket.ticket_ref,\n        )\n\n"
-              "    def _call_being_spoken_at",
+              "    def _write_ticket",
     },
     {
         "name": "can_vend_ignores_the_act_token",
@@ -1149,8 +1150,9 @@ BREAKS = [
         "name": "an_unreachable_lane_is_lane_decided_again",
         "why": "the same wrong cause on the path where there is no lane_answer either",
         "file": "src/gate_agent/agent.py",
-        "from": "            self._finish_ticket(pending, \"lane_unreachable\", None)",
-        "to": "            self._finish_ticket(pending, \"lane_decided_again\", None)",
+        # RE-ANCHORED 2026-11-01 (OP-4-6): the reason is chosen on one line now.
+        "from": "\"outcome_unknown\" if unknown else \"lane_unreachable\", None)",
+        "to": "\"outcome_unknown\" if unknown else \"lane_decided_again\", None)",
     },
     {
         "name": "an_act_the_lane_refuses_is_lane_decided_again",
@@ -1381,13 +1383,15 @@ BREAKS = [
               "                self._read_fee(lane)\n",
     },
     {
-        "name": "a_lane_that_cannot_be_read_takes_the_fee_down",
-        "why": "silence is read as the car having gone",
+        # INVERTED 2026-11-01 (OP-4-10): a lane that cannot be read now takes
+        # the fee down, so the break is the old behaviour -- leaving it up.
+        "name": "a_lane_that_cannot_be_read_leaves_the_fee_up",
+        "why": "the last car's fee is shown to whoever pulls up next",
         "file": "src/gate_agent/agent.py",
         "from": "            log.warning(\"lane %s: the fee could not be read: %s\", "
-                "lane.name, exc)\n            return\n",
+                "lane.name, exc)\n            self._fees[lane.name] = None\n            return\n",
         "to": "            log.warning(\"lane %s: the fee could not be read: %s\", "
-              "lane.name, exc)\n            self._fees[lane.name] = None\n            return\n",
+              "lane.name, exc)\n            return\n",
     },
     {
         "name": "a_fee_takes_the_screen_from_a_ticket",
@@ -1780,8 +1784,11 @@ BREAKS = [
         "name": "the_calls_route_needs_no_token",
         "why": "every call, who was rung and what they keyed, on an open port",
         "file": "src/gate_agent/agent_service.py",
-        "from": "        if not self._authorised():\n            return self._unauthorised()",
-        "to": "        if not self._authorised() and url.path != \"/v1/agent/calls\":\n"
+        # RE-ANCHORED 2026-11-01 (OP-4-13): the 405 checks the token too.
+        "from": "        url = urlparse(self.path)\n"
+                "        if not self._authorised():\n            return self._unauthorised()",
+        "to": "        url = urlparse(self.path)\n"
+              "        if not self._authorised() and url.path != \"/v1/agent/calls\":\n"
               "            return self._unauthorised()",
     },
     {
