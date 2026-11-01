@@ -64,7 +64,7 @@ from enum import Enum, auto
 from pathlib import Path
 from time import monotonic
 
-from .act import LaneActClient, LaneActRefusedUs, LaneUnreachable
+from .act import LaneActClient, LaneActRefusedUs, LaneOutcomeUnknown, LaneUnreachable
 from .board import (
     Rotation,
     board_frame_for,
@@ -1870,7 +1870,12 @@ class Agent:
         except LaneUnreachable as exc:
             log.error("lane %s could not be asked to vend: %s", pending.lane, exc)
             self._code(AgentCode.LANE_UNAVAILABLE, pending.lane, HealthState.ACTIVE)
-            self._finish_ticket(pending, "lane_unreachable", None)
+            # `lane_unreachable` ONLY where nothing reached the lane. A request
+            # that may have -- a timeout after it was sent, a 5xx, a 202 that
+            # could not be read -- is `outcome_unknown`: the barrier may have
+            # been asked to open, and this build does not guess either way.
+            unknown = isinstance(exc, LaneOutcomeUnknown)
+            self._finish_ticket(pending, "outcome_unknown" if unknown else "lane_unreachable", None)
             if person:
                 return self._person_refused(
                     session, pending, ("operator_case.lane_unavailable",)

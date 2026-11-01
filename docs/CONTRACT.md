@@ -2193,10 +2193,10 @@ ordinary path for those five and not a caveat about a rare one.
 | `restarted` | **no pending ticket survives a restart, by design** — and the record is now settled to say so at the next start, which is where this reason is written |
 | `display_unavailable` | the screen refused the frame or its geometry could not be read — at the mint of a ticket OFFERED to the driver, or on any later poll while the code was up. **Not a ticket minted for a person's `OPEN_NOW` / `OPEN_AND_FLAG`**: see below |
 | `lane_refused` | the lane considered the completion and said no. Its own code is in `lane_answer`, verbatim |
-| `lane_unreachable` | the lane did not answer the vend, or answered a 5xx. There is no `lane_answer`, because there was no answer |
+| `lane_unreachable` | the vend never reached the lane: the connection was refused, the host did not resolve or had no route. There is no `lane_answer`, because there was no answer |
 | `act_refused` | a 401, a 403 or a 404 on the vend route: the lane would not consider it at all |
 | `relay_failed` | STANDALONE — the intercom's own relay did not pulse. `relay_pulse_failed` carries the cause |
-| `outcome_unknown` | a `confirmed` record found at startup whose vend could not be settled. **Not "it did not open"** — "this build cannot say either way", and `lane_answer` carries whatever the lane did say |
+| `outcome_unknown` | a vend that may have reached the lane and got no usable answer — a timeout after it was sent, a reset, a reply that is not HTTP, a 5xx, a 202 whose body cannot be read — or a `confirmed` record found at startup whose vend could not be settled. **Not "it did not open"** — "this build cannot say either way", and `lane_answer` carries whatever the lane did say |
 | `no_act_route` | a press confirmed it at a lane this agent holds **no act token** for, so no vend was sent and none ever will be — the lane never learns of this ticket. Written at the press. It used to be left `confirmed`, and the next start wrote `outcome_unknown` over an outcome that was known |
 | `do_not_open` | the person on the call keyed `do_not_open`. A ticket left pending at that lane was one the driver's next press would have vended against what the person decided |
 
