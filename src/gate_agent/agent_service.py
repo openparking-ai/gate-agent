@@ -36,12 +36,19 @@ from __future__ import annotations
 import hmac
 import json
 import logging
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
 from .contract import CONTRACT_VERSION
 from .records import BadQuery, parse_query
-from .service import InsecureBind, assert_bind_allowed, bearer, is_loopback
+from .service import (
+    HANDLER_TIMEOUT_SECONDS,
+    BoundedServer,
+    InsecureBind,
+    assert_bind_allowed,
+    bearer,
+    is_loopback,
+)
 
 log = logging.getLogger(__name__)
 
@@ -217,8 +224,12 @@ class _Handler(BaseHTTPRequestHandler):
 def make_server(service: AgentService, host: str = "127.0.0.1", port: int = 8094, token=None):
     """Bound to loopback by default. Exposing it is a deployment decision."""
     assert_bind_allowed(host, port, token)
-    handler = type("_BoundHandler", (_Handler,), {"service": service, "token": token or None})
-    return ThreadingHTTPServer((host, port), handler)
+    handler = type(
+        "_BoundHandler",
+        (_Handler,),
+        {"service": service, "token": token or None, "timeout": HANDLER_TIMEOUT_SECONDS},
+    )
+    return BoundedServer((host, port), handler)
 
 
 __all__ = [

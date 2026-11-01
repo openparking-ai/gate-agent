@@ -37,6 +37,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -58,6 +59,43 @@ READ_ROUTES: tuple[str, ...] = (
 ACT_ROUTES: tuple[str, ...] = ()
 
 MAX_QUERY_CURSOR = 2**63 - 1
+
+#: How long one connection to a read surface may sit idle in any socket read or
+#: write, in seconds. A client that opens a connection and sends nothing used to
+#: hold a thread for ever.
+HANDLER_TIMEOUT_SECONDS = 10
+
+#: How many connections a read surface serves at once. One more is closed at
+#: once rather than given a thread: these surfaces run on the box beside the
+#: lane, and a thread per connection is otherwise unbounded.
+MAX_CONNECTIONS = 16
+
+
+class BoundedServer(ThreadingHTTPServer):
+    """`ThreadingHTTPServer`, with at most `MAX_CONNECTIONS` served at once."""
+
+    max_connections = MAX_CONNECTIONS
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._slots = threading.BoundedSemaphore(self.max_connections)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address) -> None:
+        if not self._slots.acquire(blocking=False):
+            log.warning("a read surface is at %d connections; one refused", self.max_connections)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 class InsecureBind(Exception):
@@ -239,13 +277,20 @@ class _Handler(BaseHTTPRequestHandler):
 def make_server(service: MonitorService, host: str = "127.0.0.1", port: int = 8092, token=None):
     """Bound to loopback by default. Exposing it is a deployment decision."""
     assert_bind_allowed(host, port, token)
-    handler = type("_BoundHandler", (_Handler,), {"service": service, "token": token or None})
-    return ThreadingHTTPServer((host, port), handler)
+    handler = type(
+        "_BoundHandler",
+        (_Handler,),
+        {"service": service, "token": token or None, "timeout": HANDLER_TIMEOUT_SECONDS},
+    )
+    return BoundedServer((host, port), handler)
 
 
 __all__ = [
     "ACT_ROUTES",
+    "HANDLER_TIMEOUT_SECONDS",
+    "MAX_CONNECTIONS",
     "READ_ROUTES",
+    "BoundedServer",
     "InsecureBind",
     "MonitorService",
     "assert_bind_allowed",

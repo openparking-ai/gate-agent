@@ -1790,6 +1790,11 @@ loopback requires `--auth-token-file`, and with a token **every route requires
 an image route left open "because it is just a JPEG" is the whole store readable
 by anyone who can enumerate a record id.
 
+**Every read surface of this package — the monitor's, the capture process's
+and the agent's — bounds its connections.** One that sits idle in any read or
+write for `service.HANDLER_TIMEOUT_SECONDS` (10) is closed, and at most
+`service.MAX_CONNECTIONS` (16) are served at once; one more is closed at once.
+
 The rule is `InsecureBind`, the same one the monitor, the lane service and the
 Vehicle ID service apply — imported here rather than restated, so three surfaces
 on one device cannot come to disagree about when a credential is required. The
