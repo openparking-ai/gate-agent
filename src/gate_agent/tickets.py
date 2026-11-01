@@ -81,6 +81,8 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from .records import make_private, write_private
+
 log = logging.getLogger(__name__)
 
 #: The alphabet a `ticket_ref` is drawn from: `A-Z` without `I` and `O`, and
@@ -476,8 +478,13 @@ class TicketStore:
         """`now` is the clock the purge measures age against: the real one
         unless the caller says otherwise. The agent passes its own, the clock
         it stamps `issued_at` with, so the age of a record is measured on the
-        clock that wrote it."""
-        self.directory.mkdir(parents=True, exist_ok=True)
+        clock that wrote it.
+
+        **Private**: the directory `0700` and every record `0600`, as the call
+        records are. A ticket record says when a car was at which lane, and a
+        directory still readable by others after tightening is refused."""
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        make_private(self.directory)
         self._sweep_temporary()
         self.purge(now)
 
@@ -499,8 +506,9 @@ class TicketStore:
         path = self.directory / f"{record.ticket_id}.json"
         temporary = self.directory / f"{TEMP_PREFIX}{record.ticket_id}.json"
         try:
-            temporary.write_text(
-                json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            write_private(
+                temporary,
+                (json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n").encode("utf-8"),
             )
             os.replace(temporary, path)
         finally:

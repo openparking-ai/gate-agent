@@ -1480,7 +1480,9 @@ plausible number would be a figure that looked measured.
 `[capture] directory` — **DECLARED, no default**, and refused at startup if it is
 not there or will not take a write. It is **not created**: a path that is not
 there is a typo or a disk that did not mount, and creating it would put a site's
-captures on the root filesystem of the box the lane runs on. Writability is asked
+captures on the root filesystem of the box the lane runs on. It is made **`0700`**
+at every start and every image and sidecar is written **`0600`**; a directory
+still readable by others after tightening is refused. Writability is asked
 of the **disk** — a byte written and deleted — because the permission bits answer
 for the wrong thing on a read-only mount, a full disk and a directory with an
 ACL.
@@ -1980,6 +1982,10 @@ document is a format the exit will guess at.**
 | a plate | **There is none.** This package never reads one. |
 
 ### Retention
+
+The `[tickets]` directory is made **`0700`** at every start and every record is
+written **`0600`**; a directory still readable by others after tightening is
+refused.
 
 `[tickets] retention_days`, **published default 30** — the platform's own
 default for the stay this ticket identifies, so a site that has both does not

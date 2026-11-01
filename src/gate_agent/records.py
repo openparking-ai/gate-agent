@@ -160,6 +160,35 @@ def redact_addresses(text: str) -> str:
     return ADDRESS.sub("<address>", text)
 
 
+def make_private(directory: Path) -> None:
+    """Group and other lose everything on `directory`, or this raises.
+
+    The rule `RecordStore.open` applies to its own directory, for the ticket
+    store and the capture store: the owner's bits are left as they are, and a
+    directory that is STILL readable by anybody else afterwards -- one this
+    process does not own, say -- is refused rather than used open.
+    """
+    mode = stat.S_IMODE(os.stat(directory).st_mode)
+    if mode & 0o077:
+        os.chmod(directory, mode & 0o700)
+        log.warning("%s was %04o; tightened to %04o", directory, mode, mode & 0o700)
+    if stat.S_IMODE(os.stat(directory).st_mode) & 0o077:
+        raise PermissionError(
+            f"{directory} is readable by more than its owner and could not be made 0700"
+        )
+
+
+def write_private(path: Path, data: bytes) -> None:
+    """`data` to a NEW file at `path`, `0600` whatever the umask, and synced."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # AND SET: `os.open`'s mode is filtered by the umask.
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def new_record_id(kind: str) -> str:
     if kind not in ("m", "c"):
         raise ValueError(f"no record kind {kind!r}")
