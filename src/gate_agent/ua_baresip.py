@@ -73,6 +73,7 @@ import json
 import logging
 import re
 import socket
+import sys
 import threading
 from collections import deque
 from time import monotonic
@@ -205,6 +206,10 @@ class BaresipUa:
         #: the real connection is opened, and which addresses those are.
         self._probe = probe
         self._local_addresses = local_addresses or _local_addresses
+        #: Whether the control port was TRIED on at least one non-loopback
+        #: address at start. When it could not be, only a `ctrl_tcp_listen`
+        #: the user agent reports as loopback lets the agent start.
+        self._probed = False
         #: The ONE account this process dials OUT from. There is no driver
         #: account here any more: the driver's leg is always inbound, and the
         #: account it arrived at is whichever intercom's it was addressed to.
@@ -280,7 +285,13 @@ class BaresipUa:
                 "loopback. That socket can place calls and bridge them; set "
                 "`ctrl_tcp_listen 127.0.0.1:<port>` and point [user_agent] host at it."
             )
-        for address in self._local_addresses():
+        addresses = self._local_addresses()
+        # FAIL CLOSED when there is nothing to try: a box whose hostname maps
+        # to 127.0.1.1 and that has no default route still has the LAN address
+        # an intercom reaches it on, and "found nothing" must not read as "only
+        # loopback". `_check_configuration` decides once `config` is read.
+        self._probed = bool(addresses)
+        for address in addresses:
             try:
                 probe = self._probe((address, port), timeout=PROBE_TIMEOUT)
             except OSError:
@@ -328,6 +339,14 @@ class BaresipUa:
             raise UaMisconfigured(
                 f"the user agent's ctrl_tcp_listen is `{listen}`, which is not loopback. "
                 "That socket can place calls and bridge them. Refusing to start."
+            )
+        if not self._probed and not listen:
+            raise UaMisconfigured(
+                "this box's non-loopback addresses could not be found, so the user agent's "
+                "control port could not be tried on them, and the user agent does not report "
+                "`ctrl_tcp_listen`. baresip's default for it is every interface. Set "
+                "`ctrl_tcp_listen 127.0.0.1:<port>` where baresip reports it, or give this "
+                "box a findable address. Refusing to start rather than assume loopback."
             )
         hold = settings.get("call_hold_other_calls", "")
         if hold and hold.lower() not in ("no", "false", "0"):
@@ -814,7 +833,7 @@ def _local_addresses() -> tuple[str, ...]:
     """This box's own non-loopback IPv4 addresses, as far as can be learnt
     without a dependency: the host name's, and the one a route out would use
     (a UDP `connect` sends nothing)."""
-    found: set[str] = set()
+    found: set[str] = set(_interface_addresses())
     try:
         found.update(socket.gethostbyname_ex(socket.gethostname())[2])
     except OSError:
@@ -826,6 +845,36 @@ def _local_addresses() -> tuple[str, ...]:
     except OSError:
         pass
     return tuple(sorted(one for one in found if not _is_loopback(one) and one != "0.0.0.0"))
+
+
+def _interface_addresses() -> tuple[str, ...]:
+    """Every interface's IPv4 address, read with `SIOCGIFADDR` on Linux.
+
+    Needs no route and no resolvable hostname -- the case where the two ways
+    below find nothing. Elsewhere, or where the call is refused, it is empty.
+    """
+    if not sys.platform.startswith("linux") or not hasattr(socket, "if_nameindex"):
+        return ()
+    try:
+        import fcntl
+        import struct
+    except ImportError:
+        return ()
+    found = []
+    try:
+        names = [name for _index, name in socket.if_nameindex()]
+    except OSError:
+        return ()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+        for name in names:
+            try:
+                packed = fcntl.ioctl(
+                    udp.fileno(), 0x8915, struct.pack("256s", name.encode()[:15])
+                )
+            except OSError:
+                continue
+            found.append(socket.inet_ntoa(packed[20:24]))
+    return tuple(found)
 
 
 def _settings(text: str) -> dict[str, str]:

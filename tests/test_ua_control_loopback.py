@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 from contextlib import contextmanager
 
 import pytest
@@ -110,3 +111,25 @@ def test_a_control_port_that_answers_on_another_address_is_refused():
     # The control: the same, bound to loopback only, starts.
     with listening("127.0.0.1") as port:
         ua(port=port).start()
+
+
+def test_a_box_whose_addresses_cannot_be_found_is_refused_not_assumed_loopback():
+    """Review of #24: with nothing to try, the check used to pass silently.
+
+    A gate box whose hostname maps to 127.0.1.1 and that has no default route
+    finds no address by the ways it has, and still has the LAN address an
+    intercom reaches it on. Nothing found must not read as "loopback only".
+    """
+    with listening("0.0.0.0") as port:
+        with pytest.raises(UaMisconfigured, match="could not be found"):
+            ua(port=port, local_addresses=lambda: ()).start()
+    # The control: baresip REPORTING a loopback ctrl_tcp_listen is enough.
+    ua(config=CONFIG + "ctrl_tcp_listen\t127.0.0.1:4444\n", local_addresses=lambda: ()).start()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="SIOCGIFADDR is Linux's")
+def test_interfaces_are_read_without_a_route_or_a_hostname():
+    """The Linux path that needs neither: it sees `lo` on any box, by name."""
+    from gate_agent.ua_baresip import _interface_addresses
+
+    assert "127.0.0.1" in _interface_addresses()
