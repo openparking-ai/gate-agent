@@ -45,6 +45,12 @@ over a local control socket. That is an install requirement rather than a
 dependency: this package contains no SIP stack, checks the user agent's version
 at startup, and refuses one it was not tested against.
 
+**Start the agent after the network is up.** At startup it tries the user
+agent's control port on this box's own non-loopback addresses, and it refuses to
+start when it can find none -- in early boot, or on an IPv6-only box. Under
+systemd, give its unit `After=network-online.target`,
+`Wants=network-online.target` and `Restart=on-failure`.
+
 ## What they will not do
 
 **The monitor and the capture process have no opening authority.** They read

@@ -133,3 +133,31 @@ def test_interfaces_are_read_without_a_route_or_a_hostname():
     from gate_agent.ua_baresip import _interface_addresses
 
     assert "127.0.0.1" in _interface_addresses()
+
+
+def test_local_addresses_include_what_the_interface_reader_finds(monkeypatch):
+    """With no hostname address and no route out, the interface reader is what
+    finds the LAN address -- so it is part of `_local_addresses`, measured."""
+    from gate_agent import ua_baresip
+
+    monkeypatch.setattr(ua_baresip, "_interface_addresses", lambda: ("127.0.0.1", "10.9.8.7"))
+    monkeypatch.setattr(ua_baresip.socket, "gethostname", lambda: "gate-box")
+    monkeypatch.setattr(
+        ua_baresip.socket, "gethostbyname_ex", lambda _name: ("gate-box", [], ["127.0.1.1"])
+    )
+
+    class NoRoute:
+        def __init__(self, *_args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def connect(self, _address):
+            raise OSError(101, "Network is unreachable")
+
+    monkeypatch.setattr(ua_baresip.socket, "socket", NoRoute)
+    assert ua_baresip._local_addresses() == ("10.9.8.7",)
