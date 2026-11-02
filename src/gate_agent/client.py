@@ -33,12 +33,14 @@ cross-compile, patch and have go wrong somewhere with no keyboard attached.
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 
-from .redirects import open_url
+from .redirects import open_url, read_before
 
 log = logging.getLogger(__name__)
 
@@ -137,9 +139,12 @@ class ReadOnlyClient:
         request = urllib.request.Request(url, method="GET")
         if self.token:
             request.add_header("Authorization", f"Bearer {self.token}")
+        # A DEADLINE ON THE WHOLE BODY, not only on each socket read: see
+        # `redirects.read_before`.
+        deadline = time.monotonic() + self.timeout
         try:
             with open_url(request, timeout=self.timeout) as response:
-                body = response.read(MAX_RESPONSE_BYTES + 1)
+                body = read_before(response, MAX_RESPONSE_BYTES, deadline)
         except urllib.error.HTTPError as exc:
             # It ANSWERED. Which half of the fault that is depends on the
             # status, and the status is carried so a human can tell them apart.
@@ -148,6 +153,11 @@ class ReadOnlyClient:
             raise TargetRefusedUs(f"{url}: HTTP {exc.code}", exc.code) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise TargetUnreachable(f"{url}: {exc}") from exc
+        except (http.client.HTTPException, ValueError) as exc:
+            # A reply urllib could not PARSE -- a garbage status line, a header
+            # it refuses -- is neither `URLError` nor `OSError`, and it used to
+            # escape: the caller's last `ok` stood. It is no answer.
+            raise TargetUnreachable(f"{url}: answered something that is not HTTP: {exc}") from exc
         if len(body) > MAX_RESPONSE_BYTES:
             raise TargetUnreachable(f"{url}: answered more than {MAX_RESPONSE_BYTES} bytes")
         try:

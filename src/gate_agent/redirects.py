@@ -32,7 +32,17 @@ happen. Nothing is guessed and nothing is followed.
 
 from __future__ import annotations
 
+import time
 import urllib.request
+
+#: How much of a body is read between two looks at the deadline -- the same
+#: granularity `camera.CHUNK_BYTES` uses.
+CHUNK_BYTES = 64 << 10
+
+
+class DeadlinePassed(TimeoutError):
+    """A body still arriving when its deadline came. A `TimeoutError`, so every
+    caller that already treats a socket timeout as silence treats this one so."""
 
 
 class _NoRedirects(urllib.request.HTTPRedirectHandler):
@@ -79,4 +89,31 @@ def open_url(request, timeout: float):
     return _OPENER.open(request, timeout=timeout)
 
 
-__all__ = ["build_opener", "open_url"]
+def read_before(response, ceiling: int, deadline: float, clock=time.monotonic) -> bytes:
+    """At most `ceiling + 1` bytes of body, and nothing after `deadline`.
+
+    **`timeout` on an opener bounds ONE socket read.** A lane that answers and
+    then sends a byte every second never trips it, and this agent runs one
+    loop: every intercom and every other lane waited behind that read. So the
+    body is read with `read1` -- which returns what one socket read produced,
+    rather than blocking for `n` bytes -- against a deadline taken when the
+    request went out, as `camera.SnapshotCamera.snapshot` does.
+    """
+    read1 = getattr(response, "read1", None) or response.read
+    chunks: list[bytes] = []
+    read = 0
+    while read <= ceiling:
+        if clock() >= deadline:
+            raise DeadlinePassed(
+                f"still answering at its deadline; {read} byte(s) arrived and the read "
+                "was abandoned"
+            )
+        chunk = read1(min(CHUNK_BYTES, ceiling + 1 - read))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        read += len(chunk)
+    return b"".join(chunks)
+
+
+__all__ = ["CHUNK_BYTES", "DeadlinePassed", "build_opener", "open_url", "read_before"]

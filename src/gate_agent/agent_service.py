@@ -36,12 +36,19 @@ from __future__ import annotations
 import hmac
 import json
 import logging
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
 from .contract import CONTRACT_VERSION
 from .records import BadQuery, parse_query
-from .service import InsecureBind, assert_bind_allowed, bearer, is_loopback
+from .service import (
+    HANDLER_TIMEOUT_SECONDS,
+    BoundedServer,
+    InsecureBind,
+    assert_bind_allowed,
+    bearer,
+    is_loopback,
+)
 
 log = logging.getLogger(__name__)
 
@@ -155,7 +162,13 @@ class _Handler(BaseHTTPRequestHandler):
         so a caller who can reach a `405` here can already read them. No
         credential, no `ticket_ref` and no act token is in it, which is the
         round-6 rule and is swept.
+
+        **The token is checked FIRST**, as `do_GET` checks it: where a site
+        gave this surface a token, a caller without it is told `401` and
+        nothing about what this process can do.
         """
+        if not self._authorised():
+            return self._unauthorised()
         self.send_response(405)
         self.send_header("Allow", "GET")
         surface = self.service.act_surface()
@@ -211,8 +224,12 @@ class _Handler(BaseHTTPRequestHandler):
 def make_server(service: AgentService, host: str = "127.0.0.1", port: int = 8094, token=None):
     """Bound to loopback by default. Exposing it is a deployment decision."""
     assert_bind_allowed(host, port, token)
-    handler = type("_BoundHandler", (_Handler,), {"service": service, "token": token or None})
-    return ThreadingHTTPServer((host, port), handler)
+    handler = type(
+        "_BoundHandler",
+        (_Handler,),
+        {"service": service, "token": token or None, "timeout": HANDLER_TIMEOUT_SECONDS},
+    )
+    return BoundedServer((host, port), handler)
 
 
 __all__ = [

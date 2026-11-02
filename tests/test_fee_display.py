@@ -206,15 +206,19 @@ def test_the_fee_comes_down_when_the_lane_takes_it_down(tmp_path):
         assert (idle == 0).all(), "the next driver would read this one's fee"
 
 
-def test_a_lane_that_cannot_be_read_leaves_the_fee_up(tmp_path):
+def test_a_lane_that_cannot_be_read_takes_the_fee_down(tmp_path):
+    """OP-4-10. The last fee read may be the car that has left; a fee left up
+    is shown to whoever pulls up next, so a failed read blanks it."""
     lane = an_exit_lane()
     with serving(make_server(lane)) as url:
         device, screen = a_real_screen(tmp_path, 800, 480, 32)
         agent = an_agent(tmp_path, url, screen)
         lane.exit_fee = a_fee(1000)
         poll(agent)
-    poll(agent)  # the lane is gone: it has said nothing
-    assert read_off(device, screen)[-1] == "10.00 USD"
+        assert read_off(device, screen)[-1] == "10.00 USD", "the control: it was up"
+    poll(agent)  # the lane is gone
+    idle = picture_from(device, screen.geometry)
+    assert (idle == 0).all(), "the next driver would read the last car's fee"
 
 
 def test_a_fee_frame_that_cannot_be_drawn_blanks_the_screen_and_says_so(tmp_path):

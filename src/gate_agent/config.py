@@ -30,6 +30,7 @@ gets used.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -236,6 +237,9 @@ SECRET_FILE_IS: dict[str, str] = {
         "the credential this monitor presents to that target. The platform's is an OPERATOR "
         "token: it reads every garage's devices."
     ),
+    "[targets.*].garage_token_file": (
+        "the read-only credential this monitor presents to the platform for this one garage."
+    ),
     "[sinks.webhook].token_file": (
         "the credential this monitor presents to the paging system it POSTs to."
     ),
@@ -356,6 +360,9 @@ class Target:
     #: PLATFORM ONLY: how long a device may go unheard-from. Setting, default
     #: published above, and an assumption.
     lane_quiet_seconds: float = DEFAULT_LANE_QUIET_SECONDS
+    #: PLATFORM ONLY: the credential is a tenant-wide operator token, accepted
+    #: because the site set `allow_tenant_wide_token`. Said once at startup.
+    tenant_wide_token: bool = False
     #: How long this target has to answer. Setting, default published above,
     #: and an assumption -- see `client.DEFAULT_TIMEOUT` for what it is drawn
     #: against, which is the lane's own bound on the machine BEHIND it.
@@ -777,6 +784,36 @@ def _refuse_userinfo(url: str, where: str) -> None:
         )
 
 
+def _refuse_cleartext(url: str, where: str, credential: bool) -> None:
+    """Only `http` or `https`, and a credential never in the clear off this box.
+
+    A bearer token sent over plain `http` is readable by everything on the path
+    to the host, and replayable. Loopback is the one exception: the bytes never
+    leave the machine. Any other scheme is refused outright -- urllib would open
+    `file:` and `ftp:` URLs as readily as `https:`.
+    """
+    parsed = urlsplit(url.strip())
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ConfigError(f"{where} must be an http or https URL, got scheme {scheme!r}")
+    if not parsed.hostname:
+        raise ConfigError(f"{where} names no host")
+    if credential and scheme == "http" and not _is_loopback(parsed.hostname):
+        raise ConfigError(
+            f"{where} is plain http to {parsed.hostname}, and this process would send a "
+            "credential to it in the clear. Use https, or a loopback address."
+        )
+
+
+def _is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _positive(value, where: str, default: float) -> float:
     if value is None:
         return default
@@ -831,25 +868,21 @@ def _targets(
             raise ConfigError(f"[targets.{kind.value}] does not declare a url")
         _refuse_userinfo(url, f"[targets.{kind.value}].url")
         token = None
-        if "token_file" in table:
+        tenant_wide = False
+        if kind is TargetKind.PLATFORM:
+            token, tenant_wide = _platform_token(table, relative_to)
+        elif "token_file" in table:
             token = read_secret_file(
                 table["token_file"], f"[targets.{kind.value}].token_file", relative_to
             )
+        _refuse_cleartext(url, f"[targets.{kind.value}].url", token is not None)
         garage_id = None
         quiet = DEFAULT_LANE_QUIET_SECONDS
         if kind is TargetKind.PLATFORM:
-            # Both DECLARED. The platform's devices route is tenant-scoped from
-            # the token and garage-scoped from the path, and neither has a safe
-            # default: a monitor with no token reads nothing, and a monitor
-            # pointed at a garage nobody chose reports no devices and therefore
-            # nothing wrong.
-            if token is None:
-                raise ConfigError(
-                    "[targets.platform] does not declare token_file. The platform's operator "
-                    "surface is authenticated and the tenant comes from the token, so there is "
-                    "nothing to read without one -- and a monitor that read nothing would "
-                    "report nothing wrong."
-                )
+            # Both DECLARED. The platform's devices route is garage-scoped from
+            # the path, and neither has a safe default: a monitor with no token
+            # reads nothing, and a monitor pointed at a garage nobody chose
+            # reports no devices and therefore nothing wrong.
             garage_id = table.get("garage_id")
             if not isinstance(garage_id, str) or not garage_id.strip():
                 raise ConfigError(
@@ -875,6 +908,7 @@ def _targets(
                 token=token,
                 garage_id=garage_id,
                 lane_quiet_seconds=quiet,
+                tenant_wide_token=tenant_wide,
                 timeout_seconds=_positive(
                     table.get("timeout_seconds"),
                     f"[targets.{kind.value}].timeout_seconds",
@@ -883,6 +917,44 @@ def _targets(
             )
         )
     return tuple(targets)
+
+
+def _platform_token(table: dict, relative_to: Path | None) -> tuple[str, bool]:
+    """The platform credential, and whether it reaches past this garage.
+
+    `garage_token_file` is preferred: a read-only credential scoped to the one
+    garage this monitor watches. `token_file` is an OPERATOR token, and the
+    tenant comes from it -- so a token copied off one garage's box reads, and
+    acts on, every other garage of that tenant. That box sits in a gate housing.
+    It is refused unless `allow_tenant_wide_token = true` says somebody chose it.
+    """
+    scoped = "garage_token_file" in table
+    tenant = "token_file" in table
+    if scoped and tenant:
+        raise ConfigError(
+            "[targets.platform] declares both garage_token_file and token_file. Declare the "
+            "garage-scoped one only: a tenant-wide token kept beside it is still on this box."
+        )
+    if scoped:
+        where = "[targets.platform].garage_token_file"
+        return read_secret_file(table["garage_token_file"], where, relative_to), False
+    if not tenant:
+        raise ConfigError(
+            "[targets.platform] does not declare garage_token_file. The platform's surface is "
+            "authenticated, so there is nothing to read without one -- and a monitor that read "
+            "nothing would report nothing wrong."
+        )
+    allow = table.get("allow_tenant_wide_token", False)
+    if not isinstance(allow, bool):
+        raise ConfigError("[targets.platform].allow_tenant_wide_token must be true or false")
+    if not allow:
+        raise ConfigError(
+            "[targets.platform] declares token_file, a tenant-wide operator token: whoever "
+            "takes it from this box controls every garage of the tenant. Declare "
+            "garage_token_file with a read-only credential for this garage, or set "
+            "allow_tenant_wide_token = true to accept that risk on purpose."
+        )
+    return read_secret_file(table["token_file"], "[targets.platform].token_file", relative_to), True
 
 
 def _sinks(raw: dict, relative_to: Path | None) -> tuple[object, ...]:
@@ -942,6 +1014,7 @@ def _sinks(raw: dict, relative_to: Path | None) -> tuple[object, ...]:
         if not isinstance(url, str) or not url.strip():
             raise ConfigError("[sinks.webhook] does not declare a url")
         _refuse_userinfo(url, "[sinks.webhook].url")
+        _refuse_cleartext(url, "[sinks.webhook].url", credential=True)
         if "token_file" not in webhook:
             raise ConfigError(
                 "[sinks.webhook] does not declare token_file. This sink POSTs a site's "
@@ -995,6 +1068,9 @@ def _cameras(
                 "this module."
             )
         _refuse_userinfo(url, f"[cameras.{camera_id}].snapshot_url")
+        # The camera's credential travels under Digest, which never sends the
+        # password itself; Basic is answered only over https (camera.py).
+        _refuse_cleartext(url, f"[cameras.{camera_id}].snapshot_url", credential=False)
         if "auth_file" not in table:
             raise ConfigError(
                 f"[cameras.{camera_id}] does not declare auth_file. A snapshot route with no "
@@ -1681,6 +1757,9 @@ def _agent_lanes(raw: dict, relative_to: Path | None) -> tuple[Target, ...]:
             act_token = read_secret_file(
                 table["act_token_file"], f"[lanes.{name}].act_token_file", relative_to
             )
+        _refuse_cleartext(
+            url, f"[lanes.{name}].url", token is not None or act_token is not None
+        )
         lanes.append(
             Target(
                 name=name,
@@ -1932,6 +2011,7 @@ def _relay(raw, sip_uri: str, lane: str, relative_to: Path | None):
     if not isinstance(url, str) or not url.strip():
         raise ConfigError(f"[intercoms.{sip_uri!r}.relay] does not declare a url")
     _refuse_userinfo(url, f"[intercoms.{sip_uri!r}.relay].url")
+    _refuse_cleartext(url, f"[intercoms.{sip_uri!r}.relay].url", credential=False)
     port = raw.get("port")
     if port not in PORTS:
         raise ConfigError(

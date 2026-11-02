@@ -28,6 +28,7 @@ import logging
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 from .contract import CameraUnreachableCause
 from .redirects import build_opener
@@ -108,10 +109,11 @@ class SnapshotCamera:
 
     The credential is presented the way the camera asks for it: the first
     request carries none, the camera answers `401` with a `WWW-Authenticate`
-    header naming a scheme, and urllib's handlers answer that challenge. Digest
-    and Basic are both installed, and WHICH is used is the camera's choice, not
-    this file's -- a client that decided for itself would have to be told, per
-    camera, in a configuration key nobody can answer correctly.
+    header naming a scheme, and urllib's handlers answer that challenge.
+    **Digest always; Basic only over https.** Basic is base64 of
+    `user:password` in a header, so over plain http it is the password on the
+    wire. A camera challenging Basic over http is `CameraRefusedUs`, naming the
+    scheme, as `relay.AxisRelay` already does.
 
     The opener comes from `redirects.build_opener`, so this one does not follow
     a `Location` either. That matters more here than anywhere else in the
@@ -140,10 +142,9 @@ class SnapshotCamera:
         if username is not None and password is not None:
             manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
             manager.add_password(None, snapshot_url, username, password)
-            handlers = [
-                urllib.request.HTTPDigestAuthHandler(manager),
-                urllib.request.HTTPBasicAuthHandler(manager),
-            ]
+            handlers = [urllib.request.HTTPDigestAuthHandler(manager)]
+            if urlsplit(snapshot_url).scheme.lower() == "https":
+                handlers.append(urllib.request.HTTPBasicAuthHandler(manager))
         self._opener = build_opener(*handlers)
 
     def snapshot(self) -> bytes:
@@ -193,7 +194,7 @@ class SnapshotCamera:
                 raise CameraUnreachable(
                     f"{self.camera_id}: HTTP {exc.code}", CameraUnreachableCause.SERVER_ERROR
                 ) from exc
-            raise CameraRefusedUs(f"{self.camera_id}: HTTP {exc.code}", exc.code) from exc
+            raise CameraRefusedUs(f"{self.camera_id}: {_refusal(exc)}", exc.code) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             # A socket that timed out PAST THE DEADLINE is the same fault as a
             # body that was still arriving at it: a camera that has stopped
@@ -218,6 +219,22 @@ class SnapshotCamera:
                 CameraUnreachableCause.NOT_A_PICTURE,
             )
         return body
+
+
+def _refusal(exc: urllib.error.HTTPError) -> str:
+    """The status, and for a `401` challenging Basic over http, that it was refused."""
+    challenge = None
+    try:
+        challenge = exc.headers.get("WWW-Authenticate")
+    except AttributeError:
+        pass
+    scheme = (challenge or "").split(None, 1)[0].lower() if challenge else ""
+    if exc.code == 401 and scheme == "basic":
+        return (
+            "HTTP 401 challenging Basic, which this build answers over https only: over "
+            "http it would send the password in the clear. Use https, or Digest."
+        )
+    return f"HTTP {exc.code}"
 
 
 __all__ = [

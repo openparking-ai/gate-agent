@@ -109,7 +109,7 @@ reports "all fine", which is the lie this module exists to prevent.
 |---|---|
 | `lane` | A URL implementing the lane contract. The monitor reads `GET /v1/lane` once for identity and version, then polls `GET /v1/lane/health`. Ours or a third party's — there is no branch on which. |
 | `identity_service` | A Vehicle ID `GET /v1/health` URL. Unauthenticated by that contract's own decision: it carries no plate and no image, and a monitor holding the read credential in order to ask whether a process is alive is that credential in one more place. |
-| `platform` | The operator surface. Read with an **operator token from a file**, and its garage declared. |
+| `platform` | The operator surface, its garage declared. Read with **`garage_token_file`**: a read-only credential scoped to that garage, from a file. A tenant-wide operator token (`token_file`) is refused at startup unless `allow_tenant_wide_token = true`, because a token taken from one garage's box would control every garage of the tenant; the monitor warns at startup when it runs on one. |
 | `capture` | A capture process — this package's own second process, or anything implementing the capture half of this contract. The monitor reads `GET /v1/capture/health`, whose entries are in the **lane's shape on purpose**, so the same code reads both. This is how *"camera disconnected is a malfunction"* gets from a camera nobody can reach to a human who can go and look at it. |
 
 **Standalone is a MODE.** With no lane declared, the monitor watches whatever IS
@@ -284,7 +284,11 @@ target or sink URL is now refused at startup, by name** — *credentials come fr
 files* — and this route rebuilds the address anyway, because one check is a
 check and two is a boundary.
 
-`timeout_seconds` is how long this monitor waits for that target's answer. A
+`timeout_seconds` is how long this monitor waits for that target's answer — and
+in the agent, for a lane's read or vend answer. The BODY is read against that
+deadline, as a camera's is, so a target dripping bytes is abandoned at it rather
+than holding the one loop; the wait for the status line and headers is still
+bounded per socket read only. A
 per-site **setting** with a published default of **10 seconds**, and an
 **assumption** — nothing here measures how long a loaded Jetson takes to answer
 its own health route. What it is drawn against is the other side of the seam: a
@@ -474,7 +478,8 @@ without adding it here.
     "lane_act_refused",
     "relay_unreachable",
     "relay_refused_us",
-    "record_store_unwritable"
+    "record_store_unwritable",
+    "ticket_store_unwritable"
   ],
   "agent_cases": [
     "malfunction_active",
@@ -1086,7 +1091,7 @@ quietly already works.
 | | |
 |---|---|
 | `log` | Structured JSON to stdout, one line per notification. **Always on**, and the one sink that needs no provider, no credential and no network. |
-| `email` | SMTP, per-site host, port, from and to, **TLS by default**. |
+| `email` | SMTP, per-site host, port, from and to, **TLS by default**, and that TLS verifies the server's certificate and host name against the system trust store: a server that does not verify is a failed delivery, not retried. |
 | `webhook` | A `POST` of the notification object to a per-site URL with a bearer token from a file. This is how a third party's paging system takes the seat. |
 
 **Every sink is per-site declared and none has a default recipient.** A default
@@ -1296,9 +1301,10 @@ consumer ignores what it does not recognise.
 **One real implementation this version: an HTTP JPEG snapshot.** A `GET` of a URL
 that answers `image/jpeg`, with the credential presented through **standard HTTP
 authentication** — the challenge-response the camera itself asks for when it
-answers `401`. Both Basic and Digest are answered; which one is used is the
-camera's choice, because a client that decided for itself would need a per-camera
-setting nobody can answer correctly.
+answers `401`. **Digest is answered always, Basic over https only**: Basic is
+base64 of `user:password` in a header, so over plain http it is the password on
+the wire. A camera challenging Basic over http is `camera_refused_us`, and the
+reason names the scheme.
 
 **There is no RTSP**, and that is a decision rather than a gap: reading a stream
 needs a decoder, and this package has no dependencies at all — it runs on a box
@@ -1341,7 +1347,7 @@ Of the two default-tier cameras the lane's reference-hardware note names:
 
 | | |
 |---|---|
-| **AXIS P1465-LE** | **Supported.** Its snapshot route is `GET /axis-cgi/jpg/image.cgi`, and VAPIX authenticates with HTTP Basic or Digest — headers, never a query string. |
+| **AXIS P1465-LE** | **Supported.** Its snapshot route is `GET /axis-cgi/jpg/image.cgi`, and VAPIX authenticates with HTTP Basic or Digest — headers, never a query string. Configure it for Digest, or serve it over https for Basic. |
 | **Reolink RLC-810A** | **NOT SUPPORTED by this build.** Reolink's own support documentation gives the snapshot route as `/cgi-bin/api.cgi?cmd=Snap&…&user=…&password=…` — the credential is a query parameter, and its token alternative is a query parameter too. There is no documented header-authenticated snapshot route to use instead. A site with these cameras needs either a camera that authenticates in a header, or a later round that decides deliberately to accept a credential in a URL. This build does not decide that quietly. |
 
 **Neither claim is a measurement.** Nobody here has one of these devices. Each is
@@ -1475,7 +1481,9 @@ plausible number would be a figure that looked measured.
 `[capture] directory` — **DECLARED, no default**, and refused at startup if it is
 not there or will not take a write. It is **not created**: a path that is not
 there is a typo or a disk that did not mount, and creating it would put a site's
-captures on the root filesystem of the box the lane runs on. Writability is asked
+captures on the root filesystem of the box the lane runs on. It is made **`0700`**
+at every start and every image and sidecar is written **`0600`**; a directory
+still readable by others after tightening is refused. Writability is asked
 of the **disk** — a byte written and deleted — because the permission bits answer
 for the wrong thing on a read-only mount, a full disk and a directory with an
 ACL.
@@ -1783,6 +1791,11 @@ loopback requires `--auth-token-file`, and with a token **every route requires
 an image route left open "because it is just a JPEG" is the whole store readable
 by anyone who can enumerate a record id.
 
+**Every read surface of this package — the monitor's, the capture process's
+and the agent's — bounds its connections.** One that sits idle in any read or
+write for `service.HANDLER_TIMEOUT_SECONDS` (10) is closed, and at most
+`service.MAX_CONNECTIONS` (16) are served at once; one more is closed at once.
+
 The rule is `InsecureBind`, the same one the monitor, the lane service and the
 Vehicle ID service apply — imported here rather than restated, so three surfaces
 on one device cannot come to disagree about when a credential is required. The
@@ -1860,6 +1873,11 @@ behaviour.
 `[lanes.<name>] act_token_file` opens a barrier. The lane makes the same split
 on its side: off loopback it refuses to serve the vend route without a second
 token.
+
+**No bearer token in the clear.** A lane, target or webhook URL that carries a
+token must be `https`, or plain `http` to a loopback address (`127.0.0.0/8`,
+`::1`, `localhost`); anything else is refused at startup. Every lane, target,
+sink, camera and relay URL must be `http` or `https`.
 
 **`can_vend` is PER LANE and it is about this AGENT.** It is `true` where this
 agent holds an act token for that lane AND a key to sign a ticket with — a
@@ -1971,6 +1989,11 @@ document is a format the exit will guess at.**
 
 ### Retention
 
+The `[tickets]` directory is made **`0700`** at every start and every record is
+written **`0600`**; a directory still readable by others after tightening is
+refused. The retention purge below runs at every start and **every hour** while
+the agent is up.
+
 `[tickets] retention_days`, **published default 30** — the platform's own
 default for the stay this ticket identifies, so a site that has both does not
 hold one for a month here and a week there. **The purge DELETES**, like the
@@ -2078,6 +2101,9 @@ publishes neither is open with an empty board.
   message that cannot be drawn whole and legible on a screen — a character the
   font lacks, or a screen too small — is never drawn with a letter missing: the
   frame says `THIS LANE IS CLOSED` in every declared driver language instead.
+- **A lane that cannot be read has its fee taken down** on that poll: the last
+  fee read may be the car that has left. Its closing and board stand until the
+  lane is read again.
 - **A ticket or a fee wins over it and gives the screen BACK to it** when it
   ends — never to black on the way. Reopening the lane gives black (or the
   board).
@@ -2184,10 +2210,10 @@ ordinary path for those five and not a caveat about a rare one.
 | `restarted` | **no pending ticket survives a restart, by design** — and the record is now settled to say so at the next start, which is where this reason is written |
 | `display_unavailable` | the screen refused the frame or its geometry could not be read — at the mint of a ticket OFFERED to the driver, or on any later poll while the code was up. **Not a ticket minted for a person's `OPEN_NOW` / `OPEN_AND_FLAG`**: see below |
 | `lane_refused` | the lane considered the completion and said no. Its own code is in `lane_answer`, verbatim |
-| `lane_unreachable` | the lane did not answer the vend, or answered a 5xx. There is no `lane_answer`, because there was no answer |
+| `lane_unreachable` | the vend never reached the lane: the connection was refused, the host did not resolve or had no route. There is no `lane_answer`, because there was no answer |
 | `act_refused` | a 401, a 403 or a 404 on the vend route: the lane would not consider it at all |
 | `relay_failed` | STANDALONE — the intercom's own relay did not pulse. `relay_pulse_failed` carries the cause |
-| `outcome_unknown` | a `confirmed` record found at startup whose vend could not be settled. **Not "it did not open"** — "this build cannot say either way", and `lane_answer` carries whatever the lane did say |
+| `outcome_unknown` | a vend that may have reached the lane and got no usable answer — a timeout after it was sent, a reset, a reply that is not HTTP, a 5xx, a 202 whose body cannot be read — or a `confirmed` record found at startup whose vend could not be settled. **Not "it did not open"** — "this build cannot say either way", and `lane_answer` carries whatever the lane did say |
 | `no_act_route` | a press confirmed it at a lane this agent holds **no act token** for, so no vend was sent and none ever will be — the lane never learns of this ticket. Written at the press. It used to be left `confirmed`, and the next start wrote `outcome_unknown` over an outcome that was known |
 | `do_not_open` | the person on the call keyed `do_not_open`. A ticket left pending at that lane was one the driver's next press would have vended against what the person decided |
 
@@ -2563,7 +2589,7 @@ setting or the intercom. Reproduce: `pytest -k baresip_configuration` and
 
 | | checked at startup? | |
 |---|---|---|
-| `ctrl_tcp_listen 127.0.0.1:4444` | no — the agent reaches it, so it is on a socket by definition | Loopback. That socket can place a call, bridge two of them, and play audio at whoever is on the line. baresip's own default is every interface. |
+| `ctrl_tcp_listen 127.0.0.1:4444` | **yes**, by trying it: `[user_agent] host` must be loopback, a `ctrl_tcp_listen` that `config` reports must be loopback, and before connecting the agent tries the control port on this box's own non-loopback addresses (on Linux read from every interface, needing no route or hostname) — anything that answers there is refused by name, and **if no such address can be found the agent refuses to start** unless the user agent itself reports a loopback `ctrl_tcp_listen` | Loopback. That socket can place a call, bridge two of them, and play audio at whoever is on the line. baresip's own default is every interface. |
 | `call_hold_other_calls no` | **yes**, read from `config` | baresip's default holds every other call when a new one is established, which would put the driver on hold the moment the agent calls the operator. |
 | an audio device that is **not** `aubridge` | **yes**, `audio_source` and `audio_player` read from `config` | baresip's own module documentation says what it is, verbatim: it "can be used to connect two audio devices together, so that all output to AUPLAY device is bridged as the input to a AUSRC device". That is every call bridged to every other one whether the agent asked or not. **What it then does to this agent is NOT MEASURED and no number here depends on it** — an earlier sentence claimed the operator heard the driver before `conference` was sent, and an independent session could not reproduce it. The refusal does not rest on that claim; it rests on what the module is. |
 | modules `ctrl_tcp`, `mixausrc`, `mixminus` (and `aufile`, `account`, `menu`, `debug_cmd`) | **yes** for the first three, read from `modules` | `mixausrc` is what plays one file into ONE leg; `mixminus` is what the bridge is; `debug_cmd` is what answers the two commands this check is made of. Without them the agent can answer a call and do nothing else. |
@@ -2646,7 +2672,14 @@ the record; and **nothing is routed on it.** It is recorded as
 `caller_stated_identity`, reduced by shape rather than character for character —
 a door station sends `"Door 1" <sip:door1@10.0.0.9:5060>;tag=…` on one call and
 the bare URI on the next, and two spellings of one claim would read as two
-callers.
+callers. It is capped at 128 characters.
+
+**A refused call is expendable.** Anybody who can reach the SIP port can make
+one, so refused calls (`refused_busy`, `refused_undeclared`) hold at most an
+eighth of `[records] max_bytes` and an eighth of the events window. A refusal
+only ever pushes out an older refusal, counted in `dropped_for_space` or the
+window's `dropped`; it never evicts the record or the events of an answered
+call.
 
 A call at an account no `[intercoms.*]` owns is **refused without being
 answered**. So is one the user agent refused itself. Both are an event
@@ -3101,6 +3134,7 @@ has been taken at it.
 | `audio_missing` | the line, or the file | a file the agent reaches for is not there. Startup refuses on this, so on a running agent it is a file that has gone missing since |
 | `lane_unavailable` | the lane's name | per declared lane |
 | `record_store_unwritable` | this agent | the durable record of a call could not be written. The call goes on; the gap in the account is said here |
+| `ticket_store_unwritable` | this agent | a ticket record could not be written. A ticket whose issue could not be recorded is not shown or offered, and the call goes on to a person; a later write that fails is said here and the call goes on |
 
 Nothing here is `never_alarm`: every member is a reason somebody at a barrier
 cannot be helped.

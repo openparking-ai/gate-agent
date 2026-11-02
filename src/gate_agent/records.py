@@ -123,6 +123,13 @@ TEMP_PREFIX = ".tmp-"
 #: store touches is named for its kind, so two kinds can share one directory.
 KINDS = {"m": "messages", "c": "calls"}
 
+#: The most of `max_bytes` that EXPENDABLE records may take, as a divisor: an
+#: eighth. A call refused unanswered is expendable -- anybody who can reach the
+#: SIP port can make one -- and a flood of them used to evict, oldest first, the
+#: records of calls that were answered. Now a refusal only ever evicts another
+#: refusal, and refusals together never hold more than this share.
+EXPENDABLE_SHARE_DIVISOR = 8
+
 #: Where the records go when a site does not say: one directory under this
 #: package's state directory, shared by the monitor and the agent -- which is
 #: safe because every file in it is named for its kind and each kind is locked.
@@ -151,6 +158,35 @@ def redact_addresses(text: str) -> str:
     is reduced here, once, before anything can log it.
     """
     return ADDRESS.sub("<address>", text)
+
+
+def make_private(directory: Path) -> None:
+    """Group and other lose everything on `directory`, or this raises.
+
+    The rule `RecordStore.open` applies to its own directory, for the ticket
+    store and the capture store: the owner's bits are left as they are, and a
+    directory that is STILL readable by anybody else afterwards -- one this
+    process does not own, say -- is refused rather than used open.
+    """
+    mode = stat.S_IMODE(os.stat(directory).st_mode)
+    if mode & 0o077:
+        os.chmod(directory, mode & 0o700)
+        log.warning("%s was %04o; tightened to %04o", directory, mode, mode & 0o700)
+    if stat.S_IMODE(os.stat(directory).st_mode) & 0o077:
+        raise PermissionError(
+            f"{directory} is readable by more than its owner and could not be made 0700"
+        )
+
+
+def write_private(path: Path, data: bytes) -> None:
+    """`data` to a NEW file at `path`, `0600` whatever the umask, and synced."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # AND SET: `os.open`'s mode is filtered by the umask.
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def new_record_id(kind: str) -> str:
@@ -285,6 +321,7 @@ class _Entry:
     size: int
     unfinished: bool
     key: str | None = None
+    expendable: bool = False
 
 
 def _utc_now() -> datetime:
@@ -309,6 +346,7 @@ class RecordStore:
         lane_key: str,
         unfinished: Callable[[dict], bool],
         key: Callable[[dict], str | None] | None = None,
+        expendable: Callable[[dict], bool] | None = None,
         retention_days: int = DEFAULT_RECORD_RETENTION_DAYS,
         max_bytes: int = DEFAULT_RECORD_MAX_BYTES,
         now: Callable[[], datetime] = _utc_now,
@@ -323,6 +361,7 @@ class RecordStore:
         self._lane_key = lane_key
         self._unfinished = unfinished
         self._key = key or (lambda body: None)
+        self._expendable = expendable or (lambda body: False)
         self._now = now
         self._file = re.compile(rf"^{kind}-[0-9a-f]{{32}}\.json$")
         self._head_name = f"head.{KINDS[kind]}.json"
@@ -344,6 +383,10 @@ class RecordStore:
         #: not by the order things were written in.
         self._by_age: list[tuple[datetime, str]] = []
         self._bytes = 0
+        #: The same, for EXPENDABLE records only: their own oldest-first order
+        #: and their own byte count, so they are bounded as a share.
+        self._expendable_by_age: list[tuple[datetime, str]] = []
+        self._expendable_bytes = 0
         self._revision = 0
         #: The highest revision of any record REMOVED -- for age or for space.
         #: A consumer whose `since` is below it may have missed that record, and
@@ -464,6 +507,8 @@ class RecordStore:
         self._by_age.clear()
         self._by_key.clear()
         self._bytes = 0
+        self._expendable_by_age.clear()
+        self._expendable_bytes = 0
         self._unreadable = 0
         head = self._read_head()
         found: list[tuple[int, str, _Entry]] = []
@@ -516,12 +561,16 @@ class RecordStore:
             size=size,
             unfinished=bool(self._unfinished(body)),
             key=self._key(body),
+            expendable=bool(self._expendable(body)),
         )
 
     def _insert(self, record_id: str, entry: _Entry) -> None:
         self._index[record_id] = entry
         bisect.insort(self._by_age, (entry.moment, record_id))
         self._bytes += entry.size
+        if entry.expendable:
+            bisect.insort(self._expendable_by_age, (entry.moment, record_id))
+            self._expendable_bytes += entry.size
         if entry.key is not None:
             self._by_key.setdefault(entry.key, set()).add(record_id)
 
@@ -578,6 +627,7 @@ class RecordStore:
             size=size,
             unfinished=bool(self._unfinished(body)),
             key=self._key(body),
+            expendable=bool(self._expendable(body)),
         )
 
     def _write_bytes(self, path: Path, data: bytes) -> None:
@@ -644,19 +694,27 @@ class RecordStore:
 
         Never the record just written: a store that dropped what it was asked to
         keep in order to keep it would be a write that succeeded and vanished.
+
+        **Unless it is EXPENDABLE.** An expendable record makes room only among
+        expendable records -- itself included, when it is the only one -- and
+        never by evicting one that is not; and expendable records together stay
+        under `max_bytes // EXPENDABLE_SHARE_DIVISOR`.
         """
         dropped = 0
-        while self._bytes > self.max_bytes and len(self._index) > 1:
+        expendable = self._index[keep].expendable
+        if expendable:
+            share = self.max_bytes // EXPENDABLE_SHARE_DIVISOR
+            while self._expendable_by_age and (
+                self._expendable_bytes > share or self._bytes > self.max_bytes
+            ):
+                moment, record_id = self._expendable_by_age[0]
+                self._drop_for_space(moment, record_id)
+                dropped += 1
+        while not expendable and self._bytes > self.max_bytes and len(self._index) > 1:
             moment, record_id = self._by_age[0]
             if record_id == keep:
                 moment, record_id = self._by_age[1]
-            self._remove(record_id)
-            self._dropped_for_space += 1
-            self._last_dropped_at = self._now().isoformat()
-            if self._dropped_through is None or moment > datetime.fromisoformat(
-                self._dropped_through
-            ):
-                self._dropped_through = moment.isoformat()
+            self._drop_for_space(moment, record_id)
             dropped += 1
         if dropped:
             self._safe_head()
@@ -665,10 +723,22 @@ class RecordStore:
                 dropped, self.max_bytes,
             )
 
+    def _drop_for_space(self, moment: datetime, record_id: str) -> None:
+        self._remove(record_id)
+        self._dropped_for_space += 1
+        self._last_dropped_at = self._now().isoformat()
+        if self._dropped_through is None or moment > datetime.fromisoformat(
+            self._dropped_through
+        ):
+            self._dropped_through = moment.isoformat()
+
     def _forget(self, record_id: str) -> _Entry:
         entry = self._index.pop(record_id)
         self._by_age.remove((entry.moment, record_id))
         self._bytes -= entry.size
+        if entry.expendable:
+            self._expendable_by_age.remove((entry.moment, record_id))
+            self._expendable_bytes -= entry.size
         if entry.key is not None:
             same = self._by_key.get(entry.key)
             if same is not None:

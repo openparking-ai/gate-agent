@@ -280,6 +280,13 @@ class Monitor:
         something it cannot interpret.
         """
         self._open_records_store()
+        for target in self.config.targets:
+            if target.tenant_wide_token:
+                log.warning(
+                    "%s is read with a tenant-wide operator token (allow_tenant_wide_token): "
+                    "whoever takes it from this box controls every garage of the tenant",
+                    target.name,
+                )
         try:
             for target in self.config.targets:
                 self._read_identity(target)

@@ -64,7 +64,7 @@ from enum import Enum, auto
 from pathlib import Path
 from time import monotonic
 
-from .act import LaneActClient, LaneActRefusedUs, LaneUnreachable
+from .act import LaneActClient, LaneActRefusedUs, LaneOutcomeUnknown, LaneUnreachable
 from .board import (
     Rotation,
     board_frame_for,
@@ -105,6 +105,7 @@ from .display import DisplayUnavailable, Frame, frame_for, frame_wanted
 from .fee import FeeScreen, fee_frame_for, screen_for
 from .lines import DISPLAY_TEXT, UNKNOWN_REFUSAL, audio_name
 from .records import (
+    EXPENDABLE_SHARE_DIVISOR,
     RecordQuery,
     RecordStore,
     RecordStoreInUse,
@@ -113,7 +114,16 @@ from .records import (
 )
 from .relay import RelayRefusedUs, RelayUnreachable
 from .relay import build as relay_build
-from .tickets import CONFIRMED, ISSUED, TicketStore, confirmed, mint, vended, voided
+from .tickets import (
+    CONFIRMED,
+    ISSUED,
+    TicketStore,
+    TicketStoreUnwritable,
+    confirmed,
+    mint,
+    vended,
+    voided,
+)
 from .tickets import TicketRecord as _TicketRecord
 from .tickets import told as _told
 from .ua import (
@@ -132,6 +142,21 @@ log = logging.getLogger(__name__)
 #: attempt is `nothing usable`. Two, and it is fixed rather than per-site: it is
 #: a property of how a person uses a keypad, not of a garage.
 REPROMPTS = 2
+
+#: How often the ticket store's retention purge runs while the agent is up, in
+#: seconds of the agent's own clock. It also runs at every start. An hour: the
+#: rule is counted in days, and an agent that runs for months must still apply it.
+TICKET_PURGE_SECONDS = 3600.0
+
+#: The longest `caller_stated_identity` kept, in characters. The `From` is the
+#: caller's own string; a declared door's is a short SIP URI.
+MAX_CALLER_IDENTITY_CHARS = 128
+
+#: The events a call REFUSED unanswered writes. Anybody who can reach the SIP
+#: port can make them, so they hold a bounded share of the event window.
+REFUSED_CALL_KINDS = frozenset(
+    {AgentEventKind.CALL_REFUSED_BUSY.value, AgentEventKind.CALL_FROM_UNDECLARED_INTERCOM.value}
+)
 
 #: The sample rate of every file this agent plays. What a narrowband SIP call
 #: carries, and what `scripts/build_audio.py` writes.
@@ -462,6 +487,8 @@ class Agent:
             if config.tickets is not None
             else None
         )
+        #: When the retention purge is next due. `open` runs it at start.
+        self._ticket_purge_due = self._clock() + TICKET_PURGE_SECONDS
         #: Keyed on the account a call ARRIVES AT, which is what identifies the
         #: intercom. Never on the `From`: that is a string the caller writes.
         self._by_account = {
@@ -484,6 +511,10 @@ class Agent:
             time_key="started_at",
             lane_key="lane",
             unfinished=call_record_unfinished,
+            # A call REFUSED unanswered is expendable: anybody who can reach
+            # the SIP port can make one, so refusals are bounded as a share of
+            # the store and never evict the record of a call that was answered.
+            expendable=lambda body: body.get("disposition") != CallDisposition.ANSWERED.value,
             retention_days=config.records.retention_days,
             max_bytes=config.records.max_bytes,
             now=lambda: datetime.fromisoformat(self._now()),
@@ -543,6 +574,7 @@ class Agent:
             # about: a store that cannot be opened is a configuration this
             # process must not run on, and finding out costs a `mkdir`.
             self._store.open(datetime.fromisoformat(self._now()))
+            self._code(AgentCode.TICKET_STORE_UNWRITABLE, self.config.agent_id, HealthState.OK)
             self._reconcile()
         self.ua.start()
         self._release_leftover_calls()
@@ -609,7 +641,7 @@ class Agent:
             if record is None or record.state not in (ISSUED, CONFIRMED):
                 continue
             if record.state == ISSUED:
-                self._store.write(voided(record, self._now(), "restarted"))
+                self._write_ticket(voided(record, self._now(), "restarted"))
                 self._record(
                     AgentEventKind.TICKET_VOIDED,
                     lane=record.lane,
@@ -617,7 +649,14 @@ class Agent:
                     reason="restarted",
                 )
                 continue
-            self._replay_vend(record)
+            try:
+                self._replay_vend(record)
+            except Exception:  # noqa: BLE001
+                # ONE RECORD, settled on its own. Whatever a replay raised, this
+                # build does not know whether that barrier opened, and the next
+                # record -- and the agent starting at all -- must not wait on it.
+                log.exception("a confirmed ticket could not be settled; outcome unknown")
+                self._unknown_outcome(record, None)
 
     def _replay_vend(self, record) -> None:
         """One `confirmed` record, settled against the lane that holds the stay."""
@@ -644,7 +683,7 @@ class Agent:
         if not answer.commanded:
             return self._unknown_outcome(record, answer.code)
         cursor = None if answer.event_cursor is None else str(answer.event_cursor)
-        self._store.write(vended(record, self._now(), cursor))
+        self._write_ticket(vended(record, self._now(), cursor))
         log.warning("a confirmed ticket left by a previous process settled as vended")
         self._record(
             AgentEventKind.VEND_COMMANDED,
@@ -655,7 +694,7 @@ class Agent:
         )
 
     def _unknown_outcome(self, record, answer: str | None) -> None:
-        self._store.write(voided(record, self._now(), "outcome_unknown", answer))
+        self._write_ticket(voided(record, self._now(), "outcome_unknown", answer))
         self._record(
             AgentEventKind.TICKET_VOIDED,
             lane=record.lane,
@@ -840,6 +879,21 @@ class Agent:
         self._follow_lanes()
         self._turn_boards()
         self._advance()
+        self._purge_tickets()
+
+    def _purge_tickets(self) -> None:
+        """The ticket retention rule, applied while running and not only at start.
+
+        It used to run in `open` alone, so an agent up for months kept every
+        ticket record it wrote for months, whatever `retention_days` said.
+        """
+        if self._store is None or self._clock() < self._ticket_purge_due:
+            return
+        self._ticket_purge_due = self._clock() + TICKET_PURGE_SECONDS
+        try:
+            self._store.purge(datetime.fromisoformat(self._now()))
+        except OSError as exc:
+            log.error("the ticket retention purge could not run: %s", exc)
 
     def _reconnect(self) -> None:
         """Try to get the control socket back, and deal with what was missed.
@@ -947,15 +1001,18 @@ class Agent:
     def _read_fee(self, lane) -> None:
         """The lane's `exit_fee`, as the screen it becomes. GET only.
 
-        A lane that cannot be read has said NOTHING, so what this agent last
-        read stands: the fee stays up until the lane says it came down. A lane
-        on a version this build does not read has its fee dropped -- a payload
+        A lane that cannot be read has its FEE taken down. A fee is about the
+        car at the barrier, and the last one read may be the car that has left:
+        a fee left up is shown to whoever pulls up next. The closing and the
+        board are the owner's and stand until the lane is read again. A lane on
+        a version this build does not read has its fee dropped too -- a payload
         this cannot interpret is not drawn from.
         """
         try:
             state = self._clients[lane.name].get("/v1/lane/state")
         except (TargetUnreachable, TargetRefusedUs) as exc:
             log.warning("lane %s: the fee could not be read: %s", lane.name, exc)
+            self._fees[lane.name] = None
             return
         if state.get("contract_version") not in KNOWN_LANE_VERSIONS:
             self._fees[lane.name] = None
@@ -1274,7 +1331,11 @@ class Agent:
             # as well as the same idempotency key.
             decision_at=decision_at,
         )
-        self._store.write(record)
+        if not self._write_ticket(record):
+            # NOT ISSUED. The record exists before the screen does and before a
+            # barrier moves, so a ticket that could not be recorded is not shown
+            # and not offered; the call goes to a person as with no ticket.
+            return
         pending = Pending(
             ticket=ticket,
             payload=payload,
@@ -1287,7 +1348,7 @@ class Agent:
             told_at=told_at,
         )
         if show and not self._show(pending) and screen_required:
-            self._store.write(
+            self._write_ticket(
                 voided(record, self._now(), "display_unavailable")
             )
             self._record(
@@ -1308,6 +1369,18 @@ class Agent:
             case=case.value,
             ticket_id=ticket.ticket_id,
         )
+
+    def _write_ticket(self, record) -> bool:
+        """One ticket record. A store that refuses is a CODE, not an exception
+        out of the middle of a call; `False` says it was not written."""
+        try:
+            self._store.write(record)
+        except TicketStoreUnwritable as exc:
+            log.error("ticket %s could not be recorded: %s", record.ticket_id, exc)
+            self._code(AgentCode.TICKET_STORE_UNWRITABLE, self.config.agent_id, HealthState.ACTIVE)
+            return False
+        self._code(AgentCode.TICKET_STORE_UNWRITABLE, self.config.agent_id, HealthState.OK)
+        return True
 
     def _call_being_spoken_at(self, door: str | None) -> Session | None:
         """A live call at this door that has not reached a person yet.
@@ -1490,7 +1563,7 @@ class Agent:
             return
         record = self._store.read(pending.ticket.ticket_id)
         if record is not None:
-            self._store.write(voided(record, self._now(), reason, answer))
+            self._write_ticket(voided(record, self._now(), reason, answer))
         self._record(
             AgentEventKind.TICKET_VOIDED,
             lane=lane,
@@ -1756,7 +1829,7 @@ class Agent:
         at = self._now()
         record = self._store.read(pending.ticket.ticket_id) if self._store else None
         if record is not None:
-            self._store.write(_told(record, at))
+            self._write_ticket(_told(record, at))
         self._pending[pending.lane] = replace(still, told_at=at)
 
     def _confirm_ticket(self, session: Session, intercom: Intercom) -> None:
@@ -1785,7 +1858,7 @@ class Agent:
         )
         record = self._store.read(pending.ticket.ticket_id)
         if record is not None:
-            self._store.write(confirmed(record, self._now()))
+            self._write_ticket(confirmed(record, self._now()))
         self._record(
             AgentEventKind.TICKET_CONFIRMED,
             intercom=intercom.sip_uri,
@@ -1848,7 +1921,12 @@ class Agent:
         except LaneUnreachable as exc:
             log.error("lane %s could not be asked to vend: %s", pending.lane, exc)
             self._code(AgentCode.LANE_UNAVAILABLE, pending.lane, HealthState.ACTIVE)
-            self._finish_ticket(pending, "lane_unreachable", None)
+            # `lane_unreachable` ONLY where nothing reached the lane. A request
+            # that may have -- a timeout after it was sent, a 5xx, a 202 that
+            # could not be read -- is `outcome_unknown`: the barrier may have
+            # been asked to open, and this build does not guess either way.
+            unknown = isinstance(exc, LaneOutcomeUnknown)
+            self._finish_ticket(pending, "outcome_unknown" if unknown else "lane_unreachable", None)
             if person:
                 return self._person_refused(
                     session, pending, ("operator_case.lane_unavailable",)
@@ -1859,7 +1937,7 @@ class Agent:
         if answer.commanded:
             record = self._store.read(pending.ticket.ticket_id)
             if record is not None:
-                self._store.write(
+                self._write_ticket(
                     vended(
                         record,
                         self._now(),
@@ -1995,7 +2073,7 @@ class Agent:
         """A confirmed ticket that did not vend. The record says so."""
         record = self._store.read(pending.ticket.ticket_id) if self._store else None
         if record is not None:
-            self._store.write(voided(record, self._now(), reason, answer))
+            self._write_ticket(voided(record, self._now(), reason, answer))
 
     def _durations_for_lines(self) -> frozenset[str]:
         """Which operator lines this build has words for, for the ONE language
@@ -2427,7 +2505,7 @@ class Agent:
                 # VENDED, and `lane_answer` is `None`: there is no lane here and
                 # nothing answered but the relay. A record left `issued` would
                 # be one a restart voids `restarted` over a barrier that moved.
-                self._store.write(vended(record, self._now(), None))
+                self._write_ticket(vended(record, self._now(), None))
             self._record(
                 AgentEventKind.RELAY_PULSED,
                 for_call=pulse.call_id,
@@ -2446,7 +2524,7 @@ class Agent:
         else:
             log.error("the relay at %s did not pulse: %s", pulse.intercom, pulse.outcome)
             if record is not None:
-                self._store.write(voided(record, self._now(), "relay_failed"))
+                self._write_ticket(voided(record, self._now(), "relay_failed"))
             self._record(
                 AgentEventKind.RELAY_PULSE_FAILED,
                 for_call=pulse.call_id,
@@ -2884,6 +2962,15 @@ class Agent:
             display=fields.get("display"),
             geometry=fields.get("geometry"),
         )
+        if event.kind in REFUSED_CALL_KINDS:
+            # A refusal pushes out another refusal once refusals hold their
+            # share of the window, never the events of an answered call: an
+            # INVITE flood must not erase the audit trail of a real one.
+            refused = [i for i, (_seq, one) in enumerate(self._log)
+                       if one.kind in REFUSED_CALL_KINDS]
+            if len(refused) >= max(1, (self._log.maxlen or 1) // EXPENDABLE_SHARE_DIVISOR):
+                del self._log[refused[0]]
+                self._dropped += 1
         if len(self._log) == self._log.maxlen:
             self._dropped += 1
         self._cursor += 1
@@ -3099,7 +3186,15 @@ def _bare_uri(peer: str | None) -> str:
     unit sends `"Door 1" <sip:door1@10.0.0.9:5060>;tag=…` on one call and
     `sip:door1@10.0.0.9` on the next, and two spellings of one claim would read
     as two callers. Reduced by SHAPE, once, here.
+
+    And CAPPED at `MAX_CALLER_IDENTITY_CHARS`: the `From` is the caller's own
+    string, and an unbounded one is a record anybody can make as large as a
+    SIP packet allows.
     """
+    return _reduced(peer)[:MAX_CALLER_IDENTITY_CHARS]
+
+
+def _reduced(peer: str | None) -> str:
     if not peer:
         return ""
     text = peer.strip()

@@ -72,6 +72,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .contract import RecordRef
+from .records import make_private, write_private
 
 log = logging.getLogger(__name__)
 
@@ -259,6 +260,15 @@ class CaptureStore:
                 "that is not there is a typo or a disk that did not mount, and creating it would "
                 "put a site's captures on the root filesystem of the box the lane runs on."
             )
+        try:
+            # PRIVATE: `0700`, and every image and sidecar `0600`. A capture is
+            # a photograph of whoever was at the barrier.
+            make_private(self.directory)
+        except OSError as exc:
+            raise StoreUnwritable(
+                f"{self.directory} could not be made private (0700): {exc}. It holds "
+                "photographs of people at a barrier, so it is not used open."
+            ) from exc
         self.probe()
         self.rebuild()
 
@@ -707,10 +717,7 @@ def _write_atomic_body(path: Path, body: bytes) -> None:
     empty or truncated image -- which is worse than the crash this design is
     built for, because it looks complete.
     """
-    with open(path, "wb") as handle:
-        handle.write(body)
-        handle.flush()
-        os.fsync(handle.fileno())
+    write_private(path, body)
 
 
 def _read_record(record_id: str, image: Path, sidecar: Path) -> Record | None:

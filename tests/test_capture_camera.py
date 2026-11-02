@@ -36,14 +36,11 @@ def states(process):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("scheme", ["digest", "basic"])
+@pytest.mark.parametrize("scheme", ["digest"])
 def test_the_credential_is_presented_the_way_the_camera_asks_for_it(scheme, tmp_path):
-    """The camera chooses the scheme. This client answers whichever it is asked.
+    """The camera asks; this client answers Digest, which never sends the password.
 
-    Both are what the vendor documentation for the supported camera names, and
-    WHICH one a given unit demands is that unit's business -- a client that
-    decided for itself would need a per-camera configuration key nobody can
-    answer correctly.
+    Basic is answered over https only -- see the next test.
     """
     camera = FakeCamera(scheme=scheme)
     with serving(camera_server(camera)) as base:
@@ -57,6 +54,32 @@ def test_the_credential_is_presented_the_way_the_camera_asks_for_it(scheme, tmp_
     assert camera.authorizations[0] is None, "the credential was sent unchallenged"
     assert len(camera.authorizations) >= 2, "there was no challenge and no retry"
     assert camera.authorizations[-1].lower().startswith(scheme)
+
+
+def test_a_basic_challenge_over_plain_http_is_refused_and_never_answered():
+    """OP-4-8. Basic over http is the password on the wire, so it is not sent."""
+    camera = FakeCamera(scheme="basic")
+    with serving(camera_server(camera)) as base:
+        reader = SnapshotCamera("front", f"{base}/snapshot", "operator", "s3cret", timeout=5)
+        with pytest.raises(CameraRefusedUs) as refused:
+            reader.snapshot()
+    assert refused.value.status == 401
+    assert "Basic" in str(refused.value)
+    assert not any(header and header.lower().startswith("basic")
+                   for header in camera.authorizations), camera.authorizations
+
+
+def test_basic_is_answered_over_https_only():
+    """The control, at the opener: an https camera may be answered with Basic."""
+    import urllib.request
+
+    def schemes(url):
+        reader = SnapshotCamera("front", url, "operator", "s3cret", timeout=5)
+        return {type(handler) for handler in reader._opener.handlers}
+
+    assert urllib.request.HTTPBasicAuthHandler in schemes("https://192.0.2.10/snap.jpg")
+    assert urllib.request.HTTPBasicAuthHandler not in schemes("http://192.0.2.10/snap.jpg")
+    assert urllib.request.HTTPDigestAuthHandler in schemes("http://192.0.2.10/snap.jpg")
 
 
 def test_a_wrong_credential_is_a_refusal_and_not_a_dead_camera(tmp_path):

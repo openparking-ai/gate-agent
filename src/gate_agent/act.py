@@ -40,13 +40,17 @@ disagree with the one the barrier actually obeys.
 
 from __future__ import annotations
 
+import errno
+import http.client
 import json
 import logging
+import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from .redirects import open_url
+from .redirects import open_url, read_before
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +77,27 @@ class LaneUnreachable(Exception):
     answer: a person. Split from the refusal below because THAT one means the
     lane is up and said no, which is a different repair on a different machine.
     """
+
+
+class LaneOutcomeUnknown(LaneUnreachable):
+    """The request may have REACHED the lane, and no usable answer came back.
+
+    A timeout after connecting, a reset, a reply that is not HTTP, a `5xx`, a
+    `202` whose body cannot be read. The lane may have accepted the vend and
+    the barrier may have been asked to open, so this is never recorded as a
+    lane that was not reached: the record says `outcome_unknown`.
+    """
+
+
+#: Failures that happen BEFORE a request can reach the lane: nothing was sent.
+_NOT_SENT_ERRNOS = frozenset({errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EADDRNOTAVAIL})
+
+
+def _never_sent(exc: urllib.error.URLError) -> bool:
+    reason = exc.reason
+    if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):
+        return True
+    return isinstance(reason, OSError) and reason.errno in _NOT_SENT_ERRNOS
 
 
 class LaneActRefusedUs(Exception):
@@ -171,31 +196,50 @@ class LaneActClient:
         # side: a key this agent invented per attempt would be unique per
         # request, which is the same as having none.
         request.add_header("Idempotency-Key", idempotency_key)
+        # A DEADLINE ON THE WHOLE ANSWER, not only on each socket read: one
+        # slow lane must not hold the agent's single loop (`read_before`).
+        deadline = time.monotonic() + self.timeout
         try:
             with open_url(request, timeout=self.timeout) as response:
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                raw = read_before(response, MAX_RESPONSE_BYTES, deadline)
                 status = response.status
         except urllib.error.HTTPError as exc:
-            raw = exc.read(MAX_RESPONSE_BYTES + 1)
             status = exc.code
+            try:
+                raw = read_before(exc, MAX_RESPONSE_BYTES, deadline)
+            except (OSError, http.client.HTTPException, ValueError):
+                # The STATUS is the answer for every refusal but a 409, and a
+                # 409 with no readable body names no code: unreachable, below.
+                raw = b""
             if status >= 500:
-                raise LaneUnreachable(f"the lane answered HTTP {status}") from exc
+                # The lane took the request and failed somewhere in it, which
+                # may be after it asked the barrier to open.
+                raise LaneOutcomeUnknown(f"the lane answered HTTP {status}") from exc
             if status != 409:
                 # 401, 403, 404 and anything else that is not a named refusal.
                 raise LaneActRefusedUs(
                     f"the lane answered HTTP {status} to a vend", status
                 ) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise LaneUnreachable(f"the lane could not be reached: {exc}") from exc
+        except urllib.error.URLError as exc:
+            if _never_sent(exc):
+                raise LaneUnreachable(f"the lane could not be reached: {exc}") from exc
+            raise LaneOutcomeUnknown(f"the vend may have reached the lane: {exc}") from exc
+        except (TimeoutError, OSError, http.client.HTTPException, ValueError) as exc:
+            # AFTER the request went out: a timeout waiting for the answer, a
+            # reset, a reply that is not HTTP. Whether the lane acted is unknown.
+            raise LaneOutcomeUnknown(f"the vend may have reached the lane: {exc}") from exc
 
+        # From here the lane ANSWERED. A body this build cannot read is a refusal
+        # it cannot name on a 409, and an outcome it cannot know on anything else.
+        unreadable = LaneUnreachable if status == 409 else LaneOutcomeUnknown
         if len(raw) > MAX_RESPONSE_BYTES:
-            raise LaneUnreachable("the lane answered more than a vend answer can be")
+            raise unreadable("the lane answered more than a vend answer can be")
         try:
             payload = json.loads(raw)
         except ValueError as exc:
-            raise LaneUnreachable("the lane answered something that is not JSON") from exc
+            raise unreadable("the lane answered something that is not JSON") from exc
         if not isinstance(payload, dict):
-            raise LaneUnreachable("the lane answered something that is not an object")
+            raise unreadable("the lane answered something that is not an object")
 
         if status == 409:
             code = payload.get("code")
@@ -211,7 +255,7 @@ class LaneActClient:
                 malfunction=malfunction if isinstance(malfunction, str) else None,
             )
         if status != 202:
-            raise LaneUnreachable(f"the lane answered HTTP {status} to a vend")
+            raise LaneOutcomeUnknown(f"the lane answered HTTP {status} to a vend")
         cursor = payload.get("event_cursor")
         transit = payload.get("transit")
         return VendAnswer(
@@ -228,6 +272,7 @@ __all__ = [
     "VEND_PATH",
     "LaneActClient",
     "LaneActRefusedUs",
+    "LaneOutcomeUnknown",
     "LaneUnreachable",
     "VendAnswer",
 ]

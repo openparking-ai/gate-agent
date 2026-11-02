@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import smtplib
+import ssl
 import sys
 import urllib.error
 import urllib.request
@@ -230,6 +231,14 @@ class EmailSink:
                 # Worth another try only if some recipient was told "later".
                 transient=any(smtp_transient(code) for code in codes),
             ) from exc
+        except ssl.SSLCertVerificationError as exc:
+            # REFUSED, not retried: a server whose certificate does not verify
+            # is not the server this site declared until somebody looks.
+            raise DeliveryFailed(
+                f"{self.name}: the server's TLS certificate did not verify: "
+                f"{exc.verify_message}",
+                transient=False,
+            ) from exc
         except smtplib.SMTPResponseException as exc:
             raise DeliveryFailed(
                 f"{self.name}: the server answered SMTP {exc.smtp_code}: "
@@ -359,7 +368,14 @@ class _ReplyKeepingSMTP(smtplib.SMTP):
 def _smtp(config: EmailSinkConfig):
     server = _ReplyKeepingSMTP(config.host, config.port, timeout=SMTP_TIMEOUT)
     if config.tls:
-        server.starttls()
+        # VERIFIED: the certificate chain and the host name. `starttls()` with
+        # no context encrypts to whoever answers, so anybody on the path could
+        # read every page this monitor sends -- and send it nowhere.
+        try:
+            server.starttls(context=ssl.create_default_context())
+        except BaseException:
+            server.close()
+            raise
     return server
 
 
